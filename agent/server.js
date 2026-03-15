@@ -148,7 +148,7 @@ function buildTasksJson(name) {
         }
       },
       runOptions: { runOn: "folderOpen" },
-      presentation: { reveal: "always", focus: true },
+      presentation: { reveal: "always", focus: true, panel: "dedicated" },
       isBackground: true,
       problemMatcher: []
     }]
@@ -218,6 +218,8 @@ function openProjectInEditor(name) {
   let settings = {};
   try { settings = JSON.parse(fs.readFileSync(settingsFile, 'utf8')); } catch {}
   settings['task.allowAutomaticTasks'] = 'on';
+  // Prevent PowerShell Extension from stealing focus from claude-tmux task terminal
+  settings['powershell.integratedConsole.startInBackground'] = true;
   fs.writeFileSync(settingsFile, JSON.stringify(settings, null, 2));
 
   // Track this project for future cleanup (persisted to file)
