@@ -336,10 +336,39 @@ async function sendHeartbeat() {
   }
 }
 
+// --- Boot readiness: wait for tmux before accepting commands ---
+
+let tmuxReady = false;
+
+function checkTmux() {
+  return new Promise((resolve) => {
+    exec(`"${BASH_PATH}" -lc "tmux -V"`, (err) => resolve(!err));
+  });
+}
+
+async function waitForTmux(maxWaitMs = 60_000) {
+  const start = Date.now();
+  const interval = 2_000;
+  while (Date.now() - start < maxWaitMs) {
+    if (await checkTmux()) {
+      tmuxReady = true;
+      console.log(`[boot] tmux ready (${Math.round((Date.now() - start) / 1000)}s after start)`);
+      return;
+    }
+    await new Promise((r) => setTimeout(r, interval));
+  }
+  // Proceed anyway after timeout — tmux may still work by the time user opens a project
+  tmuxReady = true;
+  console.warn(`[boot] tmux not detected after ${maxWaitMs / 1000}s, proceeding anyway`);
+}
+
 // --- Start ---
 
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`Button Agent listening on port ${PORT}`);
+
+  // Wait for tmux/MSYS2 to be ready before starting heartbeat
+  await waitForTmux();
 
   // Start heartbeat loop
   if (VERCEL_URL && AGENT_SECRET) {
