@@ -237,17 +237,55 @@ function openProjectInEditor(name) {
       }
       console.log(`[proj] Created tmux session: ${session}`);
 
-      // Wait for Claude to initialize, then send Enter + /remote-control
-      setTimeout(() => {
-        exec(`"${BASH_PATH}" -lc "tmux send-keys -t ${session} Enter"`, () => {
-          setTimeout(() => {
+      // Poll tmux pane until Claude prompt appears, then send /remote-control
+      const MAX_WAIT = 30000;
+      const POLL_INTERVAL = 1000;
+      const startTime = Date.now();
+
+      function waitForClaude() {
+        if (Date.now() - startTime > MAX_WAIT) {
+          console.error(`[proj] Claude did not start within ${MAX_WAIT / 1000}s in ${session}`);
+          return;
+        }
+        // Capture last 5 lines of tmux pane to check for Claude's prompt
+        exec(`"${BASH_PATH}" -lc "tmux capture-pane -t ${session} -p | tail -5"`, (err, stdout) => {
+          if (err) {
+            console.error('[proj] capture-pane error:', err.message);
+            return;
+          }
+          const output = (stdout || '').trim();
+          // Claude shows ">" prompt or "╭" box when ready
+          const isReady = output.includes('>') || output.includes('╭') || output.includes('human');
+          if (isReady) {
+            const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+            console.log(`[proj] Claude ready in ${elapsed}s, sending /remote-control`);
             exec(`"${BASH_PATH}" -lc "tmux send-keys -t ${session} '/remote-control' Enter"`, (err) => {
               if (err) console.error('[proj] /remote-control send error:', err.message);
               else console.log(`[proj] Sent /remote-control to ${session}`);
+
+              // Health check: verify Claude is still alive after /remote-control
+              setTimeout(() => {
+                exec(`"${BASH_PATH}" -lc "tmux capture-pane -t ${session} -p | tail -10"`, (err, stdout) => {
+                  if (err) {
+                    console.error('[proj] health-check capture error:', err.message);
+                    return;
+                  }
+                  const pane = (stdout || '').trim();
+                  const alive = !pane.includes('$') || pane.includes('remote');
+                  console.log(`[proj] Health check (${session}): ${alive ? 'OK' : 'Claude may have exited'}`);
+                  if (!alive) console.log(`[proj] Pane content:\n${pane}`);
+                });
+              }, 5000);
             });
-          }, 2000);
+          } else {
+            console.log(`[proj] Waiting for Claude... (${((Date.now() - startTime) / 1000).toFixed(0)}s) last: ${output.slice(-80)}`);
+            setTimeout(waitForClaude, POLL_INTERVAL);
+          }
         });
-      }, 3000);
+      }
+
+      // Start polling after initial delay for Claude binary to load
+      setTimeout(waitForClaude, 2000);
     });
 
     // Open editor

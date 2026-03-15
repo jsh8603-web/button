@@ -41,7 +41,7 @@ web/                          → Next.js 웹앱 (Vercel 배포)
   middleware.ts               → JWT 구조 검증 (Edge Runtime, /api/auth·heartbeat 제외)
 
 agent/                        → PC Agent (Express, Windows 서비스)
-  server.js                   → 메인 서버 + heartbeat 루프 + 프로젝트 관리
+  server.js                   → 메인 서버 + heartbeat 루프 + 프로젝트 관리 (tmux 폴링으로 Claude 준비 감지)
   close-window.ps1            → 윈도우 창 닫기 (Win32 EnumWindows + WM_CLOSE)
   maximize-window.ps1         → 윈도우 창 최대화 (Win32 ShowWindow, 폴링)
   kill-sessions.sh            → btn-* tmux 세션 정리 (Ctrl+C → /exit → kill)
@@ -67,7 +67,7 @@ cd agent && node server.js    # Agent 실행
 
 ## 환경변수
 - `web/.env.local`: PIN_HASH, JWT_SECRET, PC_HOST, PC_MAC, WOL_PORT, AGENT_SECRET, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
-- `agent/.env`: PORT, PIN_HASH, ALLOWED_ORIGIN, VERCEL_URL, AGENT_SECRET, PROJECTS_DIR, EDITOR_CMD, BASH_PATH, CLAUDE_BIN, IGNORE_DIRS
+- `agent/.env`: PORT, PIN_HASH, ALLOWED_ORIGIN, VERCEL_URL, AGENT_SECRET, PROJECTS_DIR, EDITOR_CMD, EDITOR_TITLE, BASH_PATH, CLAUDE_BIN, CLAUDE_MODEL, IGNORE_DIRS
 - 상세 설명: 각 디렉토리의 `.env.example` 참조
 
 ## Critical Rules
