@@ -117,7 +117,7 @@ const SESSION_PREFIX = 'btn-';
 function buildTasksJson(name) {
   const session = `${SESSION_PREFIX}${name}`;
   const claudeBin = '/c/Users/jsh86/.local/bin/claude';
-  const tmuxCmd = `tmux new-session -d -s ${session} -c /d/projects/${name} 2>/dev/null; tmux send-keys -t ${session} '${claudeBin} --dangerously-skip-permissions --model opus' Enter; sleep 3; tmux send-keys -t ${session} Enter; sleep 2; tmux send-keys -t ${session} '/remote-control' Enter; tmux attach-session -t ${session}`;
+  const tmuxCmd = `tmux kill-session -t ${session} 2>/dev/null; tmux new-session -d -s ${session} -c /d/projects/${name}; tmux send-keys -t ${session} '${claudeBin} --dangerously-skip-permissions --model opus' Enter; sleep 3; tmux send-keys -t ${session} Enter; sleep 2; tmux send-keys -t ${session} '/remote-control' Enter; tmux attach-session -t ${session}`;
   return {
     version: "2.0.0",
     tasks: [{
