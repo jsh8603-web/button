@@ -110,10 +110,10 @@ const ACTIONS = {
     return 'powershell.exe -Command "Start-Process shell:AppsFolder\\Google.Antigravity"';
   },
   'claude-remote': () => {
-    return "bash -c \"tmux new-session -d -s remote -c /d/projects 2>/dev/null; tmux send-keys -t remote 'claude' Enter\"";
+    return 'C:\\msys64\\usr\\bin\\bash.exe -lc "tmux new-session -d -s remote -c /d/projects 2>/dev/null; tmux send-keys -t remote \'claude\' Enter"';
   },
   proj: (name) => {
-    return `bash -c 'proj /d/projects/${name}'`;
+    return `C:\\msys64\\usr\\bin\\bash.exe -lc "mkdir -p /d/projects/${name} && tmux new-session -d -s ${name} -c /d/projects/${name} 2>/dev/null; tmux send-keys -t ${name} 'claude' Enter"`;
   },
 };
 
@@ -132,11 +132,7 @@ app.post('/run', verifyPin, (req, res) => {
       return res.status(400).json({ ok: false, message: 'Invalid project name' });
     }
 
-    const projectPath = `/d/projects/${name}`;
-    // Check directory exists (MSYS2 path)
-    if (!fs.existsSync(`D:/projects/${name}`)) {
-      return res.status(400).json({ ok: false, message: `Project directory not found: ${name}` });
-    }
+    // Directory will be created by the command if it doesn't exist
   }
 
   const cmd = action === 'proj' ? ACTIONS[action](name) : ACTIONS[action]();

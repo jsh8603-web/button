@@ -145,6 +145,11 @@ function Dashboard() {
   const [lastChecked, setLastChecked] = useState<Date>(new Date());
   const [lastCheckedText, setLastCheckedText] = useState("just now");
   const [actionFeedback, setActionFeedback] = useState("");
+  const [showProjInput, setShowProjInput] = useState(false);
+  const [projName, setProjName] = useState("");
+  const [showLogs, setShowLogs] = useState(false);
+  const [wakeLogs, setWakeLogs] = useState<Record<string, unknown>[]>([]);
+  const projInputRef = useRef<HTMLInputElement>(null);
 
   const checkStatus = useCallback(async () => {
     try {
@@ -205,6 +210,15 @@ function Dashboard() {
     }
   }, [status, checkStatus]);
 
+  const saveWakeLog = (entry: Record<string, unknown>) => {
+    try {
+      const logs = JSON.parse(localStorage.getItem("wake-logs") || "[]");
+      logs.unshift({ timestamp: new Date().toISOString(), ...entry });
+      if (logs.length > 10) logs.length = 10;
+      localStorage.setItem("wake-logs", JSON.stringify(logs));
+    } catch { /* localStorage unavailable */ }
+  };
+
   const handlePowerPress = async () => {
     if (status === "waking" || status === "shutting-down") return;
 
@@ -212,13 +226,22 @@ function Dashboard() {
       // Wake
       setStatus("waking");
       try {
-        await fetch("/api/wake", { method: "POST" });
-        setActionFeedback("Magic packet sent");
-        setTimeout(() => setActionFeedback(""), 3000);
-      } catch {
+        const res = await fetch("/api/wake", { method: "POST" });
+        const data = await res.json();
+        saveWakeLog({ status: res.status, ...data });
+        if (res.ok) {
+          setActionFeedback("Magic packet sent");
+        } else {
+          setStatus("offline");
+          setActionFeedback(data.detail || data.error || "Failed to send");
+        }
+        setTimeout(() => setActionFeedback(""), 5000);
+      } catch (err) {
         setStatus("offline");
-        setActionFeedback("Failed to send");
-        setTimeout(() => setActionFeedback(""), 3000);
+        const msg = err instanceof Error ? err.message : "Network error";
+        saveWakeLog({ status: 0, error: msg });
+        setActionFeedback(`Failed: ${msg}`);
+        setTimeout(() => setActionFeedback(""), 5000);
       }
     } else {
       // Shutdown — confirm first
@@ -237,13 +260,13 @@ function Dashboard() {
     }
   };
 
-  const handleQuickAction = async (action: string) => {
+  const handleQuickAction = async (action: string, name?: string) => {
     try {
       setActionFeedback(`Starting ${action}...`);
       const res = await fetch("/api/run", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action }),
+        body: JSON.stringify({ action, ...(name ? { name } : {}) }),
       });
       const data = await res.json();
       if (data.error) {
@@ -255,6 +278,18 @@ function Dashboard() {
       setActionFeedback("Failed to reach PC");
     }
     setTimeout(() => setActionFeedback(""), 3000);
+  };
+
+  const handleProjSubmit = async () => {
+    const name = projName.trim();
+    if (!name || !/^[a-zA-Z0-9_-]+$/.test(name)) {
+      setActionFeedback("Invalid project name");
+      setTimeout(() => setActionFeedback(""), 3000);
+      return;
+    }
+    setShowProjInput(false);
+    setProjName("");
+    await handleQuickAction("proj", name);
   };
 
   const glowClass = {
@@ -352,6 +387,82 @@ function Dashboard() {
         >
           <span className="text-xl">🖥️</span>
         </button>
+        <button
+          onClick={() => {
+            setShowProjInput(!showProjInput);
+            setTimeout(() => projInputRef.current?.focus(), 100);
+          }}
+          className="w-12 h-12 rounded-xl bg-white/5 border border-white/10
+            flex items-center justify-center
+            hover:bg-white/10 hover:border-white/20
+            active:scale-90 transition-all duration-200"
+          title="Open Project"
+        >
+          <span className="text-xl">📂</span>
+        </button>
+      </div>
+
+      {/* Wake Logs */}
+      <div className="fixed bottom-4 right-4">
+        <button
+          onClick={() => {
+            try {
+              setWakeLogs(JSON.parse(localStorage.getItem("wake-logs") || "[]"));
+            } catch { setWakeLogs([]); }
+            setShowLogs(!showLogs);
+          }}
+          className="w-8 h-8 rounded-full bg-white/5 border border-white/10
+            text-[10px] text-white/30 hover:text-white/60 transition-colors"
+        >
+          log
+        </button>
+        {showLogs && wakeLogs.length > 0 && (
+          <div className="absolute bottom-10 right-0 w-72 max-h-60 overflow-y-auto
+            bg-black/90 border border-white/10 rounded-lg p-3 text-[10px] text-white/60 font-mono">
+            {wakeLogs.map((log, i) => (
+              <div key={i} className="mb-2 border-b border-white/5 pb-2">
+                <div className="text-white/40">{String(log.timestamp).slice(5, 19)}</div>
+                <div className={log.result === "success" ? "text-green-400" : "text-red-400"}>
+                  {log.result === "success" ? "OK" : `ERR: ${log.error || log.detail || "unknown"}`}
+                </div>
+                {log.step ? <div>step: {String(log.step)}</div> : null}
+                {log.errorName ? <div>type: {String(log.errorName)}</div> : null}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Project Name Input */}
+      <div
+        className={`
+          mt-4 transition-all duration-300 overflow-hidden
+          ${status === "online" && showProjInput ? "max-h-20 opacity-100" : "max-h-0 opacity-0"}
+        `}
+      >
+        <form
+          onSubmit={(e) => { e.preventDefault(); handleProjSubmit(); }}
+          className="flex gap-2"
+        >
+          <input
+            ref={projInputRef}
+            type="text"
+            value={projName}
+            onChange={(e) => setProjName(e.target.value)}
+            placeholder="project name"
+            className="h-10 px-3 rounded-lg bg-white/5 border border-white/10
+              text-sm text-white placeholder-white/30 outline-none
+              focus:border-white/30 transition-colors w-40"
+          />
+          <button
+            type="submit"
+            className="h-10 px-4 rounded-lg bg-white/10 border border-white/10
+              text-sm text-white/80 hover:bg-white/15 hover:border-white/20
+              active:scale-95 transition-all"
+          >
+            Go
+          </button>
+        </form>
       </div>
     </div>
   );

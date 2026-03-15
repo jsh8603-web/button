@@ -3,3 +3,12 @@ node_modules/
 .env.local
 .next/
 .claude/
+
+# debug files
+captcha*.gif
+captcha*.txt
+captcha*.json
+nat_page.html
+router-debug*.js
+router-setup.js
+router_state.json

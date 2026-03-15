@@ -24,33 +24,52 @@ function createMagicPacket(mac: string): Buffer {
 }
 
 export async function POST() {
+  const log: Record<string, unknown> = {
+    timestamp: new Date().toISOString(),
+    action: "wake",
+    runtime: process.env.VERCEL ? "vercel" : "local",
+  };
+
   try {
     const mac = process.env.PC_MAC;
     const host = process.env.PC_HOST;
     const port = parseInt(process.env.WOL_PORT || "9", 10);
 
     if (!mac || !host) {
+      log.step = "config";
+      log.error = "PC_MAC or PC_HOST not configured";
+      console.error("[wake]", JSON.stringify(log));
       return NextResponse.json(
-        { error: "PC_MAC or PC_HOST not configured" },
+        { error: log.error, log },
         { status: 500 }
       );
     }
 
+    log.target = { host, port, mac };
+
     const packet = createMagicPacket(mac);
+    log.step = "packet_created";
 
     // Resolve hostname to IP for UDP
     let targetIp: string;
     try {
       const addresses = await dns.resolve4(host);
       targetIp = addresses[0];
-    } catch {
-      // If resolution fails, try using the host directly
+      log.resolvedIp = targetIp;
+    } catch (dnsErr) {
       targetIp = host;
+      log.resolvedIp = host;
+      log.dnsError = dnsErr instanceof Error ? dnsErr.message : String(dnsErr);
     }
 
-    // Dynamic import for dgram (Node.js module)
+    log.step = "importing_dgram";
+
+    // Dynamic import for dgram (Node.js module — may fail on serverless)
     const dgram = await import("dgram");
+    log.step = "dgram_loaded";
+
     const client = dgram.createSocket("udp4");
+    log.step = "socket_created";
 
     await new Promise<void>((resolve, reject) => {
       client.send(packet, 0, packet.length, port, targetIp, (err) => {
@@ -60,11 +79,19 @@ export async function POST() {
       });
     });
 
-    return NextResponse.json({ ok: true, message: "Magic packet sent" });
+    log.step = "sent";
+    log.result = "success";
+    console.log("[wake]", JSON.stringify(log));
+    return NextResponse.json({ ok: true, message: "Magic packet sent", log });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
+    log.result = "error";
+    log.error = message;
+    log.errorName = error instanceof Error ? error.constructor.name : typeof error;
+    log.stack = error instanceof Error ? error.stack?.split("\n").slice(0, 3).join(" | ") : undefined;
+    console.error("[wake]", JSON.stringify(log));
     return NextResponse.json(
-      { error: "Failed to send magic packet", detail: message },
+      { error: "Failed to send magic packet", detail: message, log },
       { status: 500 }
     );
   }
