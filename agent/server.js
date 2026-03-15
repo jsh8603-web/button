@@ -119,7 +119,8 @@ const ACTIONS = {
 // tasks.json: open tmux session with claude on folder open
 function buildTasksJson(name) {
   // Create or attach tmux session, send claude command, then attach
-  const tmuxCmd = `tmux new-session -d -s ${name} -c /d/projects/${name} 2>/dev/null; tmux send-keys -t ${name} 'claude --dangerously-skip-permissions --model opus' Enter; tmux attach-session -t ${name}`;
+  // Start claude, wait for trust prompt, auto-accept with Enter, then attach
+  const tmuxCmd = `tmux new-session -d -s ${name} -c /d/projects/${name} 2>/dev/null; tmux send-keys -t ${name} 'claude --dangerously-skip-permissions --model opus' Enter; sleep 3; tmux send-keys -t ${name} Enter; tmux attach-session -t ${name}`;
   return {
     version: "2.0.0",
     tasks: [{
