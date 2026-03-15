@@ -246,7 +246,8 @@ function openProjectInEditor(name) {
       let lastReadyOutput = null;
 
       function capturePaneTail(cb) {
-        exec(`"${BASH_PATH}" -lc "tmux capture-pane -t ${session} -p | tail -10"`, { encoding: 'utf8' }, cb);
+        // Strip blank lines before tail — Claude's TUI leaves many empty lines at bottom of pane
+        exec(`"${BASH_PATH}" -lc "tmux capture-pane -t ${session} -p | sed '/^[[:space:]]*$/d' | tail -10"`, { encoding: 'utf8' }, cb);
       }
 
       function hasClaudePrompt(output) {

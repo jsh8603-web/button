@@ -44,7 +44,7 @@ agent/                        → PC Agent (Express, Windows 서비스)
   server.js                   → 메인 서버 + heartbeat 루프 + 프로젝트 관리 (tmux 폴링으로 Claude 준비 감지)
   close-window.ps1            → 윈도우 창 닫기 (Win32 EnumWindows + WM_CLOSE)
   maximize-window.ps1         → 윈도우 창 최대화 (Win32 ShowWindow, 폴링)
-  kill-sessions.sh            → btn-* tmux 세션 정리 (Ctrl+C → /exit → kill)
+  kill-sessions.sh            → 특정 btn-* tmux 세션 정리 (Ctrl+C → /exit → kill, 세션명 인자)
   add-firewall.bat            → Agent 포트 방화벽 규칙 추가
   install.bat                 → Task Scheduler 등록 (SYSTEM, onstart)
   enable-autologin.bat        → Windows 자동 로그인 레지스트리 설정
