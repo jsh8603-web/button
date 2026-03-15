@@ -137,9 +137,9 @@ let lastWebAppProject = null;
 function killExistingSessions() {
   // Kill all tmux sessions
   exec('C:\\msys64\\usr\\bin\\bash.exe -lc "tmux kill-server 2>/dev/null"');
-  // Kill the Antigravity window opened by the web app (match by window title)
+  // Close only the Antigravity window opened by the web app (not the whole process)
   if (lastWebAppProject) {
-    exec(`powershell.exe -Command "Get-Process Antigravity -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle -like '${lastWebAppProject} *' } | Stop-Process -Force"`);
+    exec(`powershell.exe -Command "Get-Process Antigravity -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle -like '${lastWebAppProject} *' } | ForEach-Object { $_.CloseMainWindow() }"`);
     lastWebAppProject = null;
   }
 }
