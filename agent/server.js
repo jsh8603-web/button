@@ -116,7 +116,7 @@ const SESSION_PREFIX = 'btn-';
 
 function buildTasksJson(name) {
   const session = `${SESSION_PREFIX}${name}`;
-  const tmuxCmd = `tmux new-session -d -s ${session} -c /d/projects/${name} 2>/dev/null; tmux send-keys -t ${session} 'claude --dangerously-skip-permissions --model opus' Enter; sleep 3; tmux send-keys -t ${session} Enter; tmux attach-session -t ${session}`;
+  const tmuxCmd = `tmux new-session -d -s ${session} -c /d/projects/${name} 2>/dev/null; tmux send-keys -t ${session} 'claude --dangerously-skip-permissions --model opus' Enter; sleep 3; tmux send-keys -t ${session} Enter; sleep 2; tmux send-keys -t ${session} '/remote-control' Enter; tmux attach-session -t ${session}`;
   return {
     version: "2.0.0",
     tasks: [{
@@ -131,16 +131,16 @@ function buildTasksJson(name) {
   };
 }
 
-// PID of the Antigravity process opened by the web app (null = none)
-let webAppAntigravityPid = null;
+// Last project opened by the web app (null = none)
+let lastWebAppProject = null;
 
 function killExistingSessions() {
   // Kill all tmux sessions
   exec('C:\\msys64\\usr\\bin\\bash.exe -lc "tmux kill-server 2>/dev/null"');
-  // Kill only the Antigravity opened by the web app (leave desktop sessions intact)
-  if (webAppAntigravityPid) {
-    exec(`taskkill /f /t /pid ${webAppAntigravityPid} 2>nul`);
-    webAppAntigravityPid = null;
+  // Kill the Antigravity window opened by the web app (match by window title)
+  if (lastWebAppProject) {
+    exec(`powershell.exe -Command "Get-Process Antigravity -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle -like '${lastWebAppProject} *' } | Stop-Process -Force"`);
+    lastWebAppProject = null;
   }
 }
 
@@ -158,10 +158,12 @@ function openProjectInAntigravity(name) {
   // Write tasks.json with project-specific tmux session name
   fs.writeFileSync(tasksFile, JSON.stringify(buildTasksJson(name), null, 2));
 
+  // Track this project for future cleanup
+  lastWebAppProject = name;
+
   // Wait a moment for cleanup, then open in Antigravity
   setTimeout(() => {
     const child = exec(`D:\\projects\\Antigravity\\bin\\antigravity.cmd "${projDir}"`);
-    webAppAntigravityPid = child.pid;
     child.unref();
   }, 1000);
 }
