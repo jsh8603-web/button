@@ -112,8 +112,11 @@ const SAFE_NAME_RE = /^[a-zA-Z0-9_-]+$/;
 const IGNORE_DIRS = new Set(['Antigravity', '_Global_Orchestrator', 'node_modules', 'screenshots']);
 
 // tasks.json: open tmux session with claude on folder open
+const SESSION_PREFIX = 'btn-';
+
 function buildTasksJson(name) {
-  const tmuxCmd = `tmux new-session -d -s ${name} -c /d/projects/${name} 2>/dev/null; tmux send-keys -t ${name} 'claude --dangerously-skip-permissions --model opus' Enter; sleep 3; tmux send-keys -t ${name} Enter; tmux attach-session -t ${name}`;
+  const session = `${SESSION_PREFIX}${name}`;
+  const tmuxCmd = `tmux new-session -d -s ${session} -c /d/projects/${name} 2>/dev/null; tmux send-keys -t ${session} 'claude --dangerously-skip-permissions --model opus' Enter; sleep 3; tmux send-keys -t ${session} Enter; tmux attach-session -t ${session}`;
   return {
     version: "2.0.0",
     tasks: [{
@@ -128,15 +131,21 @@ function buildTasksJson(name) {
   };
 }
 
+// PID of the Antigravity process opened by the web app (null = none)
+let webAppAntigravityPid = null;
+
 function killExistingSessions() {
   // Kill all tmux sessions
   exec('C:\\msys64\\usr\\bin\\bash.exe -lc "tmux kill-server 2>/dev/null"');
-  // Close all Antigravity windows
-  exec('taskkill /f /im Antigravity.exe 2>nul');
+  // Kill only the Antigravity opened by the web app (leave desktop sessions intact)
+  if (webAppAntigravityPid) {
+    exec(`taskkill /f /t /pid ${webAppAntigravityPid} 2>nul`);
+    webAppAntigravityPid = null;
+  }
 }
 
 function openProjectInAntigravity(name) {
-  // Kill existing tmux sessions + Antigravity windows
+  // Kill previous web-app-opened Antigravity + tmux sessions
   killExistingSessions();
 
   const projDir = path.join(PROJECTS_DIR, name);
@@ -152,6 +161,7 @@ function openProjectInAntigravity(name) {
   // Wait a moment for cleanup, then open in Antigravity
   setTimeout(() => {
     const child = exec(`D:\\projects\\Antigravity\\bin\\antigravity.cmd "${projDir}"`);
+    webAppAntigravityPid = child.pid;
     child.unref();
   }, 1000);
 }
