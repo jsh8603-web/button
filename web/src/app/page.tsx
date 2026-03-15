@@ -145,11 +145,13 @@ function Dashboard() {
   const [lastChecked, setLastChecked] = useState<Date>(new Date());
   const [lastCheckedText, setLastCheckedText] = useState("just now");
   const [actionFeedback, setActionFeedback] = useState("");
-  const [showProjInput, setShowProjInput] = useState(false);
-  const [projName, setProjName] = useState("");
+  const [showProjDropdown, setShowProjDropdown] = useState(false);
+  const [projects, setProjects] = useState<string[]>([]);
+  const [newProjName, setNewProjName] = useState("");
+  const [showNewProjInput, setShowNewProjInput] = useState(false);
   const [showLogs, setShowLogs] = useState(false);
   const [wakeLogs, setWakeLogs] = useState<Record<string, unknown>[]>([]);
-  const projInputRef = useRef<HTMLInputElement>(null);
+  const newProjInputRef = useRef<HTMLInputElement>(null);
 
   const checkStatus = useCallback(async () => {
     try {
@@ -263,6 +265,14 @@ function Dashboard() {
     }
   };
 
+  const fetchProjects = useCallback(async () => {
+    try {
+      const res = await fetch("/api/projects");
+      const data = await res.json();
+      if (data.projects) setProjects(data.projects);
+    } catch { /* ignore */ }
+  }, []);
+
   const handleQuickAction = async (action: string, name?: string) => {
     try {
       setActionFeedback(`Starting ${action}...`);
@@ -283,16 +293,21 @@ function Dashboard() {
     setTimeout(() => setActionFeedback(""), 3000);
   };
 
-  const handleProjSubmit = async () => {
-    const name = projName.trim();
+  const handleOpenProject = async (name: string) => {
+    setShowProjDropdown(false);
+    setShowNewProjInput(false);
+    setNewProjName("");
+    await handleQuickAction("proj", name);
+  };
+
+  const handleNewProjSubmit = async () => {
+    const name = newProjName.trim();
     if (!name || !/^[a-zA-Z0-9_-]+$/.test(name)) {
       setActionFeedback("Invalid project name");
       setTimeout(() => setActionFeedback(""), 3000);
       return;
     }
-    setShowProjInput(false);
-    setProjName("");
-    await handleQuickAction("proj", name);
+    await handleOpenProject(name);
   };
 
   const glowClass = {
@@ -382,8 +397,9 @@ function Dashboard() {
         </button>
         <button
           onClick={() => {
-            setShowProjInput(!showProjInput);
-            setTimeout(() => projInputRef.current?.focus(), 100);
+            setShowProjDropdown(!showProjDropdown);
+            setShowNewProjInput(false);
+            if (!showProjDropdown) fetchProjects();
           }}
           className="w-12 h-12 rounded-xl bg-white/5 border border-white/10
             flex items-center justify-center
@@ -393,6 +409,68 @@ function Dashboard() {
         >
           <span className="text-xl">📂</span>
         </button>
+      </div>
+
+      {/* Project Dropdown */}
+      <div
+        className={`
+          mt-4 w-56 transition-all duration-300 overflow-hidden
+          ${status === "online" && showProjDropdown ? "max-h-80 opacity-100" : "max-h-0 opacity-0"}
+        `}
+      >
+        <div className="bg-white/5 border border-white/10 rounded-xl overflow-hidden">
+          {/* New Repo */}
+          {!showNewProjInput ? (
+            <button
+              onClick={() => {
+                setShowNewProjInput(true);
+                setTimeout(() => newProjInputRef.current?.focus(), 100);
+              }}
+              className="w-full px-4 py-3 text-left text-sm text-amber-400/80
+                hover:bg-white/10 transition-colors border-b border-white/10"
+            >
+              + New Repo
+            </button>
+          ) : (
+            <form
+              onSubmit={(e) => { e.preventDefault(); handleNewProjSubmit(); }}
+              className="flex border-b border-white/10"
+            >
+              <input
+                ref={newProjInputRef}
+                type="text"
+                value={newProjName}
+                onChange={(e) => setNewProjName(e.target.value)}
+                placeholder="repo name"
+                className="flex-1 h-10 px-3 bg-transparent text-sm text-white
+                  placeholder-white/30 outline-none"
+              />
+              <button
+                type="submit"
+                className="px-3 text-sm text-amber-400/80 hover:text-amber-400 transition-colors"
+              >
+                Go
+              </button>
+            </form>
+          )}
+
+          {/* Project List */}
+          <div className="max-h-52 overflow-y-auto">
+            {projects.map((proj) => (
+              <button
+                key={proj}
+                onClick={() => handleOpenProject(proj)}
+                className="w-full px-4 py-2.5 text-left text-sm text-white/70
+                  hover:bg-white/10 hover:text-white transition-colors"
+              >
+                {proj}
+              </button>
+            ))}
+            {projects.length === 0 && (
+              <p className="px-4 py-3 text-xs text-white/30">Loading...</p>
+            )}
+          </div>
+        </div>
       </div>
 
       {/* Wake Logs */}
@@ -424,38 +502,6 @@ function Dashboard() {
             ))}
           </div>
         )}
-      </div>
-
-      {/* Project Name Input */}
-      <div
-        className={`
-          mt-4 transition-all duration-300 overflow-hidden
-          ${status === "online" && showProjInput ? "max-h-20 opacity-100" : "max-h-0 opacity-0"}
-        `}
-      >
-        <form
-          onSubmit={(e) => { e.preventDefault(); handleProjSubmit(); }}
-          className="flex gap-2"
-        >
-          <input
-            ref={projInputRef}
-            type="text"
-            value={projName}
-            onChange={(e) => setProjName(e.target.value)}
-            placeholder="project name"
-            className="h-10 px-3 rounded-lg bg-white/5 border border-white/10
-              text-sm text-white placeholder-white/30 outline-none
-              focus:border-white/30 transition-colors w-40"
-          />
-          <button
-            type="submit"
-            className="h-10 px-4 rounded-lg bg-white/10 border border-white/10
-              text-sm text-white/80 hover:bg-white/15 hover:border-white/20
-              active:scale-95 transition-all"
-          >
-            Go
-          </button>
-        </form>
       </div>
     </div>
   );

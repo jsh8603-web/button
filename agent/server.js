@@ -105,18 +105,14 @@ app.post('/shutdown', verifyPin, (req, res) => {
   });
 });
 
-// Action whitelist — returns shell command string, or null for custom-handled actions
-const ACTIONS = {
-  antigravity: () => {
-    return 'powershell.exe -Command "Start-Process shell:AppsFolder\\Google.Antigravity"';
-  },
-  proj: null, // handled separately in /run route
-};
+// --- Projects ---
+
+const PROJECTS_DIR = 'D:\\projects';
+const SAFE_NAME_RE = /^[a-zA-Z0-9_-]+$/;
+const IGNORE_DIRS = new Set(['Antigravity', '_Global_Orchestrator', 'node_modules', 'screenshots']);
 
 // tasks.json: open tmux session with claude on folder open
 function buildTasksJson(name) {
-  // Create or attach tmux session, send claude command, then attach
-  // Start claude, wait for trust prompt, auto-accept with Enter, then attach
   const tmuxCmd = `tmux new-session -d -s ${name} -c /d/projects/${name} 2>/dev/null; tmux send-keys -t ${name} 'claude --dangerously-skip-permissions --model opus' Enter; sleep 3; tmux send-keys -t ${name} Enter; tmux attach-session -t ${name}`;
   return {
     version: "2.0.0",
@@ -132,32 +128,52 @@ function buildTasksJson(name) {
   };
 }
 
+function killExistingSessions() {
+  // Kill all tmux sessions
+  exec('C:\\msys64\\usr\\bin\\bash.exe -lc "tmux kill-server 2>/dev/null"');
+  // Close all Antigravity windows
+  exec('taskkill /f /im Antigravity.exe 2>nul');
+}
+
 function openProjectInAntigravity(name) {
-  const projDir = path.join('D:\\projects', name);
+  // Kill existing tmux sessions + Antigravity windows
+  killExistingSessions();
+
+  const projDir = path.join(PROJECTS_DIR, name);
   const vscodeDir = path.join(projDir, '.vscode');
   const tasksFile = path.join(vscodeDir, 'tasks.json');
 
   // Ensure project and .vscode dirs exist
   fs.mkdirSync(vscodeDir, { recursive: true });
 
-  // Always write tasks.json with project-specific tmux session name
+  // Write tasks.json with project-specific tmux session name
   fs.writeFileSync(tasksFile, JSON.stringify(buildTasksJson(name), null, 2));
 
-  // Open in Antigravity
-  const child = exec(`D:\\projects\\Antigravity\\bin\\antigravity.cmd "${projDir}"`);
-  child.unref();
+  // Wait a moment for cleanup, then open in Antigravity
+  setTimeout(() => {
+    const child = exec(`D:\\projects\\Antigravity\\bin\\antigravity.cmd "${projDir}"`);
+    child.unref();
+  }, 1000);
 }
 
-const SAFE_NAME_RE = /^[a-zA-Z0-9_-]+$/;
+// List project directories
+app.get('/projects', verifyPin, (req, res) => {
+  try {
+    const entries = fs.readdirSync(PROJECTS_DIR, { withFileTypes: true });
+    const projects = entries
+      .filter(e => e.isDirectory() && !e.name.startsWith('.') && !e.name.startsWith('_') && !IGNORE_DIRS.has(e.name))
+      .map(e => e.name)
+      .sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
+    res.json({ projects });
+  } catch (err) {
+    res.status(500).json({ ok: false, message: err.message });
+  }
+});
 
+// Run actions
 app.post('/run', verifyPin, (req, res) => {
   const { action, name } = req.body;
 
-  if (!action || !(action in ACTIONS)) {
-    return res.status(400).json({ ok: false, message: `Unknown action: ${action}` });
-  }
-
-  // Handle proj separately (uses Node fs + exec)
   if (action === 'proj') {
     if (!name || !SAFE_NAME_RE.test(name)) {
       return res.status(400).json({ ok: false, message: 'Invalid project name' });
@@ -170,12 +186,13 @@ app.post('/run', verifyPin, (req, res) => {
     }
   }
 
-  const cmd = ACTIONS[action]();
+  if (action === 'antigravity') {
+    const child = exec('powershell.exe -Command "Start-Process shell:AppsFolder\\Google.Antigravity"');
+    child.unref();
+    return res.json({ ok: true, action });
+  }
 
-  // Fire-and-forget: respond immediately, let the command run in background
-  const child = exec(cmd);
-  child.unref();
-  res.json({ ok: true, action });
+  return res.status(400).json({ ok: false, message: `Unknown action: ${action}` });
 });
 
 // --- Start ---
