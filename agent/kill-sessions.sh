@@ -13,5 +13,7 @@ for s in $(tmux list-sessions -F '#S' 2>/dev/null | grep '^btn-'); do
 done
 sleep 2
 
-# Kill all tmux sessions
-tmux kill-server 2>/dev/null
+# Kill only btn-* sessions (not the entire tmux server)
+for s in $(tmux list-sessions -F '#S' 2>/dev/null | grep '^btn-'); do
+  tmux kill-session -t "$s" 2>/dev/null
+done

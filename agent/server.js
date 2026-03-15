@@ -170,14 +170,14 @@ function openProjectInAntigravity(name) {
   // Track this project for future cleanup
   lastWebAppProject = name;
 
-  // Wait a moment for cleanup, then open in Antigravity
+  // Wait for kill-sessions.sh to finish (~3s) before opening
   setTimeout(() => {
     const child = exec(`D:\\projects\\Antigravity\\bin\\antigravity.cmd "${projDir}"`);
     child.unref();
     // Maximize the Antigravity window once it appears
     const maxScript = path.join(__dirname, 'maximize-window.ps1');
     exec(`powershell.exe -ExecutionPolicy Bypass -File "${maxScript}" -TitlePrefix "${name}"`);
-  }, 1000);
+  }, 5000);
 }
 
 // List project directories
