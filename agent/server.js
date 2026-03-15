@@ -120,8 +120,9 @@ const SESSION_PREFIX = 'btn-';
 
 function buildTasksJson(name) {
   const session = `${SESSION_PREFIX}${name}`;
-  const projMsys = PROJECTS_DIR.replace(/\\/g, '/').replace(/^([A-Z]):/i, (_, d) => `/${d.toLowerCase()}`);
-  const claudeBinMsys = CLAUDE_BIN.replace(/\\/g, '/');
+  const toMsys = (p) => p.replace(/\\/g, '/').replace(/^([A-Z]):/i, (_, d) => `/${d.toLowerCase()}`);
+  const projMsys = toMsys(PROJECTS_DIR);
+  const claudeBinMsys = toMsys(CLAUDE_BIN);
   const tmuxCmd = `tmux kill-session -t ${session} 2>/dev/null; tmux new-session -d -s ${session} -c ${projMsys}/${name}; tmux send-keys -t ${session} '${claudeBinMsys} --dangerously-skip-permissions --model opus' Enter; sleep 3; tmux send-keys -t ${session} Enter; sleep 2; tmux send-keys -t ${session} '/remote-control' Enter; tmux attach-session -t ${session}`;
   return {
     version: "2.0.0",
