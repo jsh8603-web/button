@@ -1,27 +1,13 @@
 import { NextResponse } from "next/server";
+import { kvGet, KEYS, type Heartbeat } from "@/lib/kv";
 
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  const host = process.env.PC_HOST;
-  const port = process.env.PC_PORT || "9876";
-
-  if (!host) {
-    return NextResponse.json({ status: "offline" });
-  }
-
   try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 3000);
+    const data = await kvGet<Heartbeat>(KEYS.heartbeat);
 
-    const res = await fetch(`http://${host}:${port}/health`, {
-      signal: controller.signal,
-    });
-
-    clearTimeout(timeout);
-
-    if (res.ok) {
-      const data = await res.json();
+    if (data && Date.now() - data.timestamp < 90_000) {
       return NextResponse.json({ status: "online", uptime: data.uptime });
     }
 

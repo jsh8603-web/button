@@ -116,7 +116,8 @@ const SESSION_PREFIX = 'btn-';
 
 function buildTasksJson(name) {
   const session = `${SESSION_PREFIX}${name}`;
-  const tmuxCmd = `tmux new-session -d -s ${session} -c /d/projects/${name} 2>/dev/null; tmux send-keys -t ${session} 'claude --dangerously-skip-permissions --model opus' Enter; sleep 3; tmux send-keys -t ${session} Enter; sleep 2; tmux send-keys -t ${session} '/remote-control' Enter; tmux attach-session -t ${session}`;
+  const claudeBin = '/c/Users/jsh86/.local/bin/claude';
+  const tmuxCmd = `tmux new-session -d -s ${session} -c /d/projects/${name} 2>/dev/null; tmux send-keys -t ${session} '${claudeBin} --dangerously-skip-permissions --model opus' Enter; sleep 3; tmux send-keys -t ${session} Enter; sleep 2; tmux send-keys -t ${session} '/remote-control' Enter; tmux attach-session -t ${session}`;
   return {
     version: "2.0.0",
     tasks: [{
@@ -218,8 +219,90 @@ app.post('/run', verifyPin, (req, res) => {
   return res.status(400).json({ ok: false, message: `Unknown action: ${action}` });
 });
 
+// --- Heartbeat (push status to Vercel via Redis) ---
+
+const VERCEL_URL = process.env.VERCEL_URL;
+const AGENT_SECRET = process.env.AGENT_SECRET;
+const HEARTBEAT_INTERVAL = 30_000;
+
+function getProjectList() {
+  try {
+    const entries = fs.readdirSync(PROJECTS_DIR, { withFileTypes: true });
+    return entries
+      .filter(e => e.isDirectory() && !e.name.startsWith('.') && !e.name.startsWith('_') && !IGNORE_DIRS.has(e.name))
+      .map(e => e.name)
+      .sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
+  } catch {
+    return [];
+  }
+}
+
+function executeCommand(command) {
+  console.log(`[heartbeat] Received command: ${command.action}`);
+
+  if (command.action === 'shutdown') {
+    if (!canShutdown()) {
+      console.log('[heartbeat] Shutdown rate limited');
+      return;
+    }
+    recordShutdownAttempt();
+    exec('shutdown /s /t 5', (err) => {
+      if (err) console.error('[heartbeat] Shutdown error:', err.message);
+      else console.log('[heartbeat] Shutting down in 5s');
+    });
+  } else if (command.action === 'proj') {
+    if (command.name && SAFE_NAME_RE.test(command.name)) {
+      openProjectInAntigravity(command.name);
+      console.log(`[heartbeat] Opened project: ${command.name}`);
+    }
+  } else if (command.action === 'antigravity') {
+    const child = exec('powershell.exe -Command "Start-Process shell:AppsFolder\\Google.Antigravity -WindowStyle Maximized"');
+    child.unref();
+    console.log('[heartbeat] Launched Antigravity');
+  }
+}
+
+async function sendHeartbeat() {
+  if (!VERCEL_URL || !AGENT_SECRET) return;
+
+  try {
+    const res = await fetch(`${VERCEL_URL}/api/heartbeat`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${AGENT_SECRET}`,
+      },
+      body: JSON.stringify({
+        uptime: process.uptime(),
+        projects: getProjectList(),
+      }),
+      signal: AbortSignal.timeout(10_000),
+    });
+
+    if (res.ok) {
+      const data = await res.json();
+      if (data.command) {
+        executeCommand(data.command);
+      }
+    } else {
+      console.error(`[heartbeat] HTTP ${res.status}`);
+    }
+  } catch (err) {
+    console.error('[heartbeat] Error:', err.message);
+  }
+}
+
 // --- Start ---
 
 app.listen(PORT, () => {
   console.log(`Button Agent listening on port ${PORT}`);
+
+  // Start heartbeat loop
+  if (VERCEL_URL && AGENT_SECRET) {
+    console.log(`[heartbeat] Pushing to ${VERCEL_URL} every ${HEARTBEAT_INTERVAL / 1000}s`);
+    sendHeartbeat();
+    setInterval(sendHeartbeat, HEARTBEAT_INTERVAL);
+  } else {
+    console.log('[heartbeat] VERCEL_URL or AGENT_SECRET not set, heartbeat disabled');
+  }
 });

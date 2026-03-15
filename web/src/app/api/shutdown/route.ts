@@ -1,32 +1,16 @@
 import { NextResponse } from "next/server";
+import { kvSet, KEYS } from "@/lib/kv";
 
 export async function POST() {
-  const host = process.env.PC_HOST;
-  const port = process.env.PC_PORT || "9876";
-  const agentPin = process.env.AGENT_PIN;
-
-  if (!host) {
-    return NextResponse.json({ error: "PC_HOST not configured" }, { status: 500 });
-  }
-
   try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 5000);
+    await kvSet(KEYS.command, {
+      action: "shutdown",
+      timestamp: Date.now(),
+    }, 120);
 
-    const res = await fetch(`http://${host}:${port}/shutdown`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...(agentPin ? { "x-pin-hash": agentPin } : {}),
-      },
-      signal: controller.signal,
-    });
-
-    clearTimeout(timeout);
-
-    const data = await res.json();
-    return NextResponse.json(data);
-  } catch {
-    return NextResponse.json({ error: "PC unreachable" }, { status: 503 });
+    return NextResponse.json({ ok: true, message: "Shutdown command queued" });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Unknown error";
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }
