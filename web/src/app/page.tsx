@@ -212,8 +212,11 @@ function Dashboard() {
 
   const saveWakeLog = (entry: Record<string, unknown>) => {
     try {
+      // Flatten nested log object from API response into top-level
+      const { log: serverLog, ...rest } = entry;
+      const flat = { timestamp: new Date().toISOString(), ...rest, ...(serverLog && typeof serverLog === "object" ? serverLog as Record<string, unknown> : {}) };
       const logs = JSON.parse(localStorage.getItem("wake-logs") || "[]");
-      logs.unshift({ timestamp: new Date().toISOString(), ...entry });
+      logs.unshift(flat);
       if (logs.length > 10) logs.length = 10;
       localStorage.setItem("wake-logs", JSON.stringify(logs));
     } catch { /* localStorage unavailable */ }

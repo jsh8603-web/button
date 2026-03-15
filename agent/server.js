@@ -3,7 +3,8 @@ const cors = require('cors');
 const bcrypt = require('bcrypt');
 const { exec } = require('child_process');
 const fs = require('fs');
-require('dotenv').config();
+const path = require('path');
+require('dotenv').config({ path: path.join(__dirname, '.env') });
 
 const app = express();
 const PORT = process.env.PORT || 9876;
@@ -137,12 +138,10 @@ app.post('/run', verifyPin, (req, res) => {
 
   const cmd = action === 'proj' ? ACTIONS[action](name) : ACTIONS[action]();
 
-  exec(cmd, (err) => {
-    if (err) {
-      return res.status(500).json({ ok: false, message: err.message });
-    }
-    res.json({ ok: true, action });
-  });
+  // Fire-and-forget: respond immediately, let the command run in background
+  const child = exec(cmd);
+  child.unref();
+  res.json({ ok: true, action });
 });
 
 // --- Start ---
