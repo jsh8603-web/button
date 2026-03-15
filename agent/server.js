@@ -10,6 +10,11 @@ const app = express();
 const PORT = process.env.PORT || 9876;
 const PIN_HASH = process.env.PIN_HASH;
 const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN;
+const PROJECTS_DIR = process.env.PROJECTS_DIR || 'D:\\projects';
+const EDITOR_CMD = process.env.EDITOR_CMD || 'code';
+const BASH_PATH = process.env.BASH_PATH || 'C:\\msys64\\usr\\bin\\bash.exe';
+const CLAUDE_BIN = process.env.CLAUDE_BIN || 'claude';
+const IGNORE_DIRS_ENV = process.env.IGNORE_DIRS || 'node_modules,screenshots';
 
 // --- Middleware ---
 
@@ -107,17 +112,17 @@ app.post('/shutdown', verifyPin, (req, res) => {
 
 // --- Projects ---
 
-const PROJECTS_DIR = 'D:\\projects';
 const SAFE_NAME_RE = /^[a-zA-Z0-9_-]+$/;
-const IGNORE_DIRS = new Set(['Antigravity', '_Global_Orchestrator', 'node_modules', 'screenshots']);
+const IGNORE_DIRS = new Set(IGNORE_DIRS_ENV.split(',').map(s => s.trim()).filter(Boolean));
 
 // tasks.json: open tmux session with claude on folder open
 const SESSION_PREFIX = 'btn-';
 
 function buildTasksJson(name) {
   const session = `${SESSION_PREFIX}${name}`;
-  const claudeBin = '/c/Users/jsh86/.local/bin/claude';
-  const tmuxCmd = `tmux kill-session -t ${session} 2>/dev/null; tmux new-session -d -s ${session} -c /d/projects/${name}; tmux send-keys -t ${session} '${claudeBin} --dangerously-skip-permissions --model opus' Enter; sleep 3; tmux send-keys -t ${session} Enter; sleep 2; tmux send-keys -t ${session} '/remote-control' Enter; tmux attach-session -t ${session}`;
+  const projMsys = PROJECTS_DIR.replace(/\\/g, '/').replace(/^([A-Z]):/i, (_, d) => `/${d.toLowerCase()}`);
+  const claudeBinMsys = CLAUDE_BIN.replace(/\\/g, '/');
+  const tmuxCmd = `tmux kill-session -t ${session} 2>/dev/null; tmux new-session -d -s ${session} -c ${projMsys}/${name}; tmux send-keys -t ${session} '${claudeBinMsys} --dangerously-skip-permissions --model opus' Enter; sleep 3; tmux send-keys -t ${session} Enter; sleep 2; tmux send-keys -t ${session} '/remote-control' Enter; tmux attach-session -t ${session}`;
   return {
     version: "2.0.0",
     tasks: [{
@@ -126,7 +131,7 @@ function buildTasksJson(name) {
       command: tmuxCmd,
       options: {
         shell: {
-          executable: "C:\\msys64\\usr\\bin\\bash.exe",
+          executable: BASH_PATH,
           args: ["-l", "-c"]
         }
       },
@@ -144,8 +149,8 @@ let lastWebAppProject = null;
 function killExistingSessions() {
   // Gracefully exit Claude in btn-* sessions to deregister remote, then kill tmux
   const scriptPath = path.join(__dirname, 'kill-sessions.sh').replace(/\\/g, '/');
-  exec(`C:\\msys64\\usr\\bin\\bash.exe -l "${scriptPath}"`);
-  // Close only the Antigravity window opened by the web app (WM_CLOSE by window title)
+  exec(`"${BASH_PATH}" -l "${scriptPath}"`);
+  // Close only the editor window opened by the web app (WM_CLOSE by window title)
   if (lastWebAppProject) {
     const scriptPath = path.join(__dirname, 'close-window.ps1');
     exec(`powershell.exe -ExecutionPolicy Bypass -File "${scriptPath}" -TitlePrefix "${lastWebAppProject}"`);
@@ -153,8 +158,8 @@ function killExistingSessions() {
   }
 }
 
-function openProjectInAntigravity(name) {
-  // Kill previous web-app-opened Antigravity + tmux sessions
+function openProjectInEditor(name) {
+  // Kill previous web-app-opened editor + tmux sessions
   killExistingSessions();
 
   const projDir = path.join(PROJECTS_DIR, name);
@@ -172,9 +177,9 @@ function openProjectInAntigravity(name) {
 
   // Wait for kill-sessions.sh to finish (~3s) before opening
   setTimeout(() => {
-    const child = exec(`D:\\projects\\Antigravity\\bin\\antigravity.cmd "${projDir}"`);
+    const child = exec(`"${EDITOR_CMD}" "${projDir}"`);
     child.unref();
-    // Maximize the Antigravity window once it appears
+    // Maximize the editor window once it appears
     const maxScript = path.join(__dirname, 'maximize-window.ps1');
     exec(`powershell.exe -ExecutionPolicy Bypass -File "${maxScript}" -TitlePrefix "${name}"`);
   }, 5000);
@@ -203,15 +208,15 @@ app.post('/run', verifyPin, (req, res) => {
       return res.status(400).json({ ok: false, message: 'Invalid project name' });
     }
     try {
-      openProjectInAntigravity(name);
+      openProjectInEditor(name);
       return res.json({ ok: true, action });
     } catch (err) {
       return res.status(500).json({ ok: false, message: err.message });
     }
   }
 
-  if (action === 'antigravity') {
-    const child = exec('powershell.exe -Command "Start-Process shell:AppsFolder\\Google.Antigravity -WindowStyle Maximized"');
+  if (action === 'editor') {
+    const child = exec(`"${EDITOR_CMD}"`);
     child.unref();
     return res.json({ ok: true, action });
   }
@@ -252,13 +257,13 @@ function executeCommand(command) {
     });
   } else if (command.action === 'proj') {
     if (command.name && SAFE_NAME_RE.test(command.name)) {
-      openProjectInAntigravity(command.name);
+      openProjectInEditor(command.name);
       console.log(`[heartbeat] Opened project: ${command.name}`);
     }
-  } else if (command.action === 'antigravity') {
-    const child = exec('powershell.exe -Command "Start-Process shell:AppsFolder\\Google.Antigravity -WindowStyle Maximized"');
+  } else if (command.action === 'editor') {
+    const child = exec(`"${EDITOR_CMD}"`);
     child.unref();
-    console.log('[heartbeat] Launched Antigravity');
+    console.log('[heartbeat] Launched editor');
   }
 }
 

@@ -29,7 +29,7 @@ public class MaximizeHelper {
             var sb = new StringBuilder(256);
             GetWindowText(hWnd, sb, 256);
             string title = sb.ToString();
-            if (title.Length > 0 && title.Contains("Antigravity") && title.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) {
+            if (title.Length > 0 && title.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) {
                 found = hWnd;
                 return false;
             }

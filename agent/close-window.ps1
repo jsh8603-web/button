@@ -35,7 +35,7 @@ public class WindowHelper {
 }
 '@
 
-$windows = [WindowHelper]::FindWindowsByTitlePrefix("$TitlePrefix - Antigravity")
+$windows = [WindowHelper]::FindWindowsByTitlePrefix("$TitlePrefix")
 foreach ($w in $windows) {
     [WindowHelper]::PostMessage($w, [WindowHelper]::WM_CLOSE, [IntPtr]::Zero, [IntPtr]::Zero)
 }

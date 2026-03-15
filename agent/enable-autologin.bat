@@ -9,10 +9,13 @@ if %errorlevel% neq 0 (
     exit /b 1
 )
 
-set DEFAULT_USER=jsh8603@gmail.com
+set /p USERNAME="Microsoft account email: "
+if "%USERNAME%"=="" (
+    echo ERROR: Email is required.
+    pause
+    exit /b 1
+)
 set DEFAULT_DOMAIN=MicrosoftAccount
-
-set /p USERNAME="Microsoft account email [%DEFAULT_USER%]: " || set USERNAME=%DEFAULT_USER%
 set /p PASSWORD="Microsoft account password (not PIN): "
 
 reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" /v AutoAdminLogon /t REG_SZ /d 1 /f

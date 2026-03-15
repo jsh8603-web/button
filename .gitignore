@@ -2,7 +2,18 @@ node_modules/
 .env
 .env.local
 .next/
-.claude/
+
+# IDE (agent가 tasks.json 자동 생성)
+.vscode/
+
+# Claude Code (rules는 공유, memory는 개인)
+.claude/memory/
+
+# 개인 설계문서
+plan.md
+
+# Supabase CLI 임시 파일
+supabase/.temp/
 
 # debug files
 captcha*.gif

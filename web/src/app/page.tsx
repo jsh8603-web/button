@@ -386,12 +386,12 @@ function Dashboard() {
         `}
       >
         <button
-          onClick={() => handleQuickAction("antigravity")}
+          onClick={() => handleQuickAction("editor")}
           className="w-12 h-12 rounded-xl bg-white/5 border border-white/10
             flex items-center justify-center
             hover:bg-white/10 hover:border-white/20
             active:scale-90 transition-all duration-200"
-          title="Antigravity"
+          title="Editor"
         >
           <span className="text-xl">🚀</span>
         </button>
