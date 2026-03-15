@@ -135,11 +135,13 @@ function buildTasksJson(name) {
 let lastWebAppProject = null;
 
 function killExistingSessions() {
-  // Kill all tmux sessions
-  exec('C:\\msys64\\usr\\bin\\bash.exe -lc "tmux kill-server 2>/dev/null"');
-  // Close only the Antigravity window opened by the web app (not the whole process)
+  // Gracefully exit Claude in btn-* sessions to deregister remote, then kill tmux
+  const scriptPath = path.join(__dirname, 'kill-sessions.sh').replace(/\\/g, '/');
+  exec(`C:\\msys64\\usr\\bin\\bash.exe -l "${scriptPath}"`);
+  // Close only the Antigravity window opened by the web app (WM_CLOSE by window title)
   if (lastWebAppProject) {
-    exec(`powershell.exe -Command "Get-Process Antigravity -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle -like '${lastWebAppProject} *' } | ForEach-Object { $_.CloseMainWindow() }"`);
+    const scriptPath = path.join(__dirname, 'close-window.ps1');
+    exec(`powershell.exe -ExecutionPolicy Bypass -File "${scriptPath}" -TitlePrefix "${lastWebAppProject}"`);
     lastWebAppProject = null;
   }
 }
@@ -199,7 +201,7 @@ app.post('/run', verifyPin, (req, res) => {
   }
 
   if (action === 'antigravity') {
-    const child = exec('powershell.exe -Command "Start-Process shell:AppsFolder\\Google.Antigravity"');
+    const child = exec('powershell.exe -Command "Start-Process shell:AppsFolder\\Google.Antigravity -WindowStyle Maximized"');
     child.unref();
     return res.json({ ok: true, action });
   }
