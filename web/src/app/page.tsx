@@ -381,16 +381,6 @@ function Dashboard() {
           <span className="text-xl">🚀</span>
         </button>
         <button
-          onClick={() => handleQuickAction("claude-remote")}
-          className="w-12 h-12 rounded-xl bg-white/5 border border-white/10
-            flex items-center justify-center
-            hover:bg-white/10 hover:border-white/20
-            active:scale-90 transition-all duration-200"
-          title="Claude Remote"
-        >
-          <span className="text-xl">🖥️</span>
-        </button>
-        <button
           onClick={() => {
             setShowProjInput(!showProjInput);
             setTimeout(() => projInputRef.current?.focus(), 100);

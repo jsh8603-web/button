@@ -110,9 +110,6 @@ const ACTIONS = {
   antigravity: () => {
     return 'powershell.exe -Command "Start-Process shell:AppsFolder\\Google.Antigravity"';
   },
-  'claude-remote': () => {
-    return 'C:\\msys64\\usr\\bin\\bash.exe -lc "tmux new-session -d -s remote -c /d/projects 2>/dev/null; tmux send-keys -t remote \'claude\' Enter"';
-  },
   proj: null, // handled separately in /run route
 };
 
