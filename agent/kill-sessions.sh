@@ -1,8 +1,14 @@
 #!/bin/bash
-# Gracefully exit Claude in btn-* tmux sessions to deregister remote sessions
+# Gracefully exit Claude in a specific btn-* tmux session to deregister remote
+# Usage: kill-sessions.sh [session-name]
+#   If session-name given: kill only that session
+#   If no argument: kill ALL btn-* sessions (backward compat)
 
-# Capture session list ONCE to avoid killing newly created sessions
-sessions=$(tmux list-sessions -F '#S' 2>/dev/null | grep '^btn-')
+if [ -n "$1" ]; then
+  sessions="$1"
+else
+  sessions=$(tmux list-sessions -F '#S' 2>/dev/null | grep '^btn-')
+fi
 [ -z "$sessions" ] && exit 0
 
 # Send Ctrl+C to interrupt any running command
@@ -17,7 +23,7 @@ for s in $sessions; do
 done
 sleep 2
 
-# Kill only btn-* sessions (not the entire tmux server)
+# Kill the session(s)
 for s in $sessions; do
   tmux kill-session -t "$s" 2>/dev/null
 done

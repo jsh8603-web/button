@@ -169,23 +169,24 @@ function setLastWebAppProject(name) {
 }
 
 function killExistingSessions() {
-  // Gracefully exit Claude in btn-* sessions, then close the editor window
+  // Gracefully exit Claude in the LAST project's session only (not all btn-*)
   const scriptPath = path.join(__dirname, 'kill-sessions.sh').replace(/\\/g, '/');
   const lastProj = getLastWebAppProject();
 
-  exec(`"${BASH_PATH}" -l "${scriptPath}"`, (err) => {
+  if (!lastProj) return;
+
+  const lastSession = `${SESSION_PREFIX}${lastProj}`;
+  exec(`"${BASH_PATH}" -l "${scriptPath}" "${lastSession}"`, (err) => {
     if (err) console.error('[kill-sessions] Error:', err.message);
     // Close editor window AFTER Claude has exited (deregistered remote)
-    if (lastProj) {
-      const closeScript = path.join(__dirname, 'close-window.ps1');
-      const titleQuery = EDITOR_TITLE ? `${lastProj} - ${EDITOR_TITLE}` : lastProj;
-      exec(`powershell.exe -ExecutionPolicy Bypass -File "${closeScript}" -TitlePrefix "${titleQuery}"`, (err) => {
-        if (err) console.error('[close-window] Error:', err.message);
-      });
-    }
+    const closeScript = path.join(__dirname, 'close-window.ps1');
+    const titleQuery = EDITOR_TITLE ? `${lastProj} - ${EDITOR_TITLE}` : lastProj;
+    exec(`powershell.exe -ExecutionPolicy Bypass -File "${closeScript}" -TitlePrefix "${titleQuery}"`, (err) => {
+      if (err) console.error('[close-window] Error:', err.message);
+    });
   });
 
-  if (lastProj) setLastWebAppProject('');
+  setLastWebAppProject('');
 }
 
 function openProjectInEditor(name) {
