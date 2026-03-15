@@ -149,23 +149,31 @@ function Dashboard() {
   const [projects, setProjects] = useState<string[]>([]);
   const [newProjName, setNewProjName] = useState("");
   const [showNewProjInput, setShowNewProjInput] = useState(false);
+  const [lastProject, setLastProject] = useState("");
   const [showLogs, setShowLogs] = useState(false);
   const [wakeLogs, setWakeLogs] = useState<Record<string, unknown>[]>([]);
   const newProjInputRef = useRef<HTMLInputElement>(null);
+
+  // Load last project from localStorage
+  useEffect(() => {
+    try { setLastProject(localStorage.getItem("last-project") || ""); } catch {}
+  }, []);
 
   const checkStatus = useCallback(async () => {
     try {
       const res = await fetch("/api/status");
       const data = await res.json();
+      const isOnline = data.status === "online";
       setStatus((prev) => {
-        // Don't override transitional states
-        if (prev === "waking" || prev === "shutting-down") return prev;
-        return data.status === "online" ? "online" : "offline";
+        if (prev === "waking") return isOnline ? "online" : prev;
+        if (prev === "shutting-down") return !isOnline ? "offline" : prev;
+        return isOnline ? "online" : "offline";
       });
       setLastChecked(new Date());
     } catch {
       setStatus((prev) => {
-        if (prev === "waking" || prev === "shutting-down") return prev;
+        if (prev === "shutting-down") return "offline";
+        if (prev === "waking") return prev;
         return "offline";
       });
     }
@@ -186,23 +194,16 @@ function Dashboard() {
     return () => clearInterval(interval);
   }, [lastChecked]);
 
-  // Clear transitional states after timeout
+  // Safety timeout: force re-check after 60s if still transitioning
   useEffect(() => {
-    if (status === "waking") {
+    if (status === "waking" || status === "shutting-down") {
+      const fallback = status === "waking" ? "offline" : "online";
       const timeout = setTimeout(() => {
-        checkStatus();
-        setStatus((prev) => (prev === "waking" ? "offline" : prev));
-      }, 30000);
+        setStatus((prev) => (prev === status ? fallback : prev));
+      }, 60000);
       return () => clearTimeout(timeout);
     }
-    if (status === "shutting-down") {
-      const timeout = setTimeout(() => {
-        checkStatus();
-        setStatus((prev) => (prev === "shutting-down" ? "online" : prev));
-      }, 15000);
-      return () => clearTimeout(timeout);
-    }
-  }, [status, checkStatus]);
+  }, [status]);
 
   // Check more frequently during transitions
   useEffect(() => {
@@ -297,6 +298,8 @@ function Dashboard() {
     setShowProjDropdown(false);
     setShowNewProjInput(false);
     setNewProjName("");
+    setLastProject(name);
+    try { localStorage.setItem("last-project", name); } catch {}
     await handleQuickAction("proj", name);
   };
 
@@ -364,6 +367,13 @@ function Dashboard() {
         {statusText}
       </p>
 
+      {/* Last Project */}
+      {lastProject && (
+        <p className="mt-2 text-xs text-white/40">
+          Last: {lastProject}
+        </p>
+      )}
+
       {/* Last Checked */}
       <p className="mt-2 text-xs text-white/30">
         Checked {lastCheckedText}
@@ -386,11 +396,10 @@ function Dashboard() {
         `}
       >
         <button
-          onClick={() => handleQuickAction("editor")}
+          disabled
           className="w-12 h-12 rounded-xl bg-white/5 border border-white/10
             flex items-center justify-center
-            hover:bg-white/10 hover:border-white/20
-            active:scale-90 transition-all duration-200"
+            opacity-30 cursor-not-allowed transition-all duration-200"
           title="Editor"
         >
           <span className="text-xl">🚀</span>
