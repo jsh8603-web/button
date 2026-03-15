@@ -143,9 +143,8 @@ function PowerIcon({ className }: { className?: string }) {
 function Dashboard() {
   const [status, setStatus] = useState<PcStatus>("offline");
   const [lastChecked, setLastChecked] = useState<Date>(new Date());
-  const [tick, setTick] = useState(0);
+  const [lastCheckedText, setLastCheckedText] = useState("just now");
   const [actionFeedback, setActionFeedback] = useState("");
-  const feedbackTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [showProjDropdown, setShowProjDropdown] = useState(false);
   const [projects, setProjects] = useState<string[]>([]);
   const [newProjName, setNewProjName] = useState("");
@@ -179,13 +178,13 @@ function Dashboard() {
     return () => clearInterval(interval);
   }, [checkStatus]);
 
-  // Tick every second to update derived "time ago" text
+  // Update "time ago" text every second
   useEffect(() => {
-    const interval = setInterval(() => setTick(t => t + 1), 1000);
+    const interval = setInterval(() => {
+      setLastCheckedText(timeAgo(lastChecked));
+    }, 1000);
     return () => clearInterval(interval);
-  }, []);
-
-  const lastCheckedText = timeAgo(lastChecked);
+  }, [lastChecked]);
 
   // Clear transitional states after timeout
   useEffect(() => {
@@ -213,16 +212,6 @@ function Dashboard() {
     }
   }, [status, checkStatus]);
 
-  const showFeedback = useCallback((msg: string, ms = 3000) => {
-    if (feedbackTimer.current) clearTimeout(feedbackTimer.current);
-    setActionFeedback(msg);
-    feedbackTimer.current = setTimeout(() => setActionFeedback(""), ms);
-  }, []);
-
-  useEffect(() => {
-    return () => { if (feedbackTimer.current) clearTimeout(feedbackTimer.current); };
-  }, []);
-
   const saveWakeLog = (entry: Record<string, unknown>) => {
     try {
       // Flatten nested log object from API response into top-level
@@ -246,16 +235,18 @@ function Dashboard() {
         const data = await res.json();
         saveWakeLog({ status: res.status, ...data });
         if (res.ok) {
-          showFeedback("Magic packet sent", 5000);
+          setActionFeedback("Magic packet sent");
         } else {
           setStatus("offline");
-          showFeedback(data.detail || data.error || "Failed to send", 5000);
+          setActionFeedback(data.detail || data.error || "Failed to send");
         }
+        setTimeout(() => setActionFeedback(""), 5000);
       } catch (err) {
         setStatus("offline");
         const msg = err instanceof Error ? err.message : "Network error";
         saveWakeLog({ status: 0, error: msg });
-        showFeedback(`Failed: ${msg}`, 5000);
+        setActionFeedback(`Failed: ${msg}`);
+        setTimeout(() => setActionFeedback(""), 5000);
       }
     } else {
       // Shutdown — confirm first
@@ -263,10 +254,12 @@ function Dashboard() {
         setStatus("shutting-down");
         try {
           await fetch("/api/shutdown", { method: "POST" });
-          showFeedback("Shutdown signal sent");
+          setActionFeedback("Shutdown signal sent");
+          setTimeout(() => setActionFeedback(""), 3000);
         } catch {
           setStatus("online");
-          showFeedback("Failed to reach PC");
+          setActionFeedback("Failed to reach PC");
+          setTimeout(() => setActionFeedback(""), 3000);
         }
       }
     }
@@ -282,17 +275,22 @@ function Dashboard() {
 
   const handleQuickAction = async (action: string, name?: string) => {
     try {
-      showFeedback(`Starting ${action}...`);
+      setActionFeedback(`Starting ${action}...`);
       const res = await fetch("/api/run", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action, ...(name ? { name } : {}) }),
       });
       const data = await res.json();
-      showFeedback(data.error || `${action} started`);
+      if (data.error) {
+        setActionFeedback(data.error);
+      } else {
+        setActionFeedback(`${action} started`);
+      }
     } catch {
-      showFeedback("Failed to reach PC");
+      setActionFeedback("Failed to reach PC");
     }
+    setTimeout(() => setActionFeedback(""), 3000);
   };
 
   const handleOpenProject = async (name: string) => {
@@ -305,7 +303,8 @@ function Dashboard() {
   const handleNewProjSubmit = async () => {
     const name = newProjName.trim();
     if (!name || !/^[a-zA-Z0-9_-]+$/.test(name)) {
-      showFeedback("Invalid project name");
+      setActionFeedback("Invalid project name");
+      setTimeout(() => setActionFeedback(""), 3000);
       return;
     }
     await handleOpenProject(name);
