@@ -132,15 +132,15 @@ const SESSION_PREFIX = 'btn-';
 
 function buildTasksJson(name) {
   const session = `${SESSION_PREFIX}${name}`;
-  const projMsys = toMsys(PROJECTS_DIR);
-  const claudeBinMsys = toMsys(CLAUDE_BIN);
-  const tmuxCmd = `tmux kill-session -t ${session} 2>/dev/null; tmux new-session -d -s ${session} -c ${projMsys}/${name}; tmux send-keys -t ${session} '${claudeBinMsys} --dangerously-skip-permissions --model ${CLAUDE_MODEL}' Enter; sleep 3; tmux send-keys -t ${session} Enter; sleep 2; tmux send-keys -t ${session} '/remote-control' Enter; tmux attach-session -t ${session}`;
+  // Task only attaches to existing session (agent creates it independently)
+  // Wait loop handles race: session may not exist yet when VS Code task starts
+  const attachCmd = `timeout=30; while [ $timeout -gt 0 ] && ! tmux has-session -t ${session} 2>/dev/null; do sleep 0.5; timeout=$((timeout-1)); done; tmux attach-session -t ${session}`;
   return {
     version: "2.0.0",
     tasks: [{
       label: "claude-tmux",
       type: "shell",
-      command: tmuxCmd,
+      command: attachCmd,
       options: {
         shell: {
           executable: BASH_PATH,
@@ -192,6 +192,16 @@ function openProjectInEditor(name) {
   // Kill previous web-app-opened editor + tmux sessions
   killExistingSessions();
 
+  // Also close any existing window for the project we're about to open
+  // (prevents VS Code from reusing an already-open window where folderOpen won't re-trigger)
+  const closeScript = path.join(__dirname, 'close-window.ps1');
+  if (EDITOR_TITLE) {
+    const titleQuery = `${name} - ${EDITOR_TITLE}`;
+    exec(`powershell.exe -ExecutionPolicy Bypass -File "${closeScript}" -TitlePrefix "${titleQuery}"`, (err) => {
+      if (err) console.error('[close-window] Error closing current project window:', err.message);
+    });
+  }
+
   const projDir = path.join(PROJECTS_DIR, name);
   const vscodeDir = path.join(projDir, '.vscode');
   const tasksFile = path.join(vscodeDir, 'tasks.json');
@@ -199,7 +209,7 @@ function openProjectInEditor(name) {
   // Ensure project and .vscode dirs exist
   fs.mkdirSync(vscodeDir, { recursive: true });
 
-  // Write tasks.json with project-specific tmux session name
+  // Write tasks.json (attach-only, agent creates session independently)
   fs.writeFileSync(tasksFile, JSON.stringify(buildTasksJson(name), null, 2));
 
   // Enable auto-run tasks without prompt
@@ -212,13 +222,41 @@ function openProjectInEditor(name) {
   // Track this project for future cleanup (persisted to file)
   setLastWebAppProject(name);
 
-  // Wait for kill-sessions.sh to finish (~3s) before opening
+  // Wait for kill-sessions.sh to finish (~3s) before creating new session
   setTimeout(() => {
+    const session = `${SESSION_PREFIX}${name}`;
+    const projMsys = toMsys(PROJECTS_DIR);
+    const claudeBinMsys = toMsys(CLAUDE_BIN);
+
+    // Create tmux session + start Claude directly from agent
+    const createCmd = `tmux kill-session -t ${session} 2>/dev/null; tmux new-session -d -s ${session} -c ${projMsys}/${name}; tmux send-keys -t ${session} '${claudeBinMsys} --dangerously-skip-permissions --model ${CLAUDE_MODEL}' Enter`;
+    exec(`"${BASH_PATH}" -lc "${createCmd}"`, (err) => {
+      if (err) {
+        console.error('[proj] tmux session create error:', err.message);
+        return;
+      }
+      console.log(`[proj] Created tmux session: ${session}`);
+
+      // Wait for Claude to initialize, then send Enter + /remote-control
+      setTimeout(() => {
+        exec(`"${BASH_PATH}" -lc "tmux send-keys -t ${session} Enter"`, () => {
+          setTimeout(() => {
+            exec(`"${BASH_PATH}" -lc "tmux send-keys -t ${session} '/remote-control' Enter"`, (err) => {
+              if (err) console.error('[proj] /remote-control send error:', err.message);
+              else console.log(`[proj] Sent /remote-control to ${session}`);
+            });
+          }, 2000);
+        });
+      }, 3000);
+    });
+
+    // Open editor
     console.log(`[proj] Opening editor: "${EDITOR_CMD}" "${projDir}"`);
     const child = exec(`"${EDITOR_CMD}" "${projDir}"`, (err) => {
       if (err) console.error('[proj] Editor launch error:', err.message);
     });
     child.unref();
+
     // Maximize the editor window once it appears
     const maxScript = path.join(__dirname, 'maximize-window.ps1');
     exec(`powershell.exe -ExecutionPolicy Bypass -File "${maxScript}" -TitlePrefix "${name}"`, (err) => {
