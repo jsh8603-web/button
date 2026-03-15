@@ -25,7 +25,7 @@ public class WindowHelper {
         EnumWindows((hWnd, lParam) => {
             var sb = new StringBuilder(256);
             GetWindowText(hWnd, sb, 256);
-            if (sb.ToString().StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) {
+            if (sb.ToString().IndexOf(prefix, StringComparison.OrdinalIgnoreCase) >= 0) {
                 result.Add(hWnd);
             }
             return true;

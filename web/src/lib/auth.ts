@@ -1,7 +1,11 @@
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
 
-const JWT_SECRET = process.env.JWT_SECRET || "fallback-secret-change-me";
+function getJwtSecret(): string {
+  const secret = process.env.JWT_SECRET;
+  if (!secret) throw new Error("JWT_SECRET environment variable is required");
+  return secret;
+}
 
 export async function verifyPin(pin: string): Promise<boolean> {
   const hash = process.env.PIN_HASH;
@@ -10,12 +14,12 @@ export async function verifyPin(pin: string): Promise<boolean> {
 }
 
 export function createToken(): string {
-  return jwt.sign({ authorized: true }, JWT_SECRET, { expiresIn: "24h" });
+  return jwt.sign({ authorized: true }, getJwtSecret(), { expiresIn: "24h" });
 }
 
 export function verifyToken(token: string): boolean {
   try {
-    jwt.verify(token, JWT_SECRET);
+    jwt.verify(token, getJwtSecret());
     return true;
   } catch {
     return false;

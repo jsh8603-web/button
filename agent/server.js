@@ -16,6 +16,13 @@ const BASH_PATH = process.env.BASH_PATH || 'C:\\msys64\\usr\\bin\\bash.exe';
 const CLAUDE_BIN = process.env.CLAUDE_BIN || 'claude';
 const IGNORE_DIRS_ENV = process.env.IGNORE_DIRS || 'node_modules,screenshots';
 
+// Warn if path-sensitive env vars use short command names (may fail without PATH)
+for (const [name, val] of [['EDITOR_CMD', EDITOR_CMD], ['CLAUDE_BIN', CLAUDE_BIN]]) {
+  if (!val.includes('/') && !val.includes('\\')) {
+    console.warn(`[config] WARNING: ${name}="${val}" is not a full path. Set absolute path in .env to avoid PATH issues.`);
+  }
+}
+
 // --- Middleware ---
 
 app.use(express.json());
@@ -150,11 +157,15 @@ let lastWebAppProject = null;
 function killExistingSessions() {
   // Gracefully exit Claude in btn-* sessions to deregister remote, then kill tmux
   const scriptPath = path.join(__dirname, 'kill-sessions.sh').replace(/\\/g, '/');
-  exec(`"${BASH_PATH}" -l "${scriptPath}"`);
+  exec(`"${BASH_PATH}" -l "${scriptPath}"`, (err) => {
+    if (err) console.error('[kill-sessions] Error:', err.message);
+  });
   // Close only the editor window opened by the web app (WM_CLOSE by window title)
   if (lastWebAppProject) {
     const scriptPath = path.join(__dirname, 'close-window.ps1');
-    exec(`powershell.exe -ExecutionPolicy Bypass -File "${scriptPath}" -TitlePrefix "${lastWebAppProject}"`);
+    exec(`powershell.exe -ExecutionPolicy Bypass -File "${scriptPath}" -TitlePrefix "${lastWebAppProject}"`, (err) => {
+      if (err) console.error('[close-window] Error:', err.message);
+    });
     lastWebAppProject = null;
   }
 }
@@ -178,11 +189,16 @@ function openProjectInEditor(name) {
 
   // Wait for kill-sessions.sh to finish (~3s) before opening
   setTimeout(() => {
-    const child = exec(`"${EDITOR_CMD}" "${projDir}"`);
+    console.log(`[proj] Opening editor: "${EDITOR_CMD}" "${projDir}"`);
+    const child = exec(`"${EDITOR_CMD}" "${projDir}"`, (err) => {
+      if (err) console.error('[proj] Editor launch error:', err.message);
+    });
     child.unref();
     // Maximize the editor window once it appears
     const maxScript = path.join(__dirname, 'maximize-window.ps1');
-    exec(`powershell.exe -ExecutionPolicy Bypass -File "${maxScript}" -TitlePrefix "${name}"`);
+    exec(`powershell.exe -ExecutionPolicy Bypass -File "${maxScript}" -TitlePrefix "${name}"`, (err) => {
+      if (err) console.error('[proj] Maximize error:', err.message);
+    });
   }, 5000);
 }
 
@@ -260,6 +276,8 @@ function executeCommand(command) {
     if (command.name && SAFE_NAME_RE.test(command.name)) {
       openProjectInEditor(command.name);
       console.log(`[heartbeat] Opened project: ${command.name}`);
+    } else {
+      console.error(`[heartbeat] Invalid project name: ${command.name}`);
     }
   } else if (command.action === 'editor') {
     const child = exec(`"${EDITOR_CMD}"`);
