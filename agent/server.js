@@ -15,6 +15,7 @@ const EDITOR_CMD = process.env.EDITOR_CMD || 'code';
 const BASH_PATH = process.env.BASH_PATH || 'C:\\msys64\\usr\\bin\\bash.exe';
 const CLAUDE_BIN = process.env.CLAUDE_BIN || 'claude';
 const IGNORE_DIRS_ENV = process.env.IGNORE_DIRS || 'node_modules,screenshots';
+const EDITOR_TITLE = process.env.EDITOR_TITLE || '';
 
 // Warn if path-sensitive env vars use short command names (may fail without PATH)
 for (const [name, val] of [['EDITOR_CMD', EDITOR_CMD], ['CLAUDE_BIN', CLAUDE_BIN]]) {
@@ -151,23 +152,37 @@ function buildTasksJson(name) {
   };
 }
 
-// Last project opened by the web app (null = none)
-let lastWebAppProject = null;
+// Persist last web-app-opened project to file (survives agent restart)
+const LAST_PROJ_FILE = path.join(__dirname, '.last-project');
+
+function getLastWebAppProject() {
+  try { return fs.readFileSync(LAST_PROJ_FILE, 'utf8').trim() || null; } catch { return null; }
+}
+
+function setLastWebAppProject(name) {
+  try { fs.writeFileSync(LAST_PROJ_FILE, name || ''); } catch (err) {
+    console.error('[proj] Failed to write .last-project:', err.message);
+  }
+}
 
 function killExistingSessions() {
-  // Gracefully exit Claude in btn-* sessions to deregister remote, then kill tmux
+  // Gracefully exit Claude in btn-* sessions, then close the editor window
   const scriptPath = path.join(__dirname, 'kill-sessions.sh').replace(/\\/g, '/');
+  const lastProj = getLastWebAppProject();
+
   exec(`"${BASH_PATH}" -l "${scriptPath}"`, (err) => {
     if (err) console.error('[kill-sessions] Error:', err.message);
+    // Close editor window AFTER Claude has exited (deregistered remote)
+    if (lastProj) {
+      const closeScript = path.join(__dirname, 'close-window.ps1');
+      const titleQuery = EDITOR_TITLE ? `${lastProj} - ${EDITOR_TITLE}` : lastProj;
+      exec(`powershell.exe -ExecutionPolicy Bypass -File "${closeScript}" -TitlePrefix "${titleQuery}"`, (err) => {
+        if (err) console.error('[close-window] Error:', err.message);
+      });
+    }
   });
-  // Close only the editor window opened by the web app (WM_CLOSE by window title)
-  if (lastWebAppProject) {
-    const scriptPath = path.join(__dirname, 'close-window.ps1');
-    exec(`powershell.exe -ExecutionPolicy Bypass -File "${scriptPath}" -TitlePrefix "${lastWebAppProject}"`, (err) => {
-      if (err) console.error('[close-window] Error:', err.message);
-    });
-    lastWebAppProject = null;
-  }
+
+  if (lastProj) setLastWebAppProject('');
 }
 
 function openProjectInEditor(name) {
@@ -184,8 +199,15 @@ function openProjectInEditor(name) {
   // Write tasks.json with project-specific tmux session name
   fs.writeFileSync(tasksFile, JSON.stringify(buildTasksJson(name), null, 2));
 
-  // Track this project for future cleanup
-  lastWebAppProject = name;
+  // Enable auto-run tasks without prompt
+  const settingsFile = path.join(vscodeDir, 'settings.json');
+  let settings = {};
+  try { settings = JSON.parse(fs.readFileSync(settingsFile, 'utf8')); } catch {}
+  settings['task.allowAutomaticTasks'] = 'on';
+  fs.writeFileSync(settingsFile, JSON.stringify(settings, null, 2));
+
+  // Track this project for future cleanup (persisted to file)
+  setLastWebAppProject(name);
 
   // Wait for kill-sessions.sh to finish (~3s) before opening
   setTimeout(() => {

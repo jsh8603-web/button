@@ -3,6 +3,10 @@ node_modules/
 .env.local
 .next/
 
+# Agent 런타임 파일
+agent/.last-project
+agent/agent.log
+
 # IDE (agent가 tasks.json 자동 생성)
 .vscode/
 
