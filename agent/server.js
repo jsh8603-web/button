@@ -16,6 +16,7 @@ const BASH_PATH = process.env.BASH_PATH || 'C:\\msys64\\usr\\bin\\bash.exe';
 const CLAUDE_BIN = process.env.CLAUDE_BIN || 'claude';
 const IGNORE_DIRS_ENV = process.env.IGNORE_DIRS || 'node_modules,screenshots';
 const EDITOR_TITLE = process.env.EDITOR_TITLE || '';
+const CLAUDE_MODEL = process.env.CLAUDE_MODEL || 'opus';
 
 // Warn if path-sensitive env vars use short command names (may fail without PATH)
 for (const [name, val] of [['EDITOR_CMD', EDITOR_CMD], ['CLAUDE_BIN', CLAUDE_BIN]]) {
@@ -123,15 +124,17 @@ app.post('/shutdown', verifyPin, (req, res) => {
 const SAFE_NAME_RE = /^[a-zA-Z0-9_-]+$/;
 const IGNORE_DIRS = new Set(IGNORE_DIRS_ENV.split(',').map(s => s.trim()).filter(Boolean));
 
+// Windows path → MSYS path (e.g. D:\projects → /d/projects)
+const toMsys = (p) => p.replace(/\\/g, '/').replace(/^([A-Z]):/i, (_, d) => `/${d.toLowerCase()}`);
+
 // tasks.json: open tmux session with claude on folder open
 const SESSION_PREFIX = 'btn-';
 
 function buildTasksJson(name) {
   const session = `${SESSION_PREFIX}${name}`;
-  const toMsys = (p) => p.replace(/\\/g, '/').replace(/^([A-Z]):/i, (_, d) => `/${d.toLowerCase()}`);
   const projMsys = toMsys(PROJECTS_DIR);
   const claudeBinMsys = toMsys(CLAUDE_BIN);
-  const tmuxCmd = `tmux kill-session -t ${session} 2>/dev/null; tmux new-session -d -s ${session} -c ${projMsys}/${name}; tmux send-keys -t ${session} '${claudeBinMsys} --dangerously-skip-permissions --model opus' Enter; sleep 3; tmux send-keys -t ${session} Enter; sleep 2; tmux send-keys -t ${session} '/remote-control' Enter; tmux attach-session -t ${session}`;
+  const tmuxCmd = `tmux kill-session -t ${session} 2>/dev/null; tmux new-session -d -s ${session} -c ${projMsys}/${name}; tmux send-keys -t ${session} '${claudeBinMsys} --dangerously-skip-permissions --model ${CLAUDE_MODEL}' Enter; sleep 3; tmux send-keys -t ${session} Enter; sleep 2; tmux send-keys -t ${session} '/remote-control' Enter; tmux attach-session -t ${session}`;
   return {
     version: "2.0.0",
     tasks: [{
@@ -227,12 +230,7 @@ function openProjectInEditor(name) {
 // List project directories
 app.get('/projects', verifyPin, (req, res) => {
   try {
-    const entries = fs.readdirSync(PROJECTS_DIR, { withFileTypes: true });
-    const projects = entries
-      .filter(e => e.isDirectory() && !e.name.startsWith('.') && !e.name.startsWith('_') && !IGNORE_DIRS.has(e.name))
-      .map(e => e.name)
-      .sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
-    res.json({ projects });
+    res.json({ projects: getProjectList() });
   } catch (err) {
     res.status(500).json({ ok: false, message: err.message });
   }
