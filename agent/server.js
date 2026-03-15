@@ -237,48 +237,77 @@ function openProjectInEditor(name) {
       }
       console.log(`[proj] Created tmux session: ${session}`);
 
-      // Poll tmux pane until Claude prompt appears, then send /remote-control
-      const MAX_WAIT = 30000;
-      const POLL_INTERVAL = 1000;
+      // Poll tmux pane until Claude prompt is stable, then send /remote-control
+      const MAX_WAIT = 60000;
+      const POLL_INTERVAL = 2000;
+      const STABLE_INTERVAL = 1500; // shorter re-check to confirm stability
       const startTime = Date.now();
+      let lastReadyOutput = null;
+
+      function capturePaneTail(cb) {
+        exec(`"${BASH_PATH}" -lc "tmux capture-pane -t ${session} -p | tail -10"`, { encoding: 'utf8' }, cb);
+      }
+
+      function hasClaudePrompt(output) {
+        // Claude shows ">" prompt, "╭" welcome box, or "human" turn indicator when ready
+        return output.includes('>') || output.includes('\u256D') || output.includes('human');
+      }
+
+      function sendRemoteControl() {
+        const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+        console.log(`[proj] Claude stable in ${elapsed}s, sending /remote-control`);
+        exec(`"${BASH_PATH}" -lc "tmux send-keys -t ${session} '/remote-control' Enter"`, (err) => {
+          if (err) console.error('[proj] /remote-control send error:', err.message);
+          else console.log(`[proj] Sent /remote-control to ${session}`);
+
+          // Health check: verify Claude processed /remote-control
+          setTimeout(() => {
+            capturePaneTail((err, stdout) => {
+              if (err) {
+                console.error('[proj] health-check capture error:', err.message);
+                return;
+              }
+              const pane = (stdout || '').trim();
+              const alive = !pane.includes('$') || pane.includes('remote');
+              console.log(`[proj] Health check (${session}): ${alive ? 'OK' : 'Claude may have exited'}`);
+              if (!alive) console.log(`[proj] Pane content:\n${pane}`);
+            });
+          }, 5000);
+        });
+      }
 
       function waitForClaude() {
         if (Date.now() - startTime > MAX_WAIT) {
-          console.error(`[proj] Claude did not start within ${MAX_WAIT / 1000}s in ${session}`);
+          capturePaneTail((err, stdout) => {
+            console.error(`[proj] Claude did not start within ${MAX_WAIT / 1000}s in ${session}`);
+            console.error(`[proj] Pane content at timeout:\n${(stdout || '(empty)').trim()}`);
+          });
           return;
         }
-        // Capture last 5 lines of tmux pane to check for Claude's prompt
-        exec(`"${BASH_PATH}" -lc "tmux capture-pane -t ${session} -p | tail -5"`, (err, stdout) => {
+
+        capturePaneTail((err, stdout) => {
           if (err) {
             console.error('[proj] capture-pane error:', err.message);
+            setTimeout(waitForClaude, POLL_INTERVAL);
             return;
           }
           const output = (stdout || '').trim();
-          // Claude shows ">" prompt or "╭" box when ready
-          const isReady = output.includes('>') || output.includes('╭') || output.includes('human');
-          if (isReady) {
-            const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-            console.log(`[proj] Claude ready in ${elapsed}s, sending /remote-control`);
-            exec(`"${BASH_PATH}" -lc "tmux send-keys -t ${session} '/remote-control' Enter"`, (err) => {
-              if (err) console.error('[proj] /remote-control send error:', err.message);
-              else console.log(`[proj] Sent /remote-control to ${session}`);
+          const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+          const isReady = hasClaudePrompt(output);
+          console.log(`[proj] Poll ${elapsed}s: ready=${isReady} output=${output.slice(-120)}`);
 
-              // Health check: verify Claude is still alive after /remote-control
-              setTimeout(() => {
-                exec(`"${BASH_PATH}" -lc "tmux capture-pane -t ${session} -p | tail -10"`, (err, stdout) => {
-                  if (err) {
-                    console.error('[proj] health-check capture error:', err.message);
-                    return;
-                  }
-                  const pane = (stdout || '').trim();
-                  const alive = !pane.includes('$') || pane.includes('remote');
-                  console.log(`[proj] Health check (${session}): ${alive ? 'OK' : 'Claude may have exited'}`);
-                  if (!alive) console.log(`[proj] Pane content:\n${pane}`);
-                });
-              }, 5000);
-            });
+          if (isReady) {
+            if (lastReadyOutput === null) {
+              // First ready detection — re-check after short delay to confirm stable
+              lastReadyOutput = output;
+              console.log(`[proj] Prompt detected at ${elapsed}s, confirming stability...`);
+              setTimeout(waitForClaude, STABLE_INTERVAL);
+            } else {
+              // Second consecutive ready — Claude is stable, send command
+              sendRemoteControl();
+            }
           } else {
-            console.log(`[proj] Waiting for Claude... (${((Date.now() - startTime) / 1000).toFixed(0)}s) last: ${output.slice(-80)}`);
+            lastReadyOutput = null; // reset if output changed back to non-ready
             setTimeout(waitForClaude, POLL_INTERVAL);
           }
         });
