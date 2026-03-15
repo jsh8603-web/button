@@ -123,6 +123,12 @@ function buildTasksJson(name) {
       label: "claude-tmux",
       type: "shell",
       command: tmuxCmd,
+      options: {
+        shell: {
+          executable: "C:\\msys64\\usr\\bin\\bash.exe",
+          args: ["-l", "-c"]
+        }
+      },
       runOptions: { runOn: "folderOpen" },
       presentation: { reveal: "always", focus: true },
       isBackground: true,
@@ -167,6 +173,9 @@ function openProjectInAntigravity(name) {
   setTimeout(() => {
     const child = exec(`D:\\projects\\Antigravity\\bin\\antigravity.cmd "${projDir}"`);
     child.unref();
+    // Maximize the Antigravity window once it appears
+    const maxScript = path.join(__dirname, 'maximize-window.ps1');
+    exec(`powershell.exe -ExecutionPolicy Bypass -File "${maxScript}" -TitlePrefix "${name}"`);
   }, 1000);
 }
 
