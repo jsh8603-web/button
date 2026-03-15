@@ -105,7 +105,7 @@ app.post('/shutdown', verifyPin, (req, res) => {
   });
 });
 
-// Action whitelist
+// Action whitelist — returns shell command string, or null for custom-handled actions
 const ACTIONS = {
   antigravity: () => {
     return 'powershell.exe -Command "Start-Process shell:AppsFolder\\Google.Antigravity"';
@@ -113,30 +113,66 @@ const ACTIONS = {
   'claude-remote': () => {
     return 'C:\\msys64\\usr\\bin\\bash.exe -lc "tmux new-session -d -s remote -c /d/projects 2>/dev/null; tmux send-keys -t remote \'claude\' Enter"';
   },
-  proj: (name) => {
-    return `C:\\msys64\\usr\\bin\\bash.exe -lc "mkdir -p /d/projects/${name} && tmux new-session -d -s ${name} -c /d/projects/${name} 2>/dev/null; tmux send-keys -t ${name} 'claude' Enter"`;
-  },
+  proj: null, // handled separately in /run route
 };
+
+// tasks.json: open tmux session with claude on folder open
+function buildTasksJson(name) {
+  // Create or attach tmux session, send claude command, then attach
+  const tmuxCmd = `tmux new-session -d -s ${name} -c /d/projects/${name} 2>/dev/null; tmux send-keys -t ${name} 'claude --dangerously-skip-permissions --model opus' Enter; tmux attach-session -t ${name}`;
+  return {
+    version: "2.0.0",
+    tasks: [{
+      label: "claude-tmux",
+      type: "shell",
+      command: tmuxCmd,
+      runOptions: { runOn: "folderOpen" },
+      presentation: { reveal: "always", focus: true },
+      isBackground: true,
+      problemMatcher: []
+    }]
+  };
+}
+
+function openProjectInAntigravity(name) {
+  const projDir = path.join('D:\\projects', name);
+  const vscodeDir = path.join(projDir, '.vscode');
+  const tasksFile = path.join(vscodeDir, 'tasks.json');
+
+  // Ensure project and .vscode dirs exist
+  fs.mkdirSync(vscodeDir, { recursive: true });
+
+  // Always write tasks.json with project-specific tmux session name
+  fs.writeFileSync(tasksFile, JSON.stringify(buildTasksJson(name), null, 2));
+
+  // Open in Antigravity
+  const child = exec(`D:\\projects\\Antigravity\\bin\\antigravity.cmd "${projDir}"`);
+  child.unref();
+}
 
 const SAFE_NAME_RE = /^[a-zA-Z0-9_-]+$/;
 
 app.post('/run', verifyPin, (req, res) => {
   const { action, name } = req.body;
 
-  if (!action || !ACTIONS[action]) {
+  if (!action || !(action in ACTIONS)) {
     return res.status(400).json({ ok: false, message: `Unknown action: ${action}` });
   }
 
-  // Validate proj name
+  // Handle proj separately (uses Node fs + exec)
   if (action === 'proj') {
     if (!name || !SAFE_NAME_RE.test(name)) {
       return res.status(400).json({ ok: false, message: 'Invalid project name' });
     }
-
-    // Directory will be created by the command if it doesn't exist
+    try {
+      openProjectInAntigravity(name);
+      return res.json({ ok: true, action });
+    } catch (err) {
+      return res.status(500).json({ ok: false, message: err.message });
+    }
   }
 
-  const cmd = action === 'proj' ? ACTIONS[action](name) : ACTIONS[action]();
+  const cmd = ACTIONS[action]();
 
   // Fire-and-forget: respond immediately, let the command run in background
   const child = exec(cmd);
