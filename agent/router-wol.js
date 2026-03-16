@@ -364,20 +364,27 @@ function buildConfusions() {
     }
 
     // Prune: frequently observed but never winning mappings
+    // Keep at least 2 alternatives per character to maintain search diversity
+    const MIN_ALTS = 2;
     let pruned = 0;
     if (attempts >= 30) {
       for (const [from, alts] of Object.entries(merged)) {
-        merged[from] = alts.filter(to => {
-          const diffKey = `${from}→${to}`;
-          const observed = (diffs[diffKey] || 0) + (diffs[`${to}→${from}`] || 0);
+        if (alts.length <= MIN_ALTS) continue;
+        const pruneable = [];
+        for (const to of alts) {
+          const observed = (diffs[`${from}→${to}`] || 0) + (diffs[`${to}→${from}`] || 0);
           const winCount = (wins[`${from}→${to}`] || 0) + (wins[`${to}→${from}`] || 0);
-          // Only prune if heavily observed (10+) with zero wins
           if (observed >= 10 && winCount === 0) {
-            pruned++;
-            return false;
+            pruneable.push(to);
           }
-          return true;
-        });
+        }
+        // Only prune down to MIN_ALTS
+        const maxPrune = alts.length - MIN_ALTS;
+        const toPrune = new Set(pruneable.slice(0, maxPrune));
+        if (toPrune.size > 0) {
+          merged[from] = alts.filter(to => !toPrune.has(to));
+          pruned += toPrune.size;
+        }
       }
     }
 
