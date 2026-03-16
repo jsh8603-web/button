@@ -18,7 +18,7 @@ PC에 상주하는 Agent가 30초마다 heartbeat를 보내 온라인 상태와 
 
 - Web↔Agent 직접 통신 없음: Supabase KV를 매개로 비동기 통신
 - WOL 이중 전송: ① Vercel에서 직접 UDP Magic Packet (Shutdown용) ② 공유기 WOL API 호출 (Sleep/Hibernate용, port 88)
-- 공유기 세션 유지: Agent가 최초 CAPTCHA 풀어서 로그인 → Vercel Cron이 30분마다 keep-alive → 세션 영구 유지
+- 공유기 세션 유지: Agent 부팅 시 KV에 저장된 쿠키 복원 → 유효하면 CAPTCHA 스킵, 만료 시만 CAPTCHA 로그인 → Supabase pg_cron이 30분마다 keep-alive (Agent 독립)
 - Sleep/Hibernate 전: 쿠키 유효성 확인 후 KV에 24h TTL로 저장 (CAPTCHA 재풀이 불필요)
 - Agent는 heartbeat 응답으로 대기 명령을 수신하고, 실행 후 KV에서 삭제 (1회 실행 보장)
 - Heartbeat에 `sessions: [{name, protected}]` 포함 → 웹 UI에서 세션 관리
@@ -32,7 +32,7 @@ web/                          → Next.js 웹앱 (Vercel 배포)
     globals.css               → Tailwind v4 + glow 애니메이션 키프레임
     api/
       auth/route.ts           → PIN → bcrypt 검증 → JWT 쿠키 발급 (24h, httpOnly)
-      heartbeat/route.ts      → Agent 상태+sessions 수신 + 대기 명령 반환 (Bearer 인증)
+      heartbeat/route.ts      → Agent 상태+sessions 수신 + 대기 명령 반환 + KV 쿠키 복원 (Bearer 인증)
       status/route.ts         → KV에서 heartbeat 읽기 (45초 이내 → online, sessions 포함)
       wake/route.ts           → UDP 매직패킷 + 공유기 WOL API 이중 전송 (Sleep/Shutdown 모두 대응)
       shutdown/route.ts       → KV에 shutdown 명령 저장 (TTL 120초)
@@ -80,8 +80,13 @@ cd agent && node server.js    # Agent 실행
 - 프로젝트: `aocsyodhcdvhkspfpbyj` (babyplace, Seoul region)
 - 테이블: `agent_kv` (key-value store, RLS 적용)
 - Extensions: `pg_cron` + `pg_net` (라우터 세션 keep-alive용)
-- pg_cron job: `router-keepalive` — 30분마다 `/api/cron/router-keepalive` 호출 → 공유기 세션 영구 유지
+- pg_cron job: `router-keepalive` — 30분마다 `/api/cron/router-keepalive` 호출 → 공유기 세션 영구 유지 (Agent와 독립 실행)
 - 관리: `npx supabase db query --linked "SELECT * FROM cron.job;"`
+
+## CAPTCHA 시스템
+- 상세 문서: `agent/CAPTCHA-SYSTEM.md` (캡차 로그 분석/수정 시 반드시 참조)
+- 핵심 코드: `agent/router-wol.js`
+- 학습 데이터: `agent/.captcha-learned.json`
 
 ## Critical Rules
 - Agent 화이트리스트 명령만 실행: `shutdown`, `proj`, `editor`, `protect-session`, `unprotect-session`, `kill-session`, `sleep`, `hibernate`, `display_off`
@@ -90,6 +95,7 @@ cd agent && node server.js    # Agent 실행
 - Heartbeat Bearer 토큰 = `AGENT_SECRET` (Agent↔Vercel 인증)
 - KV TTL: heartbeat 45초, projects 300초, command 120초, routerCookie 3600초 (pre-sleep: 86400초)
 - middleware는 JWT 서명 검증 없이 구조+만료만 체크 (Edge Runtime 호환)
+- heartbeat는 라우터 로그인(CAPTCHA)에 블로킹되면 안 됨: 로그인 진행 중이면 쿠키 null로 즉시 전송
 - 세션 보호 optimistic UI: action 후 35초간 서버 sessions 폴링 무시 (깜빡임 방지)
 
 ## UI 아이콘 인덱스 (모두 SVG)

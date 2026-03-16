@@ -8,12 +8,12 @@ LG U+ 공유기 자동 로그인을 위한 하이브리드 CAPTCHA 해결 시스
 ## 아키텍처
 
 ```
-Agent 부팅 → login() → 세션 쿠키 → KV 저장 → Vercel wake route가 공유기 WOL API 호출
-                ↓
+Agent 부팅 → KV 쿠키 복원 시도 → 유효하면 CAPTCHA 스킵
+                ↓ (만료/없음)
          [Phase 1: 학습 + 1차 시도]
          GPT-4o mini (5x 병렬) + CapSolver (1x) 동시 실행
                 ↓
-         Confidence Scoring → Beam Search → 상위 50개 변형 순차 시도
+         Confidence Scoring → Beam Search → 상위 30개 변형 순차 시도
                 ↓ (실패 시)
          [Phase 2: CapSolver 전용 Fallback]
          새 CAPTCHA 3회 × CapSolver + Confusion 변형
@@ -72,7 +72,7 @@ pos1: k:78.0 h:0.3 x:0.3         ← 양쪽 일치, 높은 확신
 
 Phase 1 실패 시 새 CAPTCHA 3회 발급받아 CapSolver만 사용:
 - CapSolver 답변 직접 시도
-- Confusion map 기반 변형 (최대 20개)
+- Confusion map 기반 변형 (최대 25개)
 - GPT 호출 없음 → 빠름 (~2초/회)
 
 ## 적응형 학습 (.captcha-learned.json)
@@ -101,42 +101,81 @@ Phase 1 실패 시 새 CAPTCHA 3회 발급받아 CapSolver만 사용:
 ### 자동 정리
 - 80개+ 매핑 축적 시 count≤1 항목 제거 (noise 정리)
 
-## Confusion Map (혼동 문자)
+## Confusion Map (혼동 문자) — 자동 진화
 
-자주 혼동되는 문자 쌍:
+`BASE_CONFUSIONS` (정적 테이블) + 학습 데이터로 자동 보강/정리.
+
+**기본 혼동 쌍:**
 ```
-i↔j↔l↔1, c↔s↔e, b↔d↔h↔6↔8, n↔h↔r↔m
+i↔j↔l↔1, c↔s↔e, b↔d↔h↔6↔8↔u↔k, n↔h↔r↔m
 o↔a↔0↔c, p↔q↔g↔9, v↔y↔u↔w, t↔r↔f↔7
 ```
 
-## 세션 유지: Vercel Cron Keep-Alive
+**자동 보강 (`buildConfusions` at startup):**
+- `winMappings`에서 2회+ 성공한 from→to 매핑 → CONFUSIONS에 자동 추가
+- 예: `u→b` 16회 성공 → `u` 항목에 `b` 자동 등록
 
-CAPTCHA는 최초 1회만 풀면 된다. 이후 세션은 Cron이 자동 유지.
+**자동 정리 (30+ attempts 이후):**
+- `gptToCap`에 5회+ 관측되었지만 `winMappings`에 0회인 매핑 → 노이즈로 판단, 제거
+- 솔버들이 자주 혼동하지만 실제 정답과 무관한 매핑을 정리하여 검색 공간 축소
+
+**로그 예시:**
+```
+[router] Confusions: +3 from wins, -2 pruned (52 attempts)
+```
+
+## CAPTCHA 진행 상태 (웹앱 표시)
+
+Agent가 CAPTCHA 진행 상태를 KV(`btn:captcha-status`)에 기록 → 웹앱에 실시간 표시.
+
+**표시 시점:** 부팅, heartbeat 백그라운드 로그인, sleep/hibernate 모두
+**메시지 종류:**
+- `CAPTCHA 풀이 중 (2/5)` — 진행 중 (N번째 시도)
+- `CAPTCHA 성공` — 로그인 성공
+- `CAPTCHA 실패` — 전체 실패
+- `CAPTCHA 실패 — sleep 취소됨` — sleep/hibernate 시 실패로 취소
+
+**웹앱 표시 위치:** `actionFeedback` (파워 버튼 아래 amber 텍스트)
+
+## Sleep/Hibernate CAPTCHA 정책
+
+| 상황 | 동작 |
+|------|------|
+| 쿠키 유효 | CAPTCHA 안 풀고 즉시 sleep |
+| 쿠키 만료/없음 | CAPTCHA 5회 시도 |
+| CAPTCHA 성공 | 쿠키 KV에 24h TTL 저장 → sleep 실행 |
+| CAPTCHA 실패 | **sleep 취소** (쿠키 없이 sleep하면 WOL 불가) |
+
+## Heartbeat CAPTCHA 정책
+
+| 상황 | 동작 |
+|------|------|
+| 쿠키 유효 | keepAlive → 그대로 사용 |
+| 쿠키 만료 | 백그라운드 로그인 시작 (heartbeat 비블로킹) |
+| 로그인 진행 중 | heartbeat는 쿠키 null로 즉시 전송 |
+| 로그인 실패 | `heartbeatLoginFailed` 플래그 → 재시도 안 함 |
+
+## 세션 유지: Supabase pg_cron Keep-Alive
+
+CAPTCHA는 최초 1회만 풀면 된다. 이후 세션은 pg_cron이 Agent와 독립적으로 유지.
 
 ```
-Agent 부팅 → CAPTCHA 풀어서 로그인 → 쿠키 KV 저장
-                                         ↓
-                              Vercel Cron (30분마다)
-                              → KV에서 쿠키 읽기
-                              → 공유기에 GET keep-alive
-                              → 세션 살아있으면 TTL 24h 갱신
-                              → 세션 만료면 KV에서 쿠키 삭제
+Agent 부팅 → KV 쿠키 복원 or CAPTCHA → 쿠키 KV 저장
+                                              ↓
+                                   pg_cron (30분마다, Agent 독립)
+                                   → KV에서 쿠키 읽기
+                                   → 공유기에 GET keep-alive
+                                   → 세션 살아있으면 TTL 24h 갱신
+                                   → 세션 만료면 KV에서 쿠키 삭제
 ```
 
 **PC 상태별 동작:**
 | PC 상태 | 세션 유지 주체 | CAPTCHA 필요? |
 |---------|--------------|:------------:|
-| 켜짐 | Agent heartbeat (30초) + Cron (30분) | 최초 1회만 |
-| Sleep/Hibernate | Cron만 (30분) | 불필요 |
-| Shutdown | Cron만 (30분) | 불필요 (UDP WOL 사용) |
+| 켜짐 | Agent heartbeat (30초) + pg_cron (30분) | 최초 1회만 |
+| Sleep/Hibernate | pg_cron만 (30분) | 불필요 |
+| Shutdown | pg_cron만 (30분) | 불필요 (UDP WOL 사용) |
 | 공유기 재부팅 후 | Agent 부팅 시 재로그인 | 필요 |
-
-**Pre-sleep 흐름:**
-1. Sleep/Hibernate 명령 수신
-2. `refreshBeforeSleep()` — 세션 살아있으면 그대로 사용 (CAPTCHA 안 풀음)
-3. 쿠키를 KV에 24h TTL로 저장
-4. 실제 sleep/hibernate 실행
-5. 이후 Cron이 30분마다 세션 유지
 
 **Cron 설정:**
 - Supabase `pg_cron` + `pg_net`: `*/30 * * * *` (30분 간격)
@@ -146,11 +185,11 @@ Agent 부팅 → CAPTCHA 풀어서 로그인 → 쿠키 KV 저장
 
 ## 성능 지표
 
-- Phase 1 소요: ~3-5초 (GPT+CapSolver 병렬) + ~15초 (50 variants POST)
+- Phase 1 소요: ~3-5초 (GPT+CapSolver 병렬) + ~15초 (30 variants POST)
 - Phase 2 소요: ~2초/회 × 3회
 - 총 최대 시도: 5회 retry × (Phase1 + Phase2)
 - 목표: 1~2 attempt 내 성공 (학습 누적 후)
-- 현재 성공률: ~17% (23 attempts, 4 successes) — 동적 가중치 적용으로 누적 개선 기대
+- 현재 성공률: ~13.5% (52 attempts, 7 successes) — 학습 + confusion 자동 보강으로 개선 중
 
 ## 환경변수
 
@@ -165,8 +204,9 @@ Agent 부팅 → CAPTCHA 풀어서 로그인 → 쿠키 KV 저장
 
 | 파일 | 역할 |
 |------|------|
-| `agent/router-wol.js` | CAPTCHA 해결 + 로그인 + 세션 관리 |
-| `agent/.captcha-learned.json` | 학습된 혼동 매핑 (자동 생성) |
+| `agent/router-wol.js` | CAPTCHA 해결 + 로그인 + 세션 관리 + confusion 자동 진화 |
+| `agent/.captcha-learned.json` | 학습된 혼동 매핑 (자동 생성, git 제외) |
 | `agent/router-js/` | 공유기 RSA 암호화 라이브러리 (jsbn, rsa 등) |
-| `web/src/app/api/cron/router-keepalive/route.ts` | Vercel Cron 세션 keep-alive |
-| `web/vercel.json` | Vercel 설정 (cron은 Supabase pg_cron으로 이관) |
+| `web/src/app/api/cron/router-keepalive/route.ts` | pg_cron 세션 keep-alive |
+| `web/src/app/api/heartbeat/route.ts` | captchaStatus KV 저장 + storedRouterCookie 반환 |
+| `web/src/app/api/status/route.ts` | captchaStatus 웹앱에 전달 |
