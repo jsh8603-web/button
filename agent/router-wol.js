@@ -333,7 +333,10 @@ const BASE_CONFUSIONS = {
   'm': ['n'], 'x': ['k', 'z'],
 };
 
-// Merge learned winMappings into CONFUSIONS at startup (threshold: 2+ wins)
+// Build CONFUSIONS from BASE + learned wins, then prune low-value mappings.
+// Add: winMappings 2+ wins → merge into table
+// Prune: gptToCap 5+ observations + 0 wins → remove (noise, not real confusion)
+// Only prune after 30+ total attempts (enough data to judge)
 function buildConfusions() {
   const merged = {};
   for (const [k, v] of Object.entries(BASE_CONFUSIONS)) {
@@ -341,20 +344,45 @@ function buildConfusions() {
   }
   try {
     const learnedPath = path.join(__dirname, '.captcha-learned.json');
-    if (fs.existsSync(learnedPath)) {
-      const data = JSON.parse(fs.readFileSync(learnedPath, 'utf8'));
-      let added = 0;
-      for (const [key, count] of Object.entries(data.winMappings || {})) {
-        if (count < 2) continue;
-        const [from, to] = key.split('→');
-        if (!from || !to || to.length !== 1) continue;
-        if (!merged[from]) merged[from] = [];
-        if (!merged[from].includes(to)) {
-          merged[from].push(to);
-          added++;
-        }
+    if (!fs.existsSync(learnedPath)) return merged;
+    const data = JSON.parse(fs.readFileSync(learnedPath, 'utf8'));
+    const wins = data.winMappings || {};
+    const diffs = data.gptToCap || {};
+    const attempts = data.stats?.attempts || 0;
+
+    // Add: high-frequency win mappings
+    let added = 0;
+    for (const [key, count] of Object.entries(wins)) {
+      if (count < 2) continue;
+      const [from, to] = key.split('→');
+      if (!from || !to || to.length !== 1) continue;
+      if (!merged[from]) merged[from] = [];
+      if (!merged[from].includes(to)) {
+        merged[from].push(to);
+        added++;
       }
-      if (added > 0) console.log(`[router] Auto-added ${added} confusion mappings from learned wins`);
+    }
+
+    // Prune: frequently observed but never winning mappings
+    let pruned = 0;
+    if (attempts >= 30) {
+      for (const [from, alts] of Object.entries(merged)) {
+        merged[from] = alts.filter(to => {
+          const diffKey = `${from}→${to}`;
+          const observed = (diffs[diffKey] || 0) + (diffs[`${to}→${from}`] || 0);
+          const winCount = (wins[`${from}→${to}`] || 0) + (wins[`${to}→${from}`] || 0);
+          // Only prune if heavily observed (5+) with zero wins
+          if (observed >= 5 && winCount === 0) {
+            pruned++;
+            return false;
+          }
+          return true;
+        });
+      }
+    }
+
+    if (added > 0 || pruned > 0) {
+      console.log(`[router] Confusions: +${added} from wins, -${pruned} pruned (${attempts} attempts)`);
     }
   } catch {}
   return merged;
