@@ -4,13 +4,12 @@ import { useState, useEffect, useRef, useCallback } from "react";
 
 type PcStatus = "online" | "offline" | "waking" | "shutting-down";
 
-function timeAgo(date: Date): string {
-  const seconds = Math.floor((Date.now() - date.getTime()) / 1000);
-  if (seconds < 60) return `${seconds}s ago`;
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}min ago`;
-  const hours = Math.floor(minutes / 60);
-  return `${hours}h ago`;
+const POLL_INTERVAL = 10; // seconds
+
+function nextRefresh(date: Date): string {
+  const elapsed = Math.floor((Date.now() - date.getTime()) / 1000);
+  const remaining = Math.max(0, POLL_INTERVAL - elapsed);
+  return `${remaining}s`;
 }
 
 // ─── PIN Entry ───────────────────────────────────────────────
@@ -214,7 +213,7 @@ type SessionInfo = { name: string; protected: boolean };
 function Dashboard() {
   const [status, setStatus] = useState<PcStatus>("offline");
   const [lastChecked, setLastChecked] = useState<Date>(new Date());
-  const [lastCheckedText, setLastCheckedText] = useState("just now");
+  const [lastCheckedText, setLastCheckedText] = useState(`${POLL_INTERVAL}s`);
   const [actionFeedback, setActionFeedback] = useState("");
   const [showProjDropdown, setShowProjDropdown] = useState(false);
   const [projects, setProjects] = useState<string[]>([]);
@@ -228,6 +227,10 @@ function Dashboard() {
   const [showPowerMenu, setShowPowerMenu] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
   const [lastPowerAction, setLastPowerAction] = useState<string | null>(null);
+  const [captchaManual, setCaptchaManual] = useState<{ image: string; params: Record<string, string> } | null>(null);
+  const [captchaInput, setCaptchaInput] = useState("");
+  const [showCaptchaModal, setShowCaptchaModal] = useState(false);
+  const captchaInputRef = useRef<HTMLInputElement>(null);
   const newProjInputRef = useRef<HTMLInputElement>(null);
   // Prevent server poll from overwriting optimistic session updates
   const sessionActionTime = useRef(0);
@@ -250,8 +253,17 @@ function Dashboard() {
       // Show CAPTCHA progress from agent
       if (data.captchaStatus) {
         setActionFeedback(data.captchaStatus);
-      } else if (actionFeedback && (actionFeedback.startsWith("CAPTCHA") || actionFeedback.includes("캡차") || actionFeedback.includes("CAPTCHA"))) {
+      } else if (actionFeedback?.startsWith("CAPTCHA") || actionFeedback?.startsWith("Solving") || actionFeedback?.startsWith("Fetching") || actionFeedback?.startsWith("Verifying") || actionFeedback?.startsWith("Wrong") || actionFeedback?.startsWith("Failed")) {
         setActionFeedback("");
+      }
+      // Update manual CAPTCHA data
+      setCaptchaManual(data.captchaManual || null);
+      if (data.captchaManual && showCaptchaModal) {
+        setTimeout(() => captchaInputRef.current?.focus(), 100);
+      }
+      // Auto-close modal on success
+      if (data.captchaStatus === "CAPTCHA solved!" && showCaptchaModal) {
+        setTimeout(() => { setShowCaptchaModal(false); setActionFeedback(""); }, 2000);
       }
       setStatus((prev) => {
         if (prev === "waking") return isOnline ? "online" : prev;
@@ -271,14 +283,14 @@ function Dashboard() {
   // Initial check + polling
   useEffect(() => {
     checkStatus();
-    const interval = setInterval(checkStatus, 10000);
+    const interval = setInterval(checkStatus, POLL_INTERVAL * 1000);
     return () => clearInterval(interval);
   }, [checkStatus]);
 
   // Update "time ago" text every second
   useEffect(() => {
     const interval = setInterval(() => {
-      setLastCheckedText(timeAgo(lastChecked));
+      setLastCheckedText(nextRefresh(lastChecked));
     }, 1000);
     return () => clearInterval(interval);
   }, [lastChecked]);
@@ -505,17 +517,136 @@ function Dashboard() {
 
       {/* Last Checked */}
       <p className="mt-2 text-xs text-white/30">
-        Checked {lastCheckedText}
+        Refresh in {lastCheckedText}
       </p>
 
-      {/* Action Feedback */}
+      {/* Action Feedback — tap CAPTCHA status to solve manually */}
       <div className="h-6 mt-3">
         {actionFeedback && (
-          <p className="text-xs text-amber-400/80 animate-pulse">
+          <p
+            className={`text-xs text-amber-400/80 animate-pulse ${
+              actionFeedback.includes("CAPTCHA") || actionFeedback.includes("Solving") ? "cursor-pointer underline decoration-dotted" : ""
+            }`}
+            onClick={() => {
+              if (!(actionFeedback.includes("CAPTCHA") || actionFeedback.includes("Solving"))) return;
+              if (!confirm("Solve CAPTCHA manually?")) return;
+              setShowCaptchaModal(true);
+              setCaptchaInput("");
+              // Request fresh CAPTCHA image from agent
+              fetch("/api/run", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ action: "captcha-fetch" }),
+              });
+              setActionFeedback("Requesting CAPTCHA image...");
+            }}
+          >
             {actionFeedback}
           </p>
         )}
       </div>
+
+      {/* Manual CAPTCHA Modal */}
+      {showCaptchaModal && (
+        <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4">
+          <div className="bg-zinc-900 border border-white/10 rounded-xl p-5 w-full max-w-xs">
+            <p className="text-sm text-white/60 mb-3">Solve CAPTCHA</p>
+            {captchaManual ? (
+              <>
+                <img
+                  src={`data:image/png;base64,${captchaManual.image}`}
+                  alt="CAPTCHA"
+                  className="w-full rounded border border-white/10 mb-3"
+                  style={{ imageRendering: "pixelated" }}
+                />
+                <input
+                  ref={captchaInputRef}
+                  type="text"
+                  value={captchaInput}
+                  onChange={(e) => setCaptchaInput(e.target.value.toLowerCase())}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && captchaInput.length >= 4) {
+                      fetch("/api/run", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                          action: "captcha-answer",
+                          answer: captchaInput,
+                          params: captchaManual.params,
+                        }),
+                      });
+                      setActionFeedback("Verifying...");
+                      setCaptchaInput("");
+                    }
+                  }}
+                  placeholder="Type CAPTCHA text"
+                  className="w-full bg-black/50 border border-white/20 rounded-lg px-3 py-2
+                    text-white text-center text-lg tracking-widest font-mono
+                    focus:outline-none focus:border-amber-400/50"
+                  autoFocus
+                  autoComplete="off"
+                  autoCapitalize="off"
+                />
+                <div className="flex gap-2 mt-3">
+                  <button
+                    onClick={() => {
+                      if (captchaInput.length >= 4) {
+                        fetch("/api/run", {
+                          method: "POST",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({
+                            action: "captcha-answer",
+                            answer: captchaInput,
+                            params: captchaManual.params,
+                          }),
+                        });
+                        setActionFeedback("Verifying...");
+                        setCaptchaInput("");
+                      }
+                    }}
+                    className="flex-1 py-2 rounded-lg bg-amber-500/20 text-amber-400 text-sm
+                      hover:bg-amber-500/30 transition-colors"
+                  >
+                    Submit
+                  </button>
+                  <button
+                    onClick={() => {
+                      // Request new CAPTCHA
+                      fetch("/api/run", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ action: "captcha-fetch" }),
+                      });
+                      setCaptchaInput("");
+                      setActionFeedback("Requesting new CAPTCHA...");
+                    }}
+                    className="py-2 px-3 rounded-lg bg-white/5 text-white/40 text-sm
+                      hover:bg-white/10 transition-colors"
+                  >
+                    New
+                  </button>
+                  <button
+                    onClick={() => { setShowCaptchaModal(false); setCaptchaManual(null); }}
+                    className="py-2 px-3 rounded-lg bg-white/5 text-white/40 text-sm
+                      hover:bg-white/10 transition-colors"
+                  >
+                    Close
+                  </button>
+                </div>
+              </>
+            ) : (
+              <div className="text-center py-8">
+                <div className="text-white/30 text-sm animate-pulse">Loading CAPTCHA image...</div>
+              </div>
+            )}
+            {actionFeedback === "CAPTCHA solved!" && (
+              <div className="mt-3 text-center text-green-400 text-sm">
+                Solved! Closing...
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Quick Actions — only visible when PC is ON */}
       <div

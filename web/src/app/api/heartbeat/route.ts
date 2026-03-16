@@ -36,6 +36,14 @@ export async function POST(request: NextRequest) {
       }
     }
 
+    // Store manual CAPTCHA image+params (for user to solve)
+    if (body.captchaManual) {
+      await kvSet(KEYS.captchaManual, body.captchaManual, 300);
+    }
+    if (body.captchaManualClear) {
+      await kvDel(KEYS.captchaManual);
+    }
+
     // Include KV-stored protection state so agent can sync
     const protectedSessions = await kvGet<string[]>(KEYS.protected) || [];
 

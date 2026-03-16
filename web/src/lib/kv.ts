@@ -64,4 +64,5 @@ export const KEYS = {
   lastPowerAction: "btn:last-power-action",
   routerCookie: "btn:router-cookie",
   captchaStatus: "btn:captcha-status",
+  captchaManual: "btn:captcha-manual",
 } as const;

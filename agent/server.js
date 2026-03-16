@@ -5,7 +5,7 @@ const { exec } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 require('dotenv').config({ path: path.join(__dirname, '.env') });
-const { initRouterSession, heartbeatKeepAlive, getCookie, refreshBeforeSleep } = require('./router-wol');
+const { initRouterSession, heartbeatKeepAlive, getCookie, refreshBeforeSleep, fetchManualCaptcha, submitManualCaptcha } = require('./router-wol');
 
 const app = express();
 const PORT = process.env.PORT || 9876;
@@ -467,7 +467,7 @@ async function executeSleepAction(action) {
     const freshCookie = await refreshBeforeSleep(onProgress);
     if (!freshCookie) {
       console.log(`[${action}] CAPTCHA failed — ${action} cancelled`);
-      setCaptchaStatus(`CAPTCHA 실패 — ${action} 취소됨`);
+      setCaptchaStatus(`CAPTCHA failed — ${action} cancelled`);
       return;
     }
     if (VERCEL_URL && AGENT_SECRET) {
@@ -560,6 +560,63 @@ function executeCommand(command) {
     }
   } else if (command.action === 'sleep' || command.action === 'hibernate') {
     executeSleepAction(command.action);
+  } else if (command.action === 'captcha-fetch') {
+    // User requested manual CAPTCHA — fetch image and store in KV
+    (async () => {
+      try {
+        setCaptchaStatus('Fetching CAPTCHA...');
+        const captcha = await fetchManualCaptcha();
+        if (captcha) {
+          // Store image + params in KV via heartbeat
+          await fetch(`${VERCEL_URL}/api/heartbeat`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${AGENT_SECRET}` },
+            body: JSON.stringify({
+              uptime: process.uptime(),
+              captchaManual: { image: captcha.imageBase64, params: captcha.params },
+              captchaStatus: 'Solve CAPTCHA below',
+            }),
+            signal: AbortSignal.timeout(10_000),
+          });
+          console.log('[captcha] Manual CAPTCHA image sent to KV');
+        } else {
+          setCaptchaStatus('Failed to fetch CAPTCHA');
+        }
+      } catch (err) {
+        console.error('[captcha] Fetch error:', err.message);
+        setCaptchaStatus('Failed to fetch CAPTCHA');
+      }
+    })();
+  } else if (command.action === 'captcha-answer') {
+    // User submitted manual CAPTCHA answer
+    (async () => {
+      try {
+        setCaptchaStatus('Verifying...');
+        const cookie = await submitManualCaptcha(command.answer, command.params);
+        if (cookie) {
+          // Store cookie in KV
+          await fetch(`${VERCEL_URL}/api/heartbeat`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${AGENT_SECRET}` },
+            body: JSON.stringify({
+              uptime: process.uptime(),
+              routerCookie: cookie,
+              routerCookieTTL: 3600,
+              captchaStatus: 'CAPTCHA solved!',
+              captchaManualClear: true,
+            }),
+            signal: AbortSignal.timeout(10_000),
+          });
+          // Clear success message after 5s
+          setTimeout(() => setCaptchaStatus(''), 5000);
+        } else {
+          setCaptchaStatus('Wrong answer — tap to retry');
+        }
+      } catch (err) {
+        console.error('[captcha] Submit error:', err.message);
+        setCaptchaStatus('Verification error');
+      }
+    })();
   } else if (command.action === 'display_off') {
     exec('powershell.exe -Command "(Add-Type -MemberDefinition \'[DllImport(\\"user32.dll\\")]public static extern int SendMessage(int hWnd,int Msg,int wParam,int lParam);\' -Name a -Passthru)::SendMessage(-1,0x0112,0xF170,2)"', (err) => {
       if (err) console.error('[display_off] Error:', err.message);

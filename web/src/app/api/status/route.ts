@@ -5,9 +5,10 @@ export const dynamic = "force-dynamic";
 
 export async function GET() {
   try {
-    const [data, captchaStatus] = await Promise.all([
+    const [data, captchaStatus, captchaManual] = await Promise.all([
       kvGet<Heartbeat>(KEYS.heartbeat),
       kvGet<string>(KEYS.captchaStatus),
+      kvGet<{ image: string; params: Record<string, string> }>(KEYS.captchaManual),
     ]);
 
     if (data && Date.now() - data.timestamp < 45_000) {
@@ -18,6 +19,7 @@ export async function GET() {
         uptime: data.uptime,
         sessions: data.sessions || [],
         ...(captchaStatus ? { captchaStatus } : {}),
+        ...(captchaManual ? { captchaManual } : {}),
       });
     }
 
@@ -26,6 +28,7 @@ export async function GET() {
       status: "offline",
       lastAction,
       ...(captchaStatus ? { captchaStatus } : {}),
+      ...(captchaManual ? { captchaManual } : {}),
     });
   } catch {
     return NextResponse.json({ status: "offline" });

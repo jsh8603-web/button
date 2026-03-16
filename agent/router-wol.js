@@ -906,13 +906,13 @@ async function _loginWithRetry(maxRetries, onProgress) {
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       console.log(`[router] Login attempt ${attempt}/${maxRetries}...`);
-      if (onProgress) onProgress(`CAPTCHA 풀이 중 (${attempt}/${maxRetries})`);
+      if (onProgress) onProgress(`Solving CAPTCHA (${attempt}/${maxRetries})`);
 
       const cookie = await login();
       if (cookie) {
         currentCookie = cookie;
         lastLoginTime = Date.now();
-        if (onProgress) onProgress('CAPTCHA 성공');
+        if (onProgress) onProgress('CAPTCHA solved!');
         return cookie;
       }
     } catch (err) {
@@ -924,7 +924,7 @@ async function _loginWithRetry(maxRetries, onProgress) {
     }
   }
   console.error(`[router] All ${maxRetries} login attempts failed`);
-  if (onProgress) onProgress('CAPTCHA 실패');
+  if (onProgress) onProgress('CAPTCHA failed');
   return null;
 }
 
@@ -1021,4 +1021,57 @@ async function refreshBeforeSleep(onProgress = null) {
   return await loginWithRetry(5, onProgress);
 }
 
-module.exports = { initRouterSession, heartbeatKeepAlive, getCookie, refreshBeforeSleep };
+/**
+ * Fetch a fresh CAPTCHA image for manual solving.
+ * Returns { imageBase64, params } or null on error.
+ */
+async function fetchManualCaptcha() {
+  try {
+    const r1 = await httpReq('GET', '/web/public_data.html?func=get_captcha(intro)');
+    const parts = r1.data.toString().split('&');
+    if (parts.length < 4) return null;
+
+    const [imgPath, lpNum, eVal, nVal] = parts;
+    const imgRes = await httpReq('GET', '/' + imgPath);
+    const captchaImage = imgPath.split('/')[1].split('.')[0];
+
+    return {
+      imageBase64: imgRes.data.toString('base64'),
+      params: { nVal, eVal, lpNum, captchaImage },
+    };
+  } catch (err) {
+    console.error('[router] Failed to fetch manual CAPTCHA:', err.message);
+    return null;
+  }
+}
+
+/**
+ * Attempt login with user-provided CAPTCHA answer.
+ * @param {string} answer - user's CAPTCHA text
+ * @param {object} params - { nVal, eVal, lpNum, captchaImage }
+ */
+async function submitManualCaptcha(answer, params) {
+  try {
+    const { nVal, eVal, lpNum, captchaImage } = params;
+    const encPwd = passEnc2(password, nVal, eVal);
+    const encCap = passEnc2(Buffer.from(answer).toString('base64'), nVal, eVal);
+    const formData = `page=web/intro.html&http_passwd=${encodeURIComponent(encPwd)}&captcha=${encodeURIComponent(encCap)}&captcha_image=${encodeURIComponent(captchaImage)}&lp_num=${lpNum}&hidden_action=Login`;
+
+    const loginRes = await httpReq('POST', '/web/intro.html', formData);
+
+    if (loginRes.setCookie) {
+      currentCookie = loginRes.setCookie;
+      lastLoginTime = Date.now();
+      heartbeatLoginFailed = false;
+      console.log(`[router] Manual CAPTCHA success: "${answer}"`);
+      return currentCookie;
+    }
+    console.log(`[router] Manual CAPTCHA failed: "${answer}"`);
+    return null;
+  } catch (err) {
+    console.error('[router] Manual CAPTCHA error:', err.message);
+    return null;
+  }
+}
+
+module.exports = { initRouterSession, heartbeatKeepAlive, getCookie, refreshBeforeSleep, fetchManualCaptcha, submitManualCaptcha };
