@@ -270,10 +270,19 @@ function Dashboard() {
         setTimeout(() => setActionFeedback(""), 5000);
       }
     } else {
-      // Toggle power menu
-      setShowPowerMenu(!showPowerMenu);
-      setShowSessionDropdown(false);
-      setShowProjDropdown(false);
+      // Shutdown — confirm first
+      if (window.confirm("Shut down PC?")) {
+        setStatus("shutting-down");
+        try {
+          await fetch("/api/shutdown", { method: "POST" });
+          setActionFeedback("Shutdown signal sent");
+          setTimeout(() => setActionFeedback(""), 3000);
+        } catch {
+          setStatus("online");
+          setActionFeedback("Failed to reach PC");
+          setTimeout(() => setActionFeedback(""), 3000);
+        }
+      }
     }
   };
 
@@ -414,48 +423,8 @@ function Dashboard() {
         <PowerIcon className={`w-12 h-12 ${iconColor} transition-colors duration-500`} />
       </button>
 
-      {/* Power Menu */}
-      <div
-        className={`
-          mt-4 w-48 transition-all duration-300 overflow-hidden
-          ${status === "online" && showPowerMenu ? "max-h-60 opacity-100" : "max-h-0 opacity-0"}
-        `}
-      >
-        <div className="bg-white/5 border border-white/10 rounded-xl overflow-hidden">
-          <button
-            onClick={() => handlePowerAction("sleep", "Sleep")}
-            className="w-full px-4 py-2.5 text-left text-sm text-white/70
-              hover:bg-white/10 hover:text-white transition-colors flex items-center gap-3"
-          >
-            <span>😴</span> Sleep
-          </button>
-          <button
-            onClick={() => handlePowerAction("hibernate", "Hibernate")}
-            className="w-full px-4 py-2.5 text-left text-sm text-white/70
-              hover:bg-white/10 hover:text-white transition-colors flex items-center gap-3"
-          >
-            <span>💤</span> Hibernate
-          </button>
-          <button
-            onClick={() => handlePowerAction("display_off", "Display off")}
-            className="w-full px-4 py-2.5 text-left text-sm text-white/70
-              hover:bg-white/10 hover:text-white transition-colors flex items-center gap-3"
-          >
-            <span>🖥️</span> Display Off
-          </button>
-          <button
-            onClick={() => handlePowerAction("shutdown", "Shutdown", "Shut down PC?")}
-            className="w-full px-4 py-2.5 text-left text-sm text-red-400/70
-              hover:bg-red-500/10 hover:text-red-400 transition-colors flex items-center gap-3
-              border-t border-white/10"
-          >
-            <span>⏻</span> Shut Down
-          </button>
-        </div>
-      </div>
-
       {/* Status Text */}
-      <p className="mt-4 text-lg font-medium text-white/80 transition-all duration-300">
+      <p className="mt-8 text-lg font-medium text-white/80 transition-all duration-300">
         {statusText}
       </p>
 
@@ -489,8 +458,23 @@ function Dashboard() {
       >
         <button
           onClick={() => {
+            setShowPowerMenu(!showPowerMenu);
+            setShowSessionDropdown(false);
+            setShowProjDropdown(false);
+          }}
+          className="w-12 h-12 rounded-xl bg-white/5 border border-white/10
+            flex items-center justify-center
+            hover:bg-white/10 hover:border-white/20
+            active:scale-90 transition-all duration-200"
+          title="Power Options"
+        >
+          <span className="text-xl">😴</span>
+        </button>
+        <button
+          onClick={() => {
             setShowSessionDropdown(!showSessionDropdown);
             setShowProjDropdown(false);
+            setShowPowerMenu(false);
           }}
           className="relative w-12 h-12 rounded-xl bg-white/5 border border-white/10
             flex items-center justify-center
@@ -509,6 +493,8 @@ function Dashboard() {
           onClick={() => {
             setShowProjDropdown(!showProjDropdown);
             setShowNewProjInput(false);
+            setShowPowerMenu(false);
+            setShowSessionDropdown(false);
             if (!showProjDropdown) fetchProjects();
           }}
           className="w-12 h-12 rounded-xl bg-white/5 border border-white/10
@@ -519,6 +505,38 @@ function Dashboard() {
         >
           <span className="text-xl">📂</span>
         </button>
+      </div>
+
+      {/* Power Menu Dropdown */}
+      <div
+        className={`
+          mt-4 w-48 transition-all duration-300 overflow-hidden
+          ${status === "online" && showPowerMenu ? "max-h-60 opacity-100" : "max-h-0 opacity-0"}
+        `}
+      >
+        <div className="bg-white/5 border border-white/10 rounded-xl overflow-hidden">
+          <button
+            onClick={() => handlePowerAction("sleep", "Sleep")}
+            className="w-full px-4 py-2.5 text-left text-sm text-white/70
+              hover:bg-white/10 hover:text-white transition-colors flex items-center gap-3"
+          >
+            <span>😴</span> Sleep
+          </button>
+          <button
+            onClick={() => handlePowerAction("hibernate", "Hibernate")}
+            className="w-full px-4 py-2.5 text-left text-sm text-white/70
+              hover:bg-white/10 hover:text-white transition-colors flex items-center gap-3"
+          >
+            <span>💤</span> Hibernate
+          </button>
+          <button
+            onClick={() => handlePowerAction("display_off", "Display off")}
+            className="w-full px-4 py-2.5 text-left text-sm text-white/70
+              hover:bg-white/10 hover:text-white transition-colors flex items-center gap-3"
+          >
+            <span>🖥️</span> Display Off
+          </button>
+        </div>
       </div>
 
       {/* Session Dropdown */}
