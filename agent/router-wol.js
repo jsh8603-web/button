@@ -311,7 +311,7 @@ async function solveCaptchaCapSolver(imageBuffer) {
 
 // --- Confidence-scored variant generation ---
 
-const CONFUSIONS = {
+const BASE_CONFUSIONS = {
   'i': ['j', 'l', '1', 't'], 'j': ['i', 'l', '1'],
   'l': ['i', 'j', '1', 't'], '1': ['i', 'l', 'j', '7'],
   'c': ['s', 'e', 'o', 'a'], 's': ['c', 'e', '5', 'z'],
@@ -332,6 +332,35 @@ const CONFUSIONS = {
   'z': ['2', 's'], 'w': ['v'],
   'm': ['n'], 'x': ['k', 'z'],
 };
+
+// Merge learned winMappings into CONFUSIONS at startup (threshold: 2+ wins)
+function buildConfusions() {
+  const merged = {};
+  for (const [k, v] of Object.entries(BASE_CONFUSIONS)) {
+    merged[k] = [...v];
+  }
+  try {
+    const learnedPath = path.join(__dirname, '.captcha-learned.json');
+    if (fs.existsSync(learnedPath)) {
+      const data = JSON.parse(fs.readFileSync(learnedPath, 'utf8'));
+      let added = 0;
+      for (const [key, count] of Object.entries(data.winMappings || {})) {
+        if (count < 2) continue;
+        const [from, to] = key.split('→');
+        if (!from || !to || to.length !== 1) continue;
+        if (!merged[from]) merged[from] = [];
+        if (!merged[from].includes(to)) {
+          merged[from].push(to);
+          added++;
+        }
+      }
+      if (added > 0) console.log(`[router] Auto-added ${added} confusion mappings from learned wins`);
+    }
+  } catch {}
+  return merged;
+}
+
+const CONFUSIONS = buildConfusions();
 
 /**
  * Build per-position character confidence from all readings.
