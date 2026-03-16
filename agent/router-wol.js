@@ -342,7 +342,7 @@ const CONFUSIONS = {
  *   - Learned mapping bonus: +1 per historical hit
  *   - Confusion map alternatives: 0.3 points
  */
-function buildPositionScores(allReadings, learned) {
+function buildPositionScores(allReadings, learned, weights) {
   // Determine target length (weighted majority vote — higher-weight sources have more say)
   const lenCounts = {};
   for (const { text, weight } of allReadings) {
@@ -377,27 +377,26 @@ function buildPositionScores(allReadings, learned) {
     }
   }
 
-  // Add learned confusion bonuses (supplement only — capped so it never overrides real readings)
-  if (learned) {
-    // Build lookup: fromChar → [{toChar, weight}]
+  // Add learned confusion bonuses (dynamic caps based on data confidence)
+  if (learned && weights) {
     const learnedLookup = {};
     for (const [key, count] of Object.entries(learned.gptToCap || {})) {
       const parts = key.split('→');
       if (parts.length !== 2) continue;
       const [from, to] = parts;
-      if (count >= 3) {  // Only trust patterns seen 3+ times
+      if (count >= weights.minObsGptToCap) {
         if (!learnedLookup[from]) learnedLookup[from] = [];
-        learnedLookup[from].push({ to, weight: Math.min(count * 0.1, 1.0) });
+        learnedLookup[from].push({ to, weight: Math.min(count * 0.1, weights.learnedCapGpt) });
       }
     }
-    // Win mappings get slightly higher weight
+    // Win mappings: higher weight, verified corrections
     for (const [key, count] of Object.entries(learned.winMappings || {})) {
       const parts = key.split('→');
       if (parts.length !== 2) continue;
       const [from, to] = parts;
-      if (count >= 1) {
+      if (count >= weights.minObsWin) {
         if (!learnedLookup[from]) learnedLookup[from] = [];
-        learnedLookup[from].push({ to, weight: Math.min(count * 0.2, 1.5) });
+        learnedLookup[from].push({ to, weight: Math.min(count * 0.2, weights.learnedCapWin) });
       }
     }
 
@@ -426,8 +425,8 @@ function buildPositionScores(allReadings, learned) {
  * Generate scored variants sorted by confidence (highest first).
  * Uses beam search: at each position, keep top-K candidates.
  */
-function generateScoredVariants(allReadings, learned, maxTotal = 30) {
-  const { positions, targetLen, altLens } = buildPositionScores(allReadings, learned);
+function generateScoredVariants(allReadings, learned, weights, maxTotal = 30) {
+  const { positions, targetLen, altLens } = buildPositionScores(allReadings, learned, weights);
 
   // Log position analysis
   for (let i = 0; i < targetLen; i++) {
@@ -538,11 +537,13 @@ function generateCrossSolverVariants(gptCandidates, capAnswer) {
 const LEARNED_FILE = path.join(__dirname, '.captcha-learned.json');
 
 function loadLearned() {
-  const defaults = { gptToCap: {}, winMappings: {}, stats: { attempts: 0, successes: 0 } };
+  const defaults = {
+    gptToCap: {}, winMappings: {},
+    stats: { attempts: 0, successes: 0, capHits: 0, capTotal: 0, gptHits: 0, gptTotal: 0 },
+  };
   try {
     if (fs.existsSync(LEARNED_FILE)) {
       const data = JSON.parse(fs.readFileSync(LEARNED_FILE, 'utf8'));
-      // Ensure all fields exist (defensive merge)
       const result = {
         gptToCap: data.gptToCap || {},
         winMappings: data.winMappings || {},
@@ -564,6 +565,49 @@ function saveLearned(learned) {
   } catch (err) {
     console.log(`[router] Failed to save learned data: ${err.message}`);
   }
+}
+
+/**
+ * Dynamic solver weights based on cumulative accuracy.
+ * Starts with equal base weights, then adjusts as accuracy data accumulates.
+ * Returns { cap, gptTop, gpt, cross, confusionBase, learnedCapGpt, learnedCapWin }
+ */
+function getDynamicWeights(learned) {
+  const s = learned.stats;
+  const MIN_SAMPLES = 5; // need at least 5 data points before adjusting
+
+  // Base weights (used when insufficient data)
+  const BASE_CAP = 3, BASE_GPT_TOP = 3, BASE_GPT = 1, BASE_CROSS = 2;
+
+  let capW = BASE_CAP, gptTopW = BASE_GPT_TOP;
+
+  if (s.capTotal >= MIN_SAMPLES && s.gptTotal >= MIN_SAMPLES) {
+    const capRate = s.capHits / s.capTotal;   // 0~1
+    const gptRate = s.gptHits / s.gptTotal;   // 0~1
+
+    // Scale weights: 1.5 + 3.5 * accuracy  (range: 1.5 ~ 5.0)
+    capW = 1.5 + 3.5 * capRate;
+    gptTopW = 1.5 + 3.5 * gptRate;
+
+    console.log(`[router] Dynamic weights: cap=${capW.toFixed(1)} (${(capRate*100).toFixed(0)}% of ${s.capTotal}), gptTop=${gptTopW.toFixed(1)} (${(gptRate*100).toFixed(0)}% of ${s.gptTotal})`);
+  }
+
+  // Learned bonus caps scale with data confidence
+  // More successes → trust learned data more (cap: 0.5~2.0 for gptToCap, 0.5~3.0 for winMappings)
+  const dataConfidence = Math.min(s.successes / 10, 1.0); // 0~1, saturates at 10 wins
+  const learnedCapGpt = 0.5 + 1.5 * dataConfidence;      // 0.5 → 2.0
+  const learnedCapWin = 0.5 + 2.5 * dataConfidence;      // 0.5 → 3.0
+
+  // Min observation threshold scales inversely with total attempts (more data → trust smaller counts)
+  const minObsGptToCap = s.attempts >= 20 ? 2 : 3;
+  const minObsWin = 1; // win data is always high-value
+
+  return {
+    cap: capW, gptTop: gptTopW, gpt: BASE_GPT, cross: BASE_CROSS,
+    confusionBase: 0.3,
+    learnedCapGpt, learnedCapWin,
+    minObsGptToCap, minObsWin,
+  };
 }
 
 /**
@@ -598,11 +642,27 @@ function recordSolverDiffs(gptCandidates, capAnswer, learned) {
 }
 
 /**
- * Record a successful login: store winning variant mapping.
+ * Record a successful login: store winning variant mapping + per-solver accuracy.
  * This is the gold standard — we know this answer was correct.
+ * @param {string[]} candidates - all candidate texts
+ * @param {string} winningVariant - the variant that succeeded
+ * @param {object} learned - learned data object
+ * @param {object} [solverAnswers] - { cap: string|null, gptTop: string|null } for accuracy tracking
  */
-function recordSuccess(candidates, winningVariant, learned) {
+function recordSuccess(candidates, winningVariant, learned, solverAnswers) {
   learned.stats.successes++;
+
+  // Per-solver accuracy: did this solver's direct answer match the winning variant?
+  if (solverAnswers) {
+    if (solverAnswers.cap !== undefined) {
+      learned.stats.capTotal = (learned.stats.capTotal || 0) + 1;
+      if (solverAnswers.cap === winningVariant) learned.stats.capHits = (learned.stats.capHits || 0) + 1;
+    }
+    if (solverAnswers.gptTop !== undefined) {
+      learned.stats.gptTotal = (learned.stats.gptTotal || 0) + 1;
+      if (solverAnswers.gptTop === winningVariant) learned.stats.gptHits = (learned.stats.gptHits || 0) + 1;
+    }
+  }
 
   for (const cand of candidates) {
     if (cand.length !== winningVariant.length) continue;
@@ -615,7 +675,8 @@ function recordSuccess(candidates, winningVariant, learned) {
   }
 
   saveLearned(learned);
-  console.log(`[router] Recorded win: "${winningVariant}" (stats: ${learned.stats.successes}/${learned.stats.attempts})`);
+  const { capHits = 0, capTotal = 0, gptHits = 0, gptTotal = 0 } = learned.stats;
+  console.log(`[router] Recorded win: "${winningVariant}" (overall: ${learned.stats.successes}/${learned.stats.attempts}, cap: ${capHits}/${capTotal}, gpt: ${gptHits}/${gptTotal})`);
 }
 
 // --- Router login flow ---
@@ -652,34 +713,34 @@ async function login() {
   ]);
 
   const learned = loadLearned();
+  const weights = getDynamicWeights(learned);
   const capAnswer = capResult && capResult.length > 0 ? capResult[0] : null;
+  const gptTopAnswer = gptResult && gptResult.length > 0 ? gptResult[0] : null;
 
   // Record GPT↔CapSolver diffs on EVERY attempt (학습 — winning 불필요)
   if (capAnswer && gptResult && gptResult.length > 0) {
     recordSolverDiffs(gptResult, capAnswer, learned);
   }
 
-  // Build weighted readings
+  // Build weighted readings (dynamic weights from accuracy history)
   const allReadings = [];
 
-  // CapSolver: weight 3 (~30-40% accuracy on this specific router CAPTCHA)
   if (capAnswer) {
-    allReadings.push({ text: capAnswer, weight: 3, source: 'capsolver' });
+    allReadings.push({ text: capAnswer, weight: weights.cap, source: 'capsolver' });
   }
 
-  // GPT readings: first choice = weight 3, others = weight 1
   if (gptResult && gptResult.length > 0) {
-    allReadings.push({ text: gptResult[0], weight: 3, source: 'gpt-top' });
+    allReadings.push({ text: gptResult[0], weight: weights.gptTop, source: 'gpt-top' });
     for (let i = 1; i < gptResult.length; i++) {
-      allReadings.push({ text: gptResult[i], weight: 1, source: 'gpt' });
+      allReadings.push({ text: gptResult[i], weight: weights.gpt, source: 'gpt' });
     }
   }
 
-  // Cross-solver variants: weight 2
+  // Cross-solver variants
   if (capAnswer && gptResult && gptResult.length > 0) {
     const crossVariants = generateCrossSolverVariants(gptResult, capAnswer);
     for (const cv of crossVariants) {
-      allReadings.push({ text: cv, weight: 2, source: 'cross' });
+      allReadings.push({ text: cv, weight: weights.cross, source: 'cross' });
     }
     if (crossVariants.length > 0) console.log(`[router] Cross-solver variants: ${crossVariants.length}`);
   }
@@ -687,12 +748,13 @@ async function login() {
   if (allReadings.length === 0) throw new Error('All CAPTCHA solvers failed');
 
   // Generate scored variants and try login
-  const scoredVariants = generateScoredVariants(allReadings, learned);
+  const scoredVariants = generateScoredVariants(allReadings, learned, weights);
   console.log(`[router] Phase 1: ${scoredVariants.length} scored variants (top: "${scoredVariants[0]?.text}" s=${scoredVariants[0]?.score.toFixed(1)})`);
 
   const captchaImage = imgPath.split('/')[1].split('.')[0];
   const encPwd = passEnc2(password, nVal, eVal);
   const candidateTexts = allReadings.map(r => r.text);
+  const solverAnswers = { cap: capAnswer, gptTop: gptTopAnswer };
 
   for (const { text: variant, score } of scoredVariants) {
     const encCap = passEnc2(Buffer.from(variant).toString('base64'), nVal, eVal);
@@ -702,7 +764,7 @@ async function login() {
 
     if (loginRes.setCookie) {
       console.log(`[router] Phase 1 success with "${variant}" (s=${score.toFixed(1)})!`);
-      recordSuccess(candidateTexts, variant, learned);
+      recordSuccess(candidateTexts, variant, learned, solverAnswers);
       return loginRes.setCookie;
     }
   }
@@ -755,7 +817,9 @@ async function login() {
           console.log(`[router] Fallback success with "${variant}"!`);
           // Learn: CapSolver was close, record the diff if variant ≠ original
           if (variant !== fbAnswer) {
-            recordSuccess([fbAnswer], variant, learned);
+            recordSuccess([fbAnswer], variant, learned, { cap: fbAnswer });
+          } else {
+            recordSuccess([], variant, learned, { cap: fbAnswer });
           }
           return loginRes.setCookie;
         }

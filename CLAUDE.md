@@ -72,15 +72,23 @@ cd agent && node server.js    # Agent 실행
 
 ## 환경변수
 - `web/.env.local`: PIN_HASH, JWT_SECRET, PC_HOST, PC_MAC, WOL_PORT, AGENT_SECRET, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, ROUTER_PASSWORD
-- `agent/.env`: PORT, PIN_HASH, ALLOWED_ORIGIN, VERCEL_URL, AGENT_SECRET, PROJECTS_DIR, EDITOR_CMD, EDITOR_TITLE, BASH_PATH, CLAUDE_BIN, CLAUDE_MODEL, IGNORE_DIRS
+- `Vercel env (Production)`: 위 항목 + CRON_SECRET (Supabase pg_cron keep-alive 인증)
+- `agent/.env`: PORT, PIN_HASH, ALLOWED_ORIGIN, VERCEL_URL, AGENT_SECRET, PROJECTS_DIR, EDITOR_CMD, EDITOR_TITLE, BASH_PATH, CLAUDE_BIN, CLAUDE_MODEL, IGNORE_DIRS, ANTHROPIC_API_KEY, ROUTER_PASSWORD, CAPTCHA_API_KEY, OPENAI_API_KEY
 - 상세 설명: 각 디렉토리의 `.env.example` 참조
+
+## Supabase
+- 프로젝트: `aocsyodhcdvhkspfpbyj` (babyplace, Seoul region)
+- 테이블: `agent_kv` (key-value store, RLS 적용)
+- Extensions: `pg_cron` + `pg_net` (라우터 세션 keep-alive용)
+- pg_cron job: `router-keepalive` — 30분마다 `/api/cron/router-keepalive` 호출 → 공유기 세션 영구 유지
+- 관리: `npx supabase db query --linked "SELECT * FROM cron.job;"`
 
 ## Critical Rules
 - Agent 화이트리스트 명령만 실행: `shutdown`, `proj`, `editor`, `protect-session`, `unprotect-session`, `kill-session`, `sleep`, `hibernate`, `display_off`
 - `.env` 파일 커밋 금지
 - `x-pin-hash`에는 평문 PIN 전송 → Agent가 bcrypt.compare
 - Heartbeat Bearer 토큰 = `AGENT_SECRET` (Agent↔Vercel 인증)
-- KV TTL: heartbeat 45초, projects 300초, command 120초
+- KV TTL: heartbeat 45초, projects 300초, command 120초, routerCookie 3600초 (pre-sleep: 86400초)
 - middleware는 JWT 서명 검증 없이 구조+만료만 체크 (Edge Runtime 호환)
 - 세션 보호 optimistic UI: action 후 35초간 서버 sessions 폴링 무시 (깜빡임 방지)
 
