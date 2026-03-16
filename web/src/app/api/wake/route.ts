@@ -23,6 +23,44 @@ function createMagicPacket(mac: string): Buffer {
   return packet;
 }
 
+// Send WOL via router's built-in Wake On LAN (LAN broadcast — works for Sleep/Hibernate)
+async function sendRouterWol(host: string, mac: string): Promise<{ ok: boolean; detail: string }> {
+  const password = process.env.ROUTER_PASSWORD;
+  if (!password) return { ok: false, detail: "ROUTER_PASSWORD not configured" };
+
+  const baseUrl = `http://${host}:88`;
+
+  try {
+    // Call router WOL API directly (test if auth is needed)
+    const wolUrl = `${baseUrl}/web/inner-data.html?func=wake_on_lan(%221%22,%22${mac}%22)`;
+
+    const res = await fetch(wolUrl, {
+      signal: AbortSignal.timeout(10000),
+    });
+
+    const text = await res.text();
+
+    if (res.ok && !text.includes("login")) {
+      return { ok: true, detail: `direct: status=${res.status}` };
+    }
+
+    // If direct call fails or requires login, try with Basic Auth
+    const auth = Buffer.from(`admin:${password}`).toString("base64");
+    const authRes = await fetch(wolUrl, {
+      headers: { Authorization: `Basic ${auth}` },
+      signal: AbortSignal.timeout(10000),
+    });
+
+    const authText = await authRes.text();
+    return {
+      ok: authRes.ok,
+      detail: `basic-auth: status=${authRes.status}, body=${authText.substring(0, 200)}`,
+    };
+  } catch (err) {
+    return { ok: false, detail: err instanceof Error ? err.message : String(err) };
+  }
+}
+
 export async function POST() {
   const log: Record<string, unknown> = {
     timestamp: new Date().toISOString(),
@@ -71,7 +109,7 @@ export async function POST() {
     const client = dgram.createSocket("udp4");
     log.step = "socket_created";
 
-    // Send 3 times for reliability (ARP cache / NIC wake timing)
+    // Send UDP magic packet 3 times (works for Shutdown WOL)
     const sendOnce = () =>
       new Promise<void>((resolve, reject) => {
         client.send(packet, 0, packet.length, port, targetIp, (err) => {
@@ -82,15 +120,22 @@ export async function POST() {
 
     const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-    await sendOnce();
-    await delay(250);
-    await sendOnce();
-    await delay(250);
-    await sendOnce();
-    client.close();
+    // Send UDP and router WOL in parallel
+    const [udpResult, routerResult] = await Promise.allSettled([
+      (async () => {
+        await sendOnce();
+        await delay(250);
+        await sendOnce();
+        await delay(250);
+        await sendOnce();
+        client.close();
+      })(),
+      sendRouterWol(targetIp, mac),
+    ]);
 
     log.step = "sent";
-    log.packetsSent = 3;
+    log.udp = udpResult.status === "fulfilled" ? "success" : (udpResult as PromiseRejectedResult).reason?.message;
+    log.routerWol = routerResult.status === "fulfilled" ? (routerResult as PromiseFulfilledResult<{ ok: boolean; detail: string }>).value : (routerResult as PromiseRejectedResult).reason?.message;
     log.result = "success";
     console.log("[wake]", JSON.stringify(log));
     return NextResponse.json({ ok: true, message: "Magic packet sent", log });

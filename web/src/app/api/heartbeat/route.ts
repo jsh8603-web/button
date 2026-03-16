@@ -13,8 +13,8 @@ export async function POST(request: NextRequest) {
     const body = await request.json();
     const { uptime, projects, sessions } = body;
 
-    // Store heartbeat (90s TTL)
-    await kvSet(KEYS.heartbeat, { timestamp: Date.now(), uptime, sessions: sessions || [] }, 90);
+    // Store heartbeat (45s TTL)
+    await kvSet(KEYS.heartbeat, { timestamp: Date.now(), uptime, sessions: sessions || [] }, 45);
 
     // Store project list (300s TTL)
     if (projects) {

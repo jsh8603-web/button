@@ -10,14 +10,14 @@ PC에 상주하는 Agent가 30초마다 heartbeat를 보내 온라인 상태와 
 ```
 [모바일 브라우저] → [Vercel Next.js API] ←→ [Supabase KV] ←→ [PC Agent]
                          │                                         │
-                    WOL: UDP 매직 패킷 직접 전송            30초 heartbeat 루프
+                    WOL: UDP 직접 + 공유기 API 이중 전송   30초 heartbeat 루프
                     그 외: KV에 command 저장               KV에서 command pull → 실행
 ```
 
 ## 아키텍처 (Heartbeat Push Model)
 
 - Web↔Agent 직접 통신 없음: Supabase KV를 매개로 비동기 통신
-- WOL만 예외: Vercel에서 직접 UDP Magic Packet 전송 (dgram)
+- WOL 이중 전송: ① Vercel에서 직접 UDP Magic Packet (Shutdown용) ② 공유기 WOL API 호출 (Sleep/Hibernate용, port 88)
 - Agent는 heartbeat 응답으로 대기 명령을 수신하고, 실행 후 KV에서 삭제 (1회 실행 보장)
 - Heartbeat에 `sessions: [{name, protected}]` 포함 → 웹 UI에서 세션 관리
 
@@ -31,8 +31,8 @@ web/                          → Next.js 웹앱 (Vercel 배포)
     api/
       auth/route.ts           → PIN → bcrypt 검증 → JWT 쿠키 발급 (24h, httpOnly)
       heartbeat/route.ts      → Agent 상태+sessions 수신 + 대기 명령 반환 (Bearer 인증)
-      status/route.ts         → KV에서 heartbeat 읽기 (90초 이내 → online, sessions 포함)
-      wake/route.ts           → dgram UDP Magic Packet 전송 (DNS resolve 포함)
+      status/route.ts         → KV에서 heartbeat 읽기 (45초 이내 → online, sessions 포함)
+      wake/route.ts           → UDP 매직패킷 + 공유기 WOL API 이중 전송 (Sleep/Shutdown 모두 대응)
       shutdown/route.ts       → KV에 shutdown 명령 저장 (TTL 120초)
       run/route.ts            → KV에 action 명령 저장 (모든 action 공통)
       projects/route.ts       → KV에서 프로젝트 목록 캐시 읽기
@@ -68,7 +68,7 @@ cd agent && node server.js    # Agent 실행
 2. 수동 테스트: 브라우저에서 PIN 입력 → 버튼 동작 확인
 
 ## 환경변수
-- `web/.env.local`: PIN_HASH, JWT_SECRET, PC_HOST, PC_MAC, WOL_PORT, AGENT_SECRET, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
+- `web/.env.local`: PIN_HASH, JWT_SECRET, PC_HOST, PC_MAC, WOL_PORT, AGENT_SECRET, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, ROUTER_PASSWORD
 - `agent/.env`: PORT, PIN_HASH, ALLOWED_ORIGIN, VERCEL_URL, AGENT_SECRET, PROJECTS_DIR, EDITOR_CMD, EDITOR_TITLE, BASH_PATH, CLAUDE_BIN, CLAUDE_MODEL, IGNORE_DIRS
 - 상세 설명: 각 디렉토리의 `.env.example` 참조
 
@@ -77,7 +77,7 @@ cd agent && node server.js    # Agent 실행
 - `.env` 파일 커밋 금지
 - `x-pin-hash`에는 평문 PIN 전송 → Agent가 bcrypt.compare
 - Heartbeat Bearer 토큰 = `AGENT_SECRET` (Agent↔Vercel 인증)
-- KV TTL: heartbeat 90초, projects 300초, command 120초
+- KV TTL: heartbeat 45초, projects 300초, command 120초
 - middleware는 JWT 서명 검증 없이 구조+만료만 체크 (Edge Runtime 호환)
 - 세션 보호 optimistic UI: action 후 35초간 서버 sessions 폴링 무시 (깜빡임 방지)
 

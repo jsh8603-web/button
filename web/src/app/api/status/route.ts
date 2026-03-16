@@ -7,7 +7,7 @@ export async function GET() {
   try {
     const data = await kvGet<Heartbeat>(KEYS.heartbeat);
 
-    if (data && Date.now() - data.timestamp < 90_000) {
+    if (data && Date.now() - data.timestamp < 45_000) {
       // Clear last power action in background (don't block response)
       kvDel(KEYS.lastPowerAction).catch(() => {});
       return NextResponse.json({ status: "online", uptime: data.uptime, sessions: data.sessions || [] });
