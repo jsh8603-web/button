@@ -524,17 +524,18 @@ async function sendHeartbeat() {
     // Collect active sessions and clean up stale protected entries
     // Only clean if tmux responded (non-empty list) to avoid wiping on exec errors
     const activeSessions = await getActiveSessions();
-    const protectedList = getProtectedSessions();
+    let protectedList = getProtectedSessions();
     if (activeSessions.length > 0) {
       const cleanedProtected = protectedList.filter(s => activeSessions.includes(s));
       if (cleanedProtected.length !== protectedList.length) {
-        setProtectedSessions(cleanedProtected);
+        protectedList = cleanedProtected;
+        setProtectedSessions(protectedList);
       }
     }
 
     const sessions = activeSessions.map(name => ({
       name,
-      protected: cleanedProtected.includes(name),
+      protected: protectedList.includes(name),
     }));
 
     const res = await fetch(`${VERCEL_URL}/api/heartbeat`, {
