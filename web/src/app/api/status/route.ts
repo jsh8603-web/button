@@ -8,8 +8,8 @@ export async function GET() {
     const data = await kvGet<Heartbeat>(KEYS.heartbeat);
 
     if (data && Date.now() - data.timestamp < 90_000) {
-      // Clear last power action when PC comes back online
-      await kvDel(KEYS.lastPowerAction);
+      // Clear last power action in background (don't block response)
+      kvDel(KEYS.lastPowerAction).catch(() => {});
       return NextResponse.json({ status: "online", uptime: data.uptime, sessions: data.sessions || [] });
     }
 
