@@ -592,7 +592,7 @@ async function sendHeartbeat() {
     // Keep router session alive and get current cookie
     let routerCookie = null;
     try {
-      routerCookie = await heartbeatKeepAlive();
+      routerCookie = await heartbeatKeepAlive((msg) => setCaptchaStatus(msg));
     } catch (err) {
       console.error('[heartbeat] Router keep-alive error:', err.message);
     }
@@ -700,7 +700,10 @@ app.listen(PORT, async () => {
   }
 
   // Initialize router session — uses KV cookie if available, else CAPTCHA login
-  initRouterSession(storedRouterCookie).catch(err => {
+  const bootProgress = (msg) => setCaptchaStatus(msg);
+  initRouterSession(storedRouterCookie, bootProgress).then(cookie => {
+    if (cookie) setCaptchaStatus('');
+  }).catch(err => {
     console.error('[boot] Router login failed:', err.message);
   });
 

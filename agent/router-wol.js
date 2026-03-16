@@ -894,7 +894,7 @@ async function keepAlive() {
   }
 }
 
-async function initRouterSession(storedCookie) {
+async function initRouterSession(storedCookie, onProgress = null) {
   console.log('[router] Initializing router session...');
 
   // Try stored cookie from KV first (avoids CAPTCHA)
@@ -910,12 +910,12 @@ async function initRouterSession(storedCookie) {
     currentCookie = null;
   }
 
-  return await loginWithRetry();
+  return await loginWithRetry(5, onProgress);
 }
 
 let heartbeatLoginFailed = false;
 
-async function heartbeatKeepAlive() {
+async function heartbeatKeepAlive(onProgress = null) {
   if (currentCookie) {
     heartbeatLoginFailed = false;
     const alive = await keepAlive();
@@ -932,8 +932,9 @@ async function heartbeatKeepAlive() {
     return null;
   }
   // No cookie and no login in progress — start login but don't block heartbeat
-  loginWithRetry().then(cookie => {
+  loginWithRetry(5, onProgress).then(cookie => {
     if (!cookie) heartbeatLoginFailed = true;
+    else if (onProgress) onProgress('');
   }).catch(err => {
     heartbeatLoginFailed = true;
     console.error('[router] Background login failed:', err.message);
