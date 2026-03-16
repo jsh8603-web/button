@@ -1,10 +1,26 @@
 # Session Protection Rules
 
-- proj action: kill ALL unprotected btn-* sessions → create new session
-- Protected sessions survive proj kills (`.protected-sessions` file persists across restarts)
-- heartbeat includes `sessions: [{name, protected}]` for web UI
-- Web 💻 button = session management (protect/unprotect/kill)
-- Whitelisted actions: `protect-session`, `unprotect-session`, `kill-session` (+ existing shutdown/proj/editor)
-- kill-session: removes protection → kills tmux session + Claude process + VS Code window
-- Protected sessions hide ✕ button (must unprotect first to kill)
-- Desktop-opened tmux sessions (no btn- prefix) are never affected
+## 동작 원리
+- `proj` action 실행 시: 미보호 btn-* 세션 전부 kill → 새 세션 생성
+- 보호된 세션은 kill에서 제외 (`.protected-sessions` 파일로 영속화)
+- 데스크탑에서 직접 연 tmux 세션 (btn- 접두사 없음)은 영향 없음
+
+## Agent actions
+- `protect-session`: `.protected-sessions`에 추가
+- `unprotect-session`: `.protected-sessions`에서 제거
+- `kill-session`: 보호 해제 → `kill-sessions.sh` (Ctrl+C→/exit→kill) → `close-window.ps1`
+
+## Heartbeat
+- `sessions: [{name, protected}]` 포함 — 웹 UI에서 세션 목록 + 보호 상태 표시
+- heartbeat마다 `.protected-sessions`에서 실제 없는 세션 자동 제거 (유령 정리)
+
+## Web UI
+- Terminal 버튼 = 세션 관리 드롭다운
+- Shield SVG (녹색 filled+✓ = 보호, 회색 outline = 미보호)
+- X 버튼 = 세션 종료 (미보호만 표시, confirm 필요)
+- Optimistic UI: action 후 35초간 서버 sessions 폴링 무시 (깜빡임 방지)
+
+## Power actions
+- `sleep`: `rundll32 powrprof.dll,SetSuspendState 0,1,0`
+- `hibernate`: `shutdown /h`
+- `display_off`: `SendMessage(HWND_BROADCAST, WM_SYSCOMMAND, SC_MONITORPOWER, 2)`

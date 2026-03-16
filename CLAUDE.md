@@ -4,7 +4,7 @@
 
 모바일에서 집 PC를 원버튼으로 켜고 끄는 웹앱.
 Vercel에 호스팅된 Next.js 앱이 Wake-on-LAN 매직 패킷을 직접 전송하고,
-PC에 상주하는 Agent가 30초마다 heartbeat를 보내 온라인 상태와 명령(shutdown/프로젝트 열기)을 Supabase KV로 주고받는다.
+PC에 상주하는 Agent가 30초마다 heartbeat를 보내 온라인 상태와 명령을 Supabase KV로 주고받는다.
 브라우저에서 4자리 PIN을 입력하면 JWT 쿠키가 발급되어 이후 API 호출이 인증된다.
 
 ```
@@ -19,32 +19,34 @@ PC에 상주하는 Agent가 30초마다 heartbeat를 보내 온라인 상태와 
 - Web↔Agent 직접 통신 없음: Supabase KV를 매개로 비동기 통신
 - WOL만 예외: Vercel에서 직접 UDP Magic Packet 전송 (dgram)
 - Agent는 heartbeat 응답으로 대기 명령을 수신하고, 실행 후 KV에서 삭제 (1회 실행 보장)
+- Heartbeat에 `sessions: [{name, protected}]` 포함 → 웹 UI에서 세션 관리
 
 ## 구조
 ```
 web/                          → Next.js 웹앱 (Vercel 배포)
   src/app/
     layout.tsx                → 루트 레이아웃 (viewport, theme-color)
-    page.tsx                  → 메인 페이지 (PinEntry → Dashboard)
+    page.tsx                  → 메인 페이지 (PinEntry → Dashboard, SVG 아이콘 컴포넌트)
     globals.css               → Tailwind v4 + glow 애니메이션 키프레임
     api/
       auth/route.ts           → PIN → bcrypt 검증 → JWT 쿠키 발급 (24h, httpOnly)
-      heartbeat/route.ts      → Agent 상태 수신 + 대기 명령 반환 (Bearer 인증)
-      status/route.ts         → KV에서 heartbeat 읽기 (90초 이내 → online)
+      heartbeat/route.ts      → Agent 상태+sessions 수신 + 대기 명령 반환 (Bearer 인증)
+      status/route.ts         → KV에서 heartbeat 읽기 (90초 이내 → online, sessions 포함)
       wake/route.ts           → dgram UDP Magic Packet 전송 (DNS resolve 포함)
       shutdown/route.ts       → KV에 shutdown 명령 저장 (TTL 120초)
-      run/route.ts            → KV에 action 명령 저장 (proj/editor)
+      run/route.ts            → KV에 action 명령 저장 (모든 action 공통)
       projects/route.ts       → KV에서 프로젝트 목록 캐시 읽기
   src/lib/
     auth.ts                   → bcrypt PIN 검증 + JWT 생성/검증
-    kv.ts                     → Supabase KV 클라이언트 (kvGet/kvSet/kvDel)
+    kv.ts                     → Supabase KV 클라이언트 (kvGet/kvSet/kvDel, SessionInfo/Heartbeat 타입)
   middleware.ts               → JWT 구조 검증 (Edge Runtime, /api/auth·heartbeat 제외)
 
 agent/                        → PC Agent (Express, Windows 서비스)
-  server.js                   → 메인 서버 + heartbeat 루프 + 프로젝트 관리 (tmux 폴링으로 Claude 준비 감지)
+  server.js                   → 메인 서버 + heartbeat 루프 + 세션 보호 + 프로젝트 관리
+  .protected-sessions         → 보호된 세션 목록 (JSON, 재시작 시에도 유지)
   close-window.ps1            → 윈도우 창 닫기 (Win32 EnumWindows + WM_CLOSE)
   maximize-window.ps1         → 윈도우 창 최대화 (Win32 ShowWindow, 폴링)
-  kill-sessions.sh            → 특정 btn-* tmux 세션 정리 (Ctrl+C → /exit → kill, 세션명 인자)
+  kill-sessions.sh            → btn-* tmux 세션 정리 (Ctrl+C → /exit → kill, 세션명 인자)
   add-firewall.bat            → Agent 포트 방화벽 규칙 추가
   install.bat                 → Task Scheduler 등록 (SYSTEM, onstart)
   enable-autologin.bat        → Windows 자동 로그인 레지스트리 설정
@@ -77,18 +79,44 @@ cd agent && node server.js    # Agent 실행
 - Heartbeat Bearer 토큰 = `AGENT_SECRET` (Agent↔Vercel 인증)
 - KV TTL: heartbeat 90초, projects 300초, command 120초
 - middleware는 JWT 서명 검증 없이 구조+만료만 체크 (Edge Runtime 호환)
+- 세션 보호 optimistic UI: action 후 35초간 서버 sessions 폴링 무시 (깜빡임 방지)
 
-## UI 아이콘 인덱스
+## UI 아이콘 인덱스 (모두 SVG)
 
+### 메인
 | 아이콘 | 위치 | 동작 |
 |--------|------|------|
-| ⏻ 전원 버튼 | 메인 (큰 원) | OFF→WOL, ON→전원 메뉴 토글 |
-| 😴 Sleep | 전원 메뉴 | 절전 모드 (컨텍스트 유지) |
-| 💤 Hibernate | 전원 메뉴 | 최대 절전 |
-| 🖥️ Display Off | 전원 메뉴 | 모니터만 끔 |
-| ⏻ Shut Down | 전원 메뉴 | 완전 종료 (confirm) |
-| 💻 (badge) | Quick Actions | 세션 관리 드롭다운 |
-| 📂 | Quick Actions | 프로젝트 열기 드롭다운 |
-| 🛡️ 녹색(✓) | 세션/프로젝트 목록 | 보호 중 (탭→해제) |
-| 🛡️ 회색 | 세션 목록 | 미보호 (탭→보호) |
-| ✕ | 세션 목록 (미보호만) | 세션 종료 (tmux+Claude+VSCode kill) |
+| ⏻ Power (SVG) | 메인 (큰 원) | OFF→WOL 매직패킷, ON→Shutdown (confirm) |
+
+### Quick Actions (온라인 시 표시, 활성 드롭다운은 색상 하이라이트)
+| 아이콘 | 색상 | 이름 | 동작 |
+|--------|------|------|------|
+| Moon | 보라 | Power Menu | Sleep/Hibernate/Display Off 드롭다운 |
+| Terminal | 파랑 (badge: 세션수) | Sessions | 세션 관리 드롭다운 |
+| Folder | 앰버 | Projects | 프로젝트 열기 드롭다운. **미보호 세션 전부 kill 후 열기** |
+
+### Power Menu 드롭다운
+| 아이콘 | 색상 | 이름 | Windows 명령 |
+|--------|------|------|-------------|
+| Moon | 보라 | Sleep | `rundll32 powrprof.dll,SetSuspendState` (컨텍스트 유지) |
+| Snowflake | 파랑 | Hibernate | `shutdown /h` (최대 절전) |
+| MonitorOff | 시안 | Display Off | `SendMessage SC_MONITORPOWER` (모니터만 끔) |
+
+### Sessions 드롭다운
+| 아이콘 | 색상 | 동작 |
+|--------|------|------|
+| Shield (filled + ✓) | 녹색 | 보호 중 — 탭→보호 해제 |
+| Shield (outline) | 회색 | 미보호 — 탭→보호 적용 |
+| X | 빨강 (미보호만 표시) | 세션 종료 (confirm → tmux+Claude+VSCode kill) |
+
+### Projects 드롭다운
+| 표시 | 의미 |
+|------|------|
+| Shield (filled + ✓) 14px | 프로젝트에 보호된 활성 세션 있음 |
+| (아이콘 없음) | 일반 프로젝트 |
+
+### 하단
+| 아이콘 | 위치 | 동작 |
+|--------|------|------|
+| ? | 좌하단 | 인앱 아이콘 도움말 패널 토글 |
+| log | 우하단 | WOL 전송 로그 패널 토글 |
