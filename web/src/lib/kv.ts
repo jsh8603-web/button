@@ -60,4 +60,5 @@ export const KEYS = {
   heartbeat: "btn:heartbeat",
   projects: "btn:projects",
   command: "btn:command",
+  protected: "btn:protected",
 } as const;

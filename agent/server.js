@@ -554,15 +554,22 @@ async function sendHeartbeat() {
 
     if (res.ok) {
       const data = await res.json();
+
+      // Sync protection state from KV (authoritative source)
+      if (Array.isArray(data.protectedSessions)) {
+        const current = getProtectedSessions();
+        const incoming = data.protectedSessions;
+        if (JSON.stringify(current.sort()) !== JSON.stringify([...incoming].sort())) {
+          setProtectedSessions(incoming);
+          console.log(`[session] Synced protected from KV: ${incoming.join(', ') || 'none'}`);
+        }
+      }
+
+      // Process command queue
       if (data.commands && Array.isArray(data.commands)) {
-        // Process session protection commands first (before proj/kill)
-        const sorted = [...data.commands].sort((a, b) => {
-          const priority = (cmd) =>
-            cmd.action === 'protect-session' ? 0 :
-            cmd.action === 'unprotect-session' ? 1 : 2;
-          return priority(a) - priority(b);
-        });
-        for (const command of sorted) {
+        for (const command of data.commands) {
+          // protect/unprotect already handled via KV state sync above
+          if (command.action === 'protect-session' || command.action === 'unprotect-session') continue;
           executeCommand(command);
         }
       }

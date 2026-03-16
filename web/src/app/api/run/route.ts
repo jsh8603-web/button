@@ -10,7 +10,21 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "action required" }, { status: 400 });
     }
 
-    // Append to command queue (instead of overwriting single command)
+    // Session protection: store as state (not queued) to avoid race conditions
+    if (action === "protect-session" && name) {
+      const list: string[] = await kvGet<string[]>(KEYS.protected) || [];
+      if (!list.includes(name)) list.push(name);
+      await kvSet(KEYS.protected, list);
+      return NextResponse.json({ ok: true, action });
+    }
+
+    if (action === "unprotect-session" && name) {
+      const list: string[] = await kvGet<string[]>(KEYS.protected) || [];
+      await kvSet(KEYS.protected, list.filter(s => s !== name));
+      return NextResponse.json({ ok: true, action });
+    }
+
+    // All other actions: append to command queue
     const existing = await kvGet<Command[]>(KEYS.command) || [];
     existing.push({ action, name, timestamp: Date.now() });
     await kvSet(KEYS.command, existing, 120);

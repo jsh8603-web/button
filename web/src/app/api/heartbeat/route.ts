@@ -21,14 +21,17 @@ export async function POST(request: NextRequest) {
       await kvSet(KEYS.projects, { projects }, 300);
     }
 
+    // Include KV-stored protection state so agent can sync
+    const protectedSessions = await kvGet<string[]>(KEYS.protected) || [];
+
     // Check for pending commands and return them (queue)
     const commands = await kvGet<Command[]>(KEYS.command);
     if (commands && commands.length > 0) {
       await kvDel(KEYS.command);
-      return NextResponse.json({ ok: true, commands });
+      return NextResponse.json({ ok: true, commands, protectedSessions });
     }
 
-    return NextResponse.json({ ok: true, commands: null });
+    return NextResponse.json({ ok: true, commands: null, protectedSessions });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
     return NextResponse.json({ error: message }, { status: 500 });
