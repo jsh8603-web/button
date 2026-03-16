@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { kvSet, KEYS } from "@/lib/kv";
+import { kvGet, kvSet, KEYS, type Command } from "@/lib/kv";
 
 export async function POST(request: NextRequest) {
   try {
@@ -10,11 +10,10 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "action required" }, { status: 400 });
     }
 
-    await kvSet(KEYS.command, {
-      action,
-      name,
-      timestamp: Date.now(),
-    }, 120);
+    // Append to command queue (instead of overwriting single command)
+    const existing = await kvGet<Command[]>(KEYS.command) || [];
+    existing.push({ action, name, timestamp: Date.now() });
+    await kvSet(KEYS.command, existing, 120);
 
     return NextResponse.json({ ok: true, action });
   } catch (err) {

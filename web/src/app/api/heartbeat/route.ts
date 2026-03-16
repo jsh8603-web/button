@@ -21,14 +21,14 @@ export async function POST(request: NextRequest) {
       await kvSet(KEYS.projects, { projects }, 300);
     }
 
-    // Check for pending command and return it
-    const command = await kvGet<Command>(KEYS.command);
-    if (command) {
+    // Check for pending commands and return them (queue)
+    const commands = await kvGet<Command[]>(KEYS.command);
+    if (commands && commands.length > 0) {
       await kvDel(KEYS.command);
-      return NextResponse.json({ ok: true, command });
+      return NextResponse.json({ ok: true, commands });
     }
 
-    return NextResponse.json({ ok: true, command: null });
+    return NextResponse.json({ ok: true, commands: null });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
     return NextResponse.json({ error: message }, { status: 500 });

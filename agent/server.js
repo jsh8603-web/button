@@ -522,11 +522,14 @@ async function sendHeartbeat() {
 
   try {
     // Collect active sessions and clean up stale protected entries
+    // Only clean if tmux responded (non-empty list) to avoid wiping on exec errors
     const activeSessions = await getActiveSessions();
     const protectedList = getProtectedSessions();
-    const cleanedProtected = protectedList.filter(s => activeSessions.includes(s));
-    if (cleanedProtected.length !== protectedList.length) {
-      setProtectedSessions(cleanedProtected);
+    if (activeSessions.length > 0) {
+      const cleanedProtected = protectedList.filter(s => activeSessions.includes(s));
+      if (cleanedProtected.length !== protectedList.length) {
+        setProtectedSessions(cleanedProtected);
+      }
     }
 
     const sessions = activeSessions.map(name => ({
@@ -550,6 +553,19 @@ async function sendHeartbeat() {
 
     if (res.ok) {
       const data = await res.json();
+      if (data.commands && Array.isArray(data.commands)) {
+        // Process session protection commands first (before proj/kill)
+        const sorted = [...data.commands].sort((a, b) => {
+          const priority = (cmd) =>
+            cmd.action === 'protect-session' ? 0 :
+            cmd.action === 'unprotect-session' ? 1 : 2;
+          return priority(a) - priority(b);
+        });
+        for (const command of sorted) {
+          executeCommand(command);
+        }
+      }
+      // Backward compat: single command
       if (data.command) {
         executeCommand(data.command);
       }
