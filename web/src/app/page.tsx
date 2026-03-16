@@ -156,6 +156,7 @@ function Dashboard() {
   const [wakeLogs, setWakeLogs] = useState<Record<string, unknown>[]>([]);
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [showSessionDropdown, setShowSessionDropdown] = useState(false);
+  const [showPowerMenu, setShowPowerMenu] = useState(false);
   const newProjInputRef = useRef<HTMLInputElement>(null);
 
   // Load last project from localStorage
@@ -255,20 +256,34 @@ function Dashboard() {
         setTimeout(() => setActionFeedback(""), 5000);
       }
     } else {
-      // Shutdown — confirm first
-      if (window.confirm("Shut down PC?")) {
-        setStatus("shutting-down");
-        try {
-          await fetch("/api/shutdown", { method: "POST" });
-          setActionFeedback("Shutdown signal sent");
-          setTimeout(() => setActionFeedback(""), 3000);
-        } catch {
-          setStatus("online");
-          setActionFeedback("Failed to reach PC");
-          setTimeout(() => setActionFeedback(""), 3000);
-        }
-      }
+      // Toggle power menu
+      setShowPowerMenu(!showPowerMenu);
+      setShowSessionDropdown(false);
+      setShowProjDropdown(false);
     }
+  };
+
+  const handlePowerAction = async (action: string, label: string, confirm_msg?: string) => {
+    if (confirm_msg && !window.confirm(confirm_msg)) return;
+    setShowPowerMenu(false);
+    try {
+      setActionFeedback(`${label}...`);
+      if (action === "shutdown") {
+        setStatus("shutting-down");
+        await fetch("/api/shutdown", { method: "POST" });
+      } else {
+        await fetch("/api/run", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action }),
+        });
+      }
+      setActionFeedback(`${label} signal sent`);
+    } catch {
+      if (action === "shutdown") setStatus("online");
+      setActionFeedback("Failed to reach PC");
+    }
+    setTimeout(() => setActionFeedback(""), 3000);
   };
 
   const fetchProjects = useCallback(async () => {
@@ -385,8 +400,48 @@ function Dashboard() {
         <PowerIcon className={`w-12 h-12 ${iconColor} transition-colors duration-500`} />
       </button>
 
+      {/* Power Menu */}
+      <div
+        className={`
+          mt-4 w-48 transition-all duration-300 overflow-hidden
+          ${status === "online" && showPowerMenu ? "max-h-60 opacity-100" : "max-h-0 opacity-0"}
+        `}
+      >
+        <div className="bg-white/5 border border-white/10 rounded-xl overflow-hidden">
+          <button
+            onClick={() => handlePowerAction("sleep", "Sleep")}
+            className="w-full px-4 py-2.5 text-left text-sm text-white/70
+              hover:bg-white/10 hover:text-white transition-colors flex items-center gap-3"
+          >
+            <span>😴</span> Sleep
+          </button>
+          <button
+            onClick={() => handlePowerAction("hibernate", "Hibernate")}
+            className="w-full px-4 py-2.5 text-left text-sm text-white/70
+              hover:bg-white/10 hover:text-white transition-colors flex items-center gap-3"
+          >
+            <span>💤</span> Hibernate
+          </button>
+          <button
+            onClick={() => handlePowerAction("display_off", "Display off")}
+            className="w-full px-4 py-2.5 text-left text-sm text-white/70
+              hover:bg-white/10 hover:text-white transition-colors flex items-center gap-3"
+          >
+            <span>🖥️</span> Display Off
+          </button>
+          <button
+            onClick={() => handlePowerAction("shutdown", "Shutdown", "Shut down PC?")}
+            className="w-full px-4 py-2.5 text-left text-sm text-red-400/70
+              hover:bg-red-500/10 hover:text-red-400 transition-colors flex items-center gap-3
+              border-t border-white/10"
+          >
+            <span>⏻</span> Shut Down
+          </button>
+        </div>
+      </div>
+
       {/* Status Text */}
-      <p className="mt-8 text-lg font-medium text-white/80 transition-all duration-300">
+      <p className="mt-4 text-lg font-medium text-white/80 transition-all duration-300">
         {statusText}
       </p>
 

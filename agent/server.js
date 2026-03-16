@@ -407,6 +407,27 @@ app.post('/run', verifyPin, (req, res) => {
     return res.json({ ok: true, action });
   }
 
+  if (action === 'sleep') {
+    exec('rundll32.exe powrprof.dll,SetSuspendState 0,1,0', (err) => {
+      if (err) console.error('[sleep] Error:', err.message);
+    });
+    return res.json({ ok: true, action });
+  }
+
+  if (action === 'hibernate') {
+    exec('shutdown /h', (err) => {
+      if (err) console.error('[hibernate] Error:', err.message);
+    });
+    return res.json({ ok: true, action });
+  }
+
+  if (action === 'display_off') {
+    exec('powershell.exe -Command "(Add-Type -MemberDefinition \'[DllImport(\\"user32.dll\\")]public static extern int SendMessage(int hWnd,int Msg,int wParam,int lParam);\' -Name a -Passthru)::SendMessage(-1,0x0112,0xF170,2)"', (err) => {
+      if (err) console.error('[display_off] Error:', err.message);
+    });
+    return res.json({ ok: true, action });
+  }
+
   return res.status(400).json({ ok: false, message: `Unknown action: ${action}` });
 });
 
@@ -478,6 +499,21 @@ function executeCommand(command) {
       });
       console.log(`[session] Killed: ${command.name}`);
     }
+  } else if (command.action === 'sleep') {
+    exec('rundll32.exe powrprof.dll,SetSuspendState 0,1,0', (err) => {
+      if (err) console.error('[sleep] Error:', err.message);
+      else console.log('[heartbeat] Entering sleep mode');
+    });
+  } else if (command.action === 'hibernate') {
+    exec('shutdown /h', (err) => {
+      if (err) console.error('[hibernate] Error:', err.message);
+      else console.log('[heartbeat] Entering hibernate mode');
+    });
+  } else if (command.action === 'display_off') {
+    exec('powershell.exe -Command "(Add-Type -MemberDefinition \'[DllImport(\\"user32.dll\\")]public static extern int SendMessage(int hWnd,int Msg,int wParam,int lParam);\' -Name a -Passthru)::SendMessage(-1,0x0112,0xF170,2)"', (err) => {
+      if (err) console.error('[display_off] Error:', err.message);
+      else console.log('[heartbeat] Display turned off');
+    });
   }
 }
 

@@ -71,7 +71,7 @@ cd agent && node server.js    # Agent 실행
 - 상세 설명: 각 디렉토리의 `.env.example` 참조
 
 ## Critical Rules
-- Agent 화이트리스트 명령만 실행: `shutdown`, `proj`, `editor`, `protect-session`, `unprotect-session`, `kill-session`
+- Agent 화이트리스트 명령만 실행: `shutdown`, `proj`, `editor`, `protect-session`, `unprotect-session`, `kill-session`, `sleep`, `hibernate`, `display_off`
 - `.env` 파일 커밋 금지
 - `x-pin-hash`에는 평문 PIN 전송 → Agent가 bcrypt.compare
 - Heartbeat Bearer 토큰 = `AGENT_SECRET` (Agent↔Vercel 인증)
