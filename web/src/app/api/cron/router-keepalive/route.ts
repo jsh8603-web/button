@@ -4,9 +4,11 @@ import { kvGet, kvSet, kvDel, KEYS } from "@/lib/kv";
 export const dynamic = "force-dynamic";
 
 export async function GET(request: NextRequest) {
-  // Verify Vercel Cron secret (prevents external abuse)
+  // Verify secret (supports Vercel Cron header or external cron query param)
   const authHeader = request.headers.get("authorization");
-  if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
+  const querySecret = request.nextUrl.searchParams.get("secret");
+  const expected = process.env.CRON_SECRET;
+  if (authHeader !== `Bearer ${expected}` && querySecret !== expected) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
