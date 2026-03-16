@@ -240,8 +240,8 @@ function openProjectInEditor(name) {
     const projMsys = toMsys(PROJECTS_DIR);
     const claudeBinMsys = toMsys(CLAUDE_BIN);
 
-    // Create tmux session + start Claude directly from agent
-    const createCmd = `tmux kill-session -t ${session} 2>/dev/null; tmux new-session -d -s ${session} -c ${projMsys}/${name}; tmux send-keys -t ${session} '${claudeBinMsys} --dangerously-skip-permissions --model ${CLAUDE_MODEL}' Enter`;
+    // Create tmux session + start Claude (--continue reuses last session to prevent accumulation)
+    const createCmd = `tmux kill-session -t ${session} 2>/dev/null; tmux new-session -d -s ${session} -c ${projMsys}/${name}; tmux send-keys -t ${session} '${claudeBinMsys} --dangerously-skip-permissions --model ${CLAUDE_MODEL} --continue --name ${name}' Enter`;
     exec(`"${BASH_PATH}" -lc "${createCmd}"`, (err) => {
       if (err) {
         console.error('[proj] tmux session create error:', err.message);

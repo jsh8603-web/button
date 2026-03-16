@@ -61,4 +61,5 @@ export const KEYS = {
   projects: "btn:projects",
   command: "btn:command",
   protected: "btn:protected",
+  lastPowerAction: "btn:last-power-action",
 } as const;

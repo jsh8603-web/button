@@ -228,6 +228,7 @@ function Dashboard() {
   const [showSessionDropdown, setShowSessionDropdown] = useState(false);
   const [showPowerMenu, setShowPowerMenu] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
+  const [lastPowerAction, setLastPowerAction] = useState<string | null>(null);
   const newProjInputRef = useRef<HTMLInputElement>(null);
   // Prevent server poll from overwriting optimistic session updates
   const sessionActionTime = useRef(0);
@@ -246,6 +247,7 @@ function Dashboard() {
       if (isOnline && Date.now() - sessionActionTime.current > 35_000) {
         setSessions(data.sessions || []);
       }
+      setLastPowerAction(isOnline ? null : data.lastAction || null);
       setStatus((prev) => {
         if (prev === "waking") return isOnline ? "online" : prev;
         if (prev === "shutting-down") return !isOnline ? "offline" : prev;
@@ -453,9 +455,12 @@ function Dashboard() {
     "shutting-down": "text-amber-400",
   }[status];
 
+  const offlineLabel = lastPowerAction
+    ? { sleep: "Sleeping", hibernate: "Hibernating", display_off: "Display Off", shutdown: "Shut Down" }[lastPowerAction] || "PC is OFF"
+    : "PC is OFF";
   const statusText = {
     online: "PC is ON",
-    offline: "PC is OFF",
+    offline: offlineLabel,
     waking: "Waking up...",
     "shutting-down": "Shutting down...",
   }[status];
@@ -660,12 +665,12 @@ function Dashboard() {
                 value={newProjName}
                 onChange={(e) => setNewProjName(e.target.value)}
                 placeholder="repo name"
-                className="flex-1 h-10 px-3 bg-transparent text-sm text-white
+                className="min-w-0 flex-1 h-10 px-3 bg-transparent text-sm text-white
                   placeholder-white/30 outline-none"
               />
               <button
                 type="submit"
-                className="px-3 text-sm text-amber-400/80 hover:text-amber-400 transition-colors"
+                className="shrink-0 px-3 text-sm text-amber-400/80 hover:text-amber-400 transition-colors"
               >
                 Go
               </button>

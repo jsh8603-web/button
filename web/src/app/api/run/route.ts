@@ -24,6 +24,12 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ ok: true, action });
     }
 
+    // Track power actions for offline status display
+    const powerActions = ["sleep", "hibernate", "display_off"];
+    if (powerActions.includes(action)) {
+      await kvSet(KEYS.lastPowerAction, action);
+    }
+
     // All other actions: append to command queue
     const existing = await kvGet<Command[]>(KEYS.command) || [];
     existing.push({ action, name, timestamp: Date.now() });

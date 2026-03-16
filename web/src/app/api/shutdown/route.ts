@@ -3,6 +3,7 @@ import { kvSet, KEYS } from "@/lib/kv";
 
 export async function POST() {
   try {
+    await kvSet(KEYS.lastPowerAction, "shutdown");
     await kvSet(KEYS.command, {
       action: "shutdown",
       timestamp: Date.now(),
