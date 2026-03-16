@@ -138,6 +138,20 @@ function PowerIcon({ className }: { className?: string }) {
   );
 }
 
+// ─── Shield Icon ─────────────────────────────────────────────
+
+function ShieldIcon({ active, size = 18 }: { active: boolean; size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"
+      className={active ? "text-green-400" : "text-white/30"}
+    >
+      <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+      {active && <path d="M9 12l2 2 4-4" strokeWidth={2.5} />}
+    </svg>
+  );
+}
+
 // ─── Dashboard ───────────────────────────────────────────────
 
 type SessionInfo = { name: string; protected: boolean };
@@ -529,10 +543,10 @@ function Dashboard() {
                     s.protected ? "unprotect-session" : "protect-session",
                     s.name
                   )}
-                  className="ml-2 text-base hover:scale-110 transition-transform"
+                  className="ml-2 hover:scale-110 transition-transform"
                   title={s.protected ? "Remove protection" : "Protect session"}
                 >
-                  {s.protected ? "🟢🛡️" : "🔵🛡️"}
+                  <ShieldIcon active={s.protected} />
                 </button>
                 {!s.protected && (
                   <button
@@ -608,7 +622,7 @@ function Dashboard() {
                     hover:bg-white/10 hover:text-white transition-colors flex items-center"
                 >
                   <span className="flex-1 truncate">{proj}</span>
-                  {activeSession?.protected && <span className="ml-2 text-xs">🟢🛡️</span>}
+                  {activeSession?.protected && <span className="ml-2"><ShieldIcon active size={14} /></span>}
                 </button>
               );
             })}
