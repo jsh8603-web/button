@@ -775,6 +775,8 @@ function Dashboard() {
                     {log.result === "success" ? "OK" : `ERR: ${log.error || log.detail || "unknown"}`}
                   </div>
                   {log.step ? <div>step: {String(log.step)}</div> : null}
+                  {log.udp ? <div>udp: {String(log.udp)}</div> : null}
+                  {log.routerWol ? <div>router: {typeof log.routerWol === "object" ? JSON.stringify(log.routerWol) : String(log.routerWol)}</div> : null}
                   {log.errorName ? <div>type: {String(log.errorName)}</div> : null}
                 </div>
               ))}
