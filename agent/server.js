@@ -5,6 +5,7 @@ const { exec } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 require('dotenv').config({ path: path.join(__dirname, '.env') });
+const { initRouterSession, heartbeatKeepAlive, getCookie } = require('./router-wol');
 
 const app = express();
 const PORT = process.env.PORT || 9876;
@@ -556,6 +557,14 @@ async function sendHeartbeat() {
       protected: protectedList.includes(name),
     }));
 
+    // Keep router session alive and get current cookie
+    let routerCookie = null;
+    try {
+      routerCookie = await heartbeatKeepAlive();
+    } catch (err) {
+      console.error('[heartbeat] Router keep-alive error:', err.message);
+    }
+
     const res = await fetch(`${VERCEL_URL}/api/heartbeat`, {
       method: 'POST',
       headers: {
@@ -566,6 +575,7 @@ async function sendHeartbeat() {
         uptime: process.uptime(),
         projects: getProjectList(),
         sessions,
+        routerCookie,
       }),
       signal: AbortSignal.timeout(10_000),
     });
@@ -636,6 +646,11 @@ app.listen(PORT, async () => {
 
   // Wait for tmux/MSYS2 to be ready before starting heartbeat
   await waitForTmux();
+
+  // Initialize router session (non-blocking — heartbeat will retry if this fails)
+  initRouterSession().catch(err => {
+    console.error('[boot] Router login failed:', err.message);
+  });
 
   // Start heartbeat loop
   if (VERCEL_URL && AGENT_SECRET) {

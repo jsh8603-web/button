@@ -62,4 +62,5 @@ export const KEYS = {
   command: "btn:command",
   protected: "btn:protected",
   lastPowerAction: "btn:last-power-action",
+  routerCookie: "btn:router-cookie",
 } as const;

@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import dns from "dns/promises";
+import { kvGet, KEYS } from "@/lib/kv";
 
 function createMagicPacket(mac: string): Buffer {
   const macBytes = mac
@@ -25,36 +26,35 @@ function createMagicPacket(mac: string): Buffer {
 
 // Send WOL via router's built-in Wake On LAN (LAN broadcast — works for Sleep/Hibernate)
 async function sendRouterWol(host: string, mac: string): Promise<{ ok: boolean; detail: string }> {
-  const password = process.env.ROUTER_PASSWORD;
-  if (!password) return { ok: false, detail: "ROUTER_PASSWORD not configured" };
-
-  const baseUrl = `http://${host}:88`;
-
   try {
-    // Call router WOL API directly (test if auth is needed)
-    const wolUrl = `${baseUrl}/web/inner-data.html?func=wake_on_lan(%221%22,%22${mac}%22)`;
+    // Get router session cookie from KV (set by agent's heartbeat)
+    const routerCookie = await kvGet<string>(KEYS.routerCookie);
+    if (!routerCookie) {
+      return { ok: false, detail: "No router session cookie in KV" };
+    }
+
+    // Use remote port 88 with session cookie authentication
+    const baseUrl = `http://${host}:88`;
+    const wolUrl = `${baseUrl}/web/inner_data.html?func=wake_on_lan(%221%22,%22${mac}%22)`;
 
     const res = await fetch(wolUrl, {
+      headers: {
+        'Cookie': routerCookie,
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+      },
       signal: AbortSignal.timeout(10000),
     });
 
     const text = await res.text();
 
-    if (res.ok && !text.includes("login")) {
-      return { ok: true, detail: `direct: status=${res.status}` };
+    // Check if session expired (redirected to login)
+    if (text.includes('captcha') || text.includes('http_passwd') || text.includes('intro')) {
+      return { ok: false, detail: `session-expired: status=${res.status}` };
     }
 
-    // If direct call fails or requires login, try with Basic Auth
-    const auth = Buffer.from(`admin:${password}`).toString("base64");
-    const authRes = await fetch(wolUrl, {
-      headers: { Authorization: `Basic ${auth}` },
-      signal: AbortSignal.timeout(10000),
-    });
-
-    const authText = await authRes.text();
     return {
-      ok: authRes.ok,
-      detail: `basic-auth: status=${authRes.status}, body=${authText.substring(0, 200)}`,
+      ok: res.ok,
+      detail: `cookie-auth: status=${res.status}, body=${text.substring(0, 200)}`,
     };
   } catch (err) {
     return { ok: false, detail: err instanceof Error ? err.message : String(err) };
