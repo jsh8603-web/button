@@ -120,34 +120,90 @@ function PinEntry({ onAuth }: { onAuth: () => void }) {
   );
 }
 
-// ─── Power Button ────────────────────────────────────────────
+// ─── SVG Icons ──────────────────────────────────────────────
 
 function PowerIcon({ className }: { className?: string }) {
   return (
-    <svg
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={2.5}
-      strokeLinecap="round"
-      className={className}
-    >
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      strokeWidth={2.5} strokeLinecap="round" className={className}>
       <path d="M12 3v8" />
       <path d="M18.36 6.64A9 9 0 1 1 5.64 6.64" />
     </svg>
   );
 }
 
-// ─── Shield Icon ─────────────────────────────────────────────
-
 function ShieldIcon({ active, size = 18 }: { active: boolean; size?: number }) {
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor"
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none"
       strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"
-      className={active ? "text-green-400" : "text-white/30"}
+      className={`transition-colors duration-300 ${active ? "text-green-400" : "text-white/30"}`}
     >
-      <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
-      {active && <path d="M9 12l2 2 4-4" strokeWidth={2.5} />}
+      <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"
+        stroke="currentColor" fill={active ? "currentColor" : "none"} fillOpacity={active ? 0.15 : 0} />
+      {active && <path d="M9 12l2 2 4-4" stroke="currentColor" strokeWidth={2.5} />}
+    </svg>
+  );
+}
+
+function MoonIcon({ size = 20, className }: { size?: number; className?: string }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"
+      className={className}>
+      <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+    </svg>
+  );
+}
+
+function SnowflakeIcon({ size = 20, className }: { size?: number; className?: string }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"
+      className={className}>
+      <path d="M12 2v20M17 7l-5 5-5-5M7 17l5-5 5 5M2 12h20M7 7l-5 5 5 5M17 7l5 5-5 5" />
+    </svg>
+  );
+}
+
+function MonitorOffIcon({ size = 20, className }: { size?: number; className?: string }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"
+      className={className}>
+      <rect x="2" y="3" width="20" height="14" rx="2" ry="2" />
+      <path d="M8 21h8M12 17v4" />
+      <path d="M2 3l20 18" strokeWidth={2.5} />
+    </svg>
+  );
+}
+
+function TerminalIcon({ size = 20, className }: { size?: number; className?: string }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"
+      className={className}>
+      <polyline points="4 17 10 11 4 5" />
+      <line x1="12" y1="19" x2="20" y2="19" />
+    </svg>
+  );
+}
+
+function FolderIcon({ size = 20, className }: { size?: number; className?: string }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"
+      className={className}>
+      <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+    </svg>
+  );
+}
+
+function XIcon({ size = 14, className }: { size?: number; className?: string }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" strokeWidth={2.5} strokeLinecap="round"
+      className={className}>
+      <path d="M18 6L6 18M6 6l12 12" />
     </svg>
   );
 }
@@ -171,7 +227,10 @@ function Dashboard() {
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [showSessionDropdown, setShowSessionDropdown] = useState(false);
   const [showPowerMenu, setShowPowerMenu] = useState(false);
+  const [showHelp, setShowHelp] = useState(false);
   const newProjInputRef = useRef<HTMLInputElement>(null);
+  // Prevent server poll from overwriting optimistic session updates
+  const sessionActionTime = useRef(0);
 
   // Load last project from localStorage
   useEffect(() => {
@@ -183,7 +242,10 @@ function Dashboard() {
       const res = await fetch("/api/status");
       const data = await res.json();
       const isOnline = data.status === "online";
-      if (isOnline) setSessions(data.sessions || []);
+      // Only update sessions from server if no recent optimistic action (35s grace)
+      if (isOnline && Date.now() - sessionActionTime.current > 35_000) {
+        setSessions(data.sessions || []);
+      }
       setStatus((prev) => {
         if (prev === "waking") return isOnline ? "online" : prev;
         if (prev === "shutting-down") return !isOnline ? "offline" : prev;
@@ -235,7 +297,6 @@ function Dashboard() {
 
   const saveWakeLog = (entry: Record<string, unknown>) => {
     try {
-      // Flatten nested log object from API response into top-level
       const { log: serverLog, ...rest } = entry;
       const flat = { timestamp: new Date().toISOString(), ...rest, ...(serverLog && typeof serverLog === "object" ? serverLog as Record<string, unknown> : {}) };
       const logs = JSON.parse(localStorage.getItem("wake-logs") || "[]");
@@ -249,7 +310,6 @@ function Dashboard() {
     if (status === "waking" || status === "shutting-down") return;
 
     if (status === "offline") {
-      // Wake
       setStatus("waking");
       try {
         const res = await fetch("/api/wake", { method: "POST" });
@@ -270,7 +330,6 @@ function Dashboard() {
         setTimeout(() => setActionFeedback(""), 5000);
       }
     } else {
-      // Shutdown — confirm first
       if (window.confirm("Shut down PC?")) {
         setStatus("shutting-down");
         try {
@@ -286,24 +345,17 @@ function Dashboard() {
     }
   };
 
-  const handlePowerAction = async (action: string, label: string, confirm_msg?: string) => {
-    if (confirm_msg && !window.confirm(confirm_msg)) return;
+  const handlePowerAction = async (action: string, label: string) => {
     setShowPowerMenu(false);
     try {
       setActionFeedback(`${label}...`);
-      if (action === "shutdown") {
-        setStatus("shutting-down");
-        await fetch("/api/shutdown", { method: "POST" });
-      } else {
-        await fetch("/api/run", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ action }),
-        });
-      }
+      await fetch("/api/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action }),
+      });
       setActionFeedback(`${label} signal sent`);
     } catch {
-      if (action === "shutdown") setStatus("online");
       setActionFeedback("Failed to reach PC");
     }
     setTimeout(() => setActionFeedback(""), 3000);
@@ -347,7 +399,7 @@ function Dashboard() {
   };
 
   const handleSessionAction = async (action: string, name: string) => {
-    // Optimistic UI update
+    sessionActionTime.current = Date.now();
     if (action === "protect-session") {
       setSessions(prev => prev.map(s => s.name === name ? { ...s, protected: true } : s));
     } else if (action === "unprotect-session") {
@@ -372,6 +424,12 @@ function Dashboard() {
       return;
     }
     await handleOpenProject(name);
+  };
+
+  const closeAllDropdowns = () => {
+    setShowPowerMenu(false);
+    setShowSessionDropdown(false);
+    setShowProjDropdown(false);
   };
 
   const glowClass = {
@@ -457,32 +515,22 @@ function Dashboard() {
         `}
       >
         <button
-          onClick={() => {
-            setShowPowerMenu(!showPowerMenu);
-            setShowSessionDropdown(false);
-            setShowProjDropdown(false);
-          }}
-          className="w-12 h-12 rounded-xl bg-white/5 border border-white/10
-            flex items-center justify-center
-            hover:bg-white/10 hover:border-white/20
-            active:scale-90 transition-all duration-200"
+          onClick={() => { closeAllDropdowns(); setShowPowerMenu(v => !v); }}
+          className={`w-12 h-12 rounded-xl bg-white/5 border flex items-center justify-center
+            active:scale-90 transition-all duration-200
+            ${showPowerMenu ? "border-purple-500/50 bg-purple-500/10" : "border-white/10 hover:bg-white/10 hover:border-white/20"}`}
           title="Power Options"
         >
-          <span className="text-xl">😴</span>
+          <MoonIcon size={22} className="text-purple-400" />
         </button>
         <button
-          onClick={() => {
-            setShowSessionDropdown(!showSessionDropdown);
-            setShowProjDropdown(false);
-            setShowPowerMenu(false);
-          }}
-          className="relative w-12 h-12 rounded-xl bg-white/5 border border-white/10
-            flex items-center justify-center
-            hover:bg-white/10 hover:border-white/20
-            active:scale-90 transition-all duration-200"
+          onClick={() => { closeAllDropdowns(); setShowSessionDropdown(v => !v); }}
+          className={`relative w-12 h-12 rounded-xl bg-white/5 border flex items-center justify-center
+            active:scale-90 transition-all duration-200
+            ${showSessionDropdown ? "border-blue-500/50 bg-blue-500/10" : "border-white/10 hover:bg-white/10 hover:border-white/20"}`}
           title="Sessions"
         >
-          <span className="text-xl">💻</span>
+          <TerminalIcon size={22} className="text-blue-400" />
           {sessions.length > 0 && (
             <span className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-blue-500 text-[10px] text-white flex items-center justify-center font-bold">
               {sessions.length}
@@ -490,51 +538,47 @@ function Dashboard() {
           )}
         </button>
         <button
-          onClick={() => {
-            setShowProjDropdown(!showProjDropdown);
-            setShowNewProjInput(false);
-            setShowPowerMenu(false);
-            setShowSessionDropdown(false);
-            if (!showProjDropdown) fetchProjects();
-          }}
-          className="w-12 h-12 rounded-xl bg-white/5 border border-white/10
-            flex items-center justify-center
-            hover:bg-white/10 hover:border-white/20
-            active:scale-90 transition-all duration-200"
+          onClick={() => { closeAllDropdowns(); setShowProjDropdown(v => !v); if (!showProjDropdown) fetchProjects(); }}
+          className={`w-12 h-12 rounded-xl bg-white/5 border flex items-center justify-center
+            active:scale-90 transition-all duration-200
+            ${showProjDropdown ? "border-amber-500/50 bg-amber-500/10" : "border-white/10 hover:bg-white/10 hover:border-white/20"}`}
           title="Open Project"
         >
-          <span className="text-xl">📂</span>
+          <FolderIcon size={22} className="text-amber-400" />
         </button>
       </div>
 
       {/* Power Menu Dropdown */}
       <div
         className={`
-          mt-4 w-48 transition-all duration-300 overflow-hidden
+          mt-4 w-52 transition-all duration-300 overflow-hidden
           ${status === "online" && showPowerMenu ? "max-h-60 opacity-100" : "max-h-0 opacity-0"}
         `}
       >
         <div className="bg-white/5 border border-white/10 rounded-xl overflow-hidden">
           <button
             onClick={() => handlePowerAction("sleep", "Sleep")}
-            className="w-full px-4 py-2.5 text-left text-sm text-white/70
+            className="w-full px-4 py-3 text-left text-sm text-white/70
               hover:bg-white/10 hover:text-white transition-colors flex items-center gap-3"
           >
-            <span>😴</span> Sleep
+            <MoonIcon size={18} className="text-purple-400" />
+            <span>Sleep</span>
           </button>
           <button
             onClick={() => handlePowerAction("hibernate", "Hibernate")}
-            className="w-full px-4 py-2.5 text-left text-sm text-white/70
+            className="w-full px-4 py-3 text-left text-sm text-white/70
               hover:bg-white/10 hover:text-white transition-colors flex items-center gap-3"
           >
-            <span>💤</span> Hibernate
+            <SnowflakeIcon size={18} className="text-blue-400" />
+            <span>Hibernate</span>
           </button>
           <button
             onClick={() => handlePowerAction("display_off", "Display off")}
-            className="w-full px-4 py-2.5 text-left text-sm text-white/70
+            className="w-full px-4 py-3 text-left text-sm text-white/70
               hover:bg-white/10 hover:text-white transition-colors flex items-center gap-3"
           >
-            <span>🖥️</span> Display Off
+            <MonitorOffIcon size={18} className="text-cyan-400" />
+            <span>Display Off</span>
           </button>
         </div>
       </div>
@@ -573,10 +617,10 @@ function Dashboard() {
                         handleSessionAction("kill-session", s.name);
                       }
                     }}
-                    className="ml-2 text-sm text-white/30 hover:text-red-400 transition-colors"
+                    className="ml-2 text-white/30 hover:text-red-400 transition-colors"
                     title="Kill session"
                   >
-                    ✕
+                    <XIcon />
                   </button>
                 )}
               </div>
@@ -651,35 +695,87 @@ function Dashboard() {
         </div>
       </div>
 
-      {/* Wake Logs */}
-      <div className="fixed bottom-4 right-4">
-        <button
-          onClick={() => {
-            try {
-              setWakeLogs(JSON.parse(localStorage.getItem("wake-logs") || "[]"));
-            } catch { setWakeLogs([]); }
-            setShowLogs(!showLogs);
-          }}
-          className="w-8 h-8 rounded-full bg-white/5 border border-white/10
-            text-[10px] text-white/30 hover:text-white/60 transition-colors"
-        >
-          log
-        </button>
-        {showLogs && wakeLogs.length > 0 && (
-          <div className="absolute bottom-10 right-0 w-72 max-h-60 overflow-y-auto
-            bg-black/90 border border-white/10 rounded-lg p-3 text-[10px] text-white/60 font-mono">
-            {wakeLogs.map((log, i) => (
-              <div key={i} className="mb-2 border-b border-white/5 pb-2">
-                <div className="text-white/40">{String(log.timestamp).slice(5, 19)}</div>
-                <div className={log.result === "success" ? "text-green-400" : "text-red-400"}>
-                  {log.result === "success" ? "OK" : `ERR: ${log.error || log.detail || "unknown"}`}
-                </div>
-                {log.step ? <div>step: {String(log.step)}</div> : null}
-                {log.errorName ? <div>type: {String(log.errorName)}</div> : null}
+      {/* Bottom: Help + Logs */}
+      <div className="fixed bottom-4 left-4 right-4 flex justify-between items-end">
+        {/* Help Index */}
+        <div>
+          <button
+            onClick={() => setShowHelp(!showHelp)}
+            className="w-8 h-8 rounded-full bg-white/5 border border-white/10
+              text-[10px] text-white/30 hover:text-white/60 transition-colors"
+          >
+            ?
+          </button>
+          {showHelp && (
+            <div className="absolute bottom-10 left-0 w-72
+              bg-black/95 border border-white/10 rounded-xl p-4 text-[11px] text-white/50 space-y-3">
+              <div className="text-white/70 font-medium text-xs mb-2">Controls</div>
+
+              <div className="flex items-start gap-2">
+                <PowerIcon className="w-4 h-4 text-green-400 shrink-0 mt-0.5" />
+                <div><span className="text-white/70">Power</span> — OFF: Wake (WOL), ON: Shut down</div>
               </div>
-            ))}
-          </div>
-        )}
+
+              <div className="border-t border-white/10 pt-2 text-white/40 text-[10px]">Quick Actions (online only)</div>
+
+              <div className="flex items-start gap-2">
+                <MoonIcon size={14} className="text-purple-400 shrink-0 mt-0.5" />
+                <div><span className="text-white/70">Power Menu</span> — Sleep, Hibernate, Display Off</div>
+              </div>
+              <div className="flex items-start gap-2">
+                <TerminalIcon size={14} className="text-blue-400 shrink-0 mt-0.5" />
+                <div><span className="text-white/70">Sessions</span> — Manage active tmux sessions</div>
+              </div>
+              <div className="flex items-start gap-2 pl-5">
+                <ShieldIcon active size={12} />
+                <div><span className="text-green-400">Protected</span> — Survives project open. Tap to unprotect</div>
+              </div>
+              <div className="flex items-start gap-2 pl-5">
+                <ShieldIcon active={false} size={12} />
+                <div><span className="text-white/50">Unprotected</span> — Tap to protect</div>
+              </div>
+              <div className="flex items-start gap-2 pl-5">
+                <XIcon size={10} className="text-red-400 shrink-0 mt-1" />
+                <div><span className="text-red-400">Kill</span> — Close session (tmux + Claude + VS Code)</div>
+              </div>
+              <div className="flex items-start gap-2">
+                <FolderIcon size={14} className="text-amber-400 shrink-0 mt-0.5" />
+                <div><span className="text-white/70">Projects</span> — Open project. <span className="text-red-400/70">Kills unprotected sessions</span></div>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Wake Logs */}
+        <div>
+          <button
+            onClick={() => {
+              try {
+                setWakeLogs(JSON.parse(localStorage.getItem("wake-logs") || "[]"));
+              } catch { setWakeLogs([]); }
+              setShowLogs(!showLogs);
+            }}
+            className="w-8 h-8 rounded-full bg-white/5 border border-white/10
+              text-[10px] text-white/30 hover:text-white/60 transition-colors"
+          >
+            log
+          </button>
+          {showLogs && wakeLogs.length > 0 && (
+            <div className="absolute bottom-10 right-0 w-72 max-h-60 overflow-y-auto
+              bg-black/90 border border-white/10 rounded-lg p-3 text-[10px] text-white/60 font-mono">
+              {wakeLogs.map((log, i) => (
+                <div key={i} className="mb-2 border-b border-white/5 pb-2">
+                  <div className="text-white/40">{String(log.timestamp).slice(5, 19)}</div>
+                  <div className={log.result === "success" ? "text-green-400" : "text-red-400"}>
+                    {log.result === "success" ? "OK" : `ERR: ${log.error || log.detail || "unknown"}`}
+                  </div>
+                  {log.step ? <div>step: {String(log.step)}</div> : null}
+                  {log.errorName ? <div>type: {String(log.errorName)}</div> : null}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -691,7 +787,6 @@ export default function Home() {
   const [authenticated, setAuthenticated] = useState(false);
   const [checking, setChecking] = useState(true);
 
-  // Check if already authenticated (cookie exists and is valid)
   useEffect(() => {
     async function checkAuth() {
       try {
