@@ -6,7 +6,6 @@ type PcStatus = "online" | "offline" | "waking" | "shutting-down";
 
 function timeAgo(date: Date): string {
   const seconds = Math.floor((Date.now() - date.getTime()) / 1000);
-  if (seconds < 10) return "just now";
   if (seconds < 60) return `${seconds}s ago`;
   const minutes = Math.floor(seconds / 60);
   if (minutes < 60) return `${minutes}min ago`;
@@ -248,6 +247,12 @@ function Dashboard() {
         setSessions(data.sessions || []);
       }
       setLastPowerAction(isOnline ? null : data.lastAction || null);
+      // Show CAPTCHA progress from agent
+      if (data.captchaStatus) {
+        setActionFeedback(data.captchaStatus);
+      } else if (actionFeedback && (actionFeedback.startsWith("CAPTCHA") || actionFeedback.includes("캡차") || actionFeedback.includes("CAPTCHA"))) {
+        setActionFeedback("");
+      }
       setStatus((prev) => {
         if (prev === "waking") return isOnline ? "online" : prev;
         if (prev === "shutting-down") return !isOnline ? "offline" : prev;

@@ -427,30 +427,7 @@ app.post('/run', verifyPin, (req, res) => {
   }
 
   if (action === 'sleep' || action === 'hibernate') {
-    // Refresh router cookie before sleeping (fire-and-forget, respond immediately)
-    (async () => {
-      try {
-        const freshCookie = await refreshBeforeSleep();
-        if (freshCookie && VERCEL_URL && AGENT_SECRET) {
-          await fetch(`${VERCEL_URL}/api/heartbeat`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${AGENT_SECRET}` },
-            body: JSON.stringify({ uptime: process.uptime(), routerCookie: freshCookie, routerCookieTTL: 86400 }),
-            signal: AbortSignal.timeout(10_000),
-          });
-          console.log(`[${action}] Router cookie refreshed and stored with 24h TTL`);
-        }
-      } catch (err) {
-        console.error(`[${action}] Pre-sleep cookie refresh error:`, err.message);
-      }
-
-      const cmd = action === 'sleep'
-        ? 'rundll32.exe powrprof.dll,SetSuspendState 0,1,0'
-        : 'shutdown /h';
-      exec(cmd, (err) => {
-        if (err) console.error(`[${action}] Error:`, err.message);
-      });
-    })();
+    executeSleepAction(action);
     return res.json({ ok: true, action });
   }
 
@@ -468,6 +445,55 @@ app.post('/run', verifyPin, (req, res) => {
 
 const VERCEL_URL = process.env.VERCEL_URL;
 const AGENT_SECRET = process.env.AGENT_SECRET;
+
+// Helper: update CAPTCHA status in KV (for web UI display)
+async function setCaptchaStatus(msg) {
+  if (!VERCEL_URL || !AGENT_SECRET) return;
+  try {
+    await fetch(`${VERCEL_URL}/api/heartbeat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${AGENT_SECRET}` },
+      body: JSON.stringify({ uptime: process.uptime(), captchaStatus: msg }),
+      signal: AbortSignal.timeout(5_000),
+    });
+  } catch {}
+}
+
+// Helper: execute sleep/hibernate with CAPTCHA pre-check
+async function executeSleepAction(action) {
+  const onProgress = (msg) => setCaptchaStatus(msg);
+
+  try {
+    const freshCookie = await refreshBeforeSleep(onProgress);
+    if (!freshCookie) {
+      console.log(`[${action}] CAPTCHA failed — ${action} cancelled`);
+      setCaptchaStatus(`CAPTCHA 실패 — ${action} 취소됨`);
+      return;
+    }
+    if (VERCEL_URL && AGENT_SECRET) {
+      await fetch(`${VERCEL_URL}/api/heartbeat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${AGENT_SECRET}` },
+        body: JSON.stringify({ uptime: process.uptime(), routerCookie: freshCookie, routerCookieTTL: 86400 }),
+        signal: AbortSignal.timeout(10_000),
+      });
+      console.log(`[${action}] Router cookie refreshed and stored with 24h TTL`);
+    }
+  } catch (err) {
+    console.error(`[${action}] Pre-sleep cookie refresh error:`, err.message);
+    setCaptchaStatus(`CAPTCHA 실패 — ${action} 취소됨`);
+    return;
+  }
+
+  setCaptchaStatus('');
+  const cmd = action === 'sleep'
+    ? 'rundll32.exe powrprof.dll,SetSuspendState 0,1,0'
+    : 'shutdown /h';
+  exec(cmd, (err) => {
+    if (err) console.error(`[${action}] Error:`, err.message);
+    else console.log(`[${action}] Entering ${action} mode`);
+  });
+}
 const HEARTBEAT_INTERVAL = 30_000;
 
 function getProjectList() {
@@ -533,31 +559,7 @@ function executeCommand(command) {
       console.log(`[session] Killed: ${command.name}`);
     }
   } else if (command.action === 'sleep' || command.action === 'hibernate') {
-    // Refresh router cookie before sleeping — store with 24h TTL for WOL after wake
-    (async () => {
-      try {
-        const freshCookie = await refreshBeforeSleep();
-        if (freshCookie && VERCEL_URL && AGENT_SECRET) {
-          await fetch(`${VERCEL_URL}/api/heartbeat`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${AGENT_SECRET}` },
-            body: JSON.stringify({ uptime: process.uptime(), routerCookie: freshCookie, routerCookieTTL: 86400 }),
-            signal: AbortSignal.timeout(10_000),
-          });
-          console.log(`[${command.action}] Router cookie refreshed and stored with 24h TTL`);
-        }
-      } catch (err) {
-        console.error(`[${command.action}] Pre-sleep cookie refresh error:`, err.message);
-      }
-
-      const cmd = command.action === 'sleep'
-        ? 'rundll32.exe powrprof.dll,SetSuspendState 0,1,0'
-        : 'shutdown /h';
-      exec(cmd, (err) => {
-        if (err) console.error(`[${command.action}] Error:`, err.message);
-        else console.log(`[heartbeat] Entering ${command.action} mode`);
-      });
-    })();
+    executeSleepAction(command.action);
   } else if (command.action === 'display_off') {
     exec('powershell.exe -Command "(Add-Type -MemberDefinition \'[DllImport(\\"user32.dll\\")]public static extern int SendMessage(int hWnd,int Msg,int wParam,int lParam);\' -Name a -Passthru)::SendMessage(-1,0x0112,0xF170,2)"', (err) => {
       if (err) console.error('[display_off] Error:', err.message);

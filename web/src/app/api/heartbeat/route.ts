@@ -11,7 +11,7 @@ export async function POST(request: NextRequest) {
 
   try {
     const body = await request.json();
-    const { uptime, projects, sessions, routerCookie, routerCookieTTL } = body;
+    const { uptime, projects, sessions, routerCookie, routerCookieTTL, captchaStatus } = body;
 
     // Store heartbeat (45s TTL)
     await kvSet(KEYS.heartbeat, { timestamp: Date.now(), uptime, sessions: sessions || [] }, 45);
@@ -25,6 +25,15 @@ export async function POST(request: NextRequest) {
     // Store project list (300s TTL)
     if (projects) {
       await kvSet(KEYS.projects, { projects }, 300);
+    }
+
+    // Store CAPTCHA progress status (120s TTL, empty string clears)
+    if (typeof captchaStatus === 'string') {
+      if (captchaStatus) {
+        await kvSet(KEYS.captchaStatus, captchaStatus, 120);
+      } else {
+        await kvDel(KEYS.captchaStatus);
+      }
     }
 
     // Include KV-stored protection state so agent can sync

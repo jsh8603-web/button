@@ -837,23 +837,25 @@ async function login() {
  */
 let loginInProgress = null;
 
-async function loginWithRetry(maxRetries = 5) {
+async function loginWithRetry(maxRetries = 5, onProgress = null) {
   if (loginInProgress) return loginInProgress;
-  loginInProgress = _loginWithRetry(maxRetries).finally(() => { loginInProgress = null; });
+  loginInProgress = _loginWithRetry(maxRetries, onProgress).finally(() => { loginInProgress = null; });
   return loginInProgress;
 }
 
-async function _loginWithRetry(maxRetries) {
+async function _loginWithRetry(maxRetries, onProgress) {
   let consecutiveFails = 0;
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       console.log(`[router] Login attempt ${attempt}/${maxRetries}...`);
+      if (onProgress) onProgress(`CAPTCHA 풀이 중 (${attempt}/${maxRetries})`);
 
       const cookie = await login();
       if (cookie) {
         currentCookie = cookie;
         lastLoginTime = Date.now();
+        if (onProgress) onProgress('CAPTCHA 성공');
         return cookie;
       }
     } catch (err) {
@@ -865,6 +867,7 @@ async function _loginWithRetry(maxRetries) {
     }
   }
   console.error(`[router] All ${maxRetries} login attempts failed`);
+  if (onProgress) onProgress('CAPTCHA 실패');
   return null;
 }
 
@@ -910,19 +913,31 @@ async function initRouterSession(storedCookie) {
   return await loginWithRetry();
 }
 
+let heartbeatLoginFailed = false;
+
 async function heartbeatKeepAlive() {
   if (currentCookie) {
+    heartbeatLoginFailed = false;
     const alive = await keepAlive();
     if (alive) return currentCookie;
     console.log('[router] Session expired during heartbeat, re-logging in...');
+    heartbeatLoginFailed = false; // allow retry on expiry
   }
   // If login is already in progress, don't block heartbeat — return null
   if (loginInProgress) {
-    console.log('[router] Login in progress, heartbeat will send without cookie');
+    return null;
+  }
+  // Don't retry if previous background login already failed
+  if (heartbeatLoginFailed) {
     return null;
   }
   // No cookie and no login in progress — start login but don't block heartbeat
-  loginWithRetry().catch(err => console.error('[router] Background login failed:', err.message));
+  loginWithRetry().then(cookie => {
+    if (!cookie) heartbeatLoginFailed = true;
+  }).catch(err => {
+    heartbeatLoginFailed = true;
+    console.error('[router] Background login failed:', err.message);
+  });
   return null;
 }
 
@@ -935,16 +950,17 @@ function getCookie() {
  * If current session is alive, just return it (no CAPTCHA needed).
  * Only re-login if session expired.
  */
-async function refreshBeforeSleep() {
+async function refreshBeforeSleep(onProgress = null) {
   if (currentCookie) {
     const alive = await keepAlive();
     if (alive) {
       console.log('[router] Pre-sleep: session alive — reusing current cookie');
+      if (onProgress) onProgress('CAPTCHA 성공');
       return currentCookie;
     }
     console.log('[router] Pre-sleep: session expired — re-logging in...');
   }
-  return await loginWithRetry(3);
+  return await loginWithRetry(5, onProgress);
 }
 
 module.exports = { initRouterSession, heartbeatKeepAlive, getCookie, refreshBeforeSleep };
