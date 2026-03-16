@@ -11,7 +11,7 @@ export async function verifyPin(pin: string): Promise<boolean> {
 }
 
 export function createToken(): string {
-  return jwt.sign({ authorized: true }, JWT_SECRET, { expiresIn: "24h" });
+  return jwt.sign({ authorized: true }, JWT_SECRET, { expiresIn: "30d" });
 }
 
 export function verifyToken(token: string): boolean {
