@@ -918,9 +918,12 @@ async function heartbeatKeepAlive() {
   }
   // If login is already in progress, don't block heartbeat — return null
   if (loginInProgress) {
+    console.log('[router] Login in progress, heartbeat will send without cookie');
     return null;
   }
-  return await loginWithRetry();
+  // No cookie and no login in progress — start login but don't block heartbeat
+  loginWithRetry().catch(err => console.error('[router] Background login failed:', err.message));
+  return null;
 }
 
 function getCookie() {
