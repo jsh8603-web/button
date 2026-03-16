@@ -261,10 +261,18 @@ function openProjectInEditor(name) {
         exec(`"${BASH_PATH}" -lc "tmux capture-pane -t ${session} -p | sed '/^[[:space:]]*$/d' | tail -10"`, { encoding: 'utf8' }, cb);
       }
 
+      function hasTrustPrompt(output) {
+        return output.includes('trust this folder') || output.includes('I trust');
+      }
+
       function hasClaudePrompt(output) {
         // Claude shows ">" prompt, "╭" welcome box, or "human" turn indicator when ready
+        // Exclude trust prompt which also contains ">"
+        if (hasTrustPrompt(output)) return false;
         return output.includes('>') || output.includes('\u256D') || output.includes('human');
       }
+
+      let trustHandled = false;
 
       function sendRemoteControl() {
         const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
@@ -306,6 +314,16 @@ function openProjectInEditor(name) {
           }
           const output = (stdout || '').trim();
           const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+          // Auto-accept workspace trust prompt
+          if (!trustHandled && hasTrustPrompt(output)) {
+            trustHandled = true;
+            console.log(`[proj] Trust prompt detected at ${elapsed}s, sending Enter to accept`);
+            exec(`"${BASH_PATH}" -lc "tmux send-keys -t ${session} Enter"`, () => {});
+            lastReadyOutput = null;
+            setTimeout(waitForClaude, POLL_INTERVAL);
+            return;
+          }
+
           const isReady = hasClaudePrompt(output);
           console.log(`[proj] Poll ${elapsed}s: ready=${isReady} output=${output.slice(-120)}`);
 
