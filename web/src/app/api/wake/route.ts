@@ -71,15 +71,26 @@ export async function POST() {
     const client = dgram.createSocket("udp4");
     log.step = "socket_created";
 
-    await new Promise<void>((resolve, reject) => {
-      client.send(packet, 0, packet.length, port, targetIp, (err) => {
-        client.close();
-        if (err) reject(err);
-        else resolve();
+    // Send 3 times for reliability (ARP cache / NIC wake timing)
+    const sendOnce = () =>
+      new Promise<void>((resolve, reject) => {
+        client.send(packet, 0, packet.length, port, targetIp, (err) => {
+          if (err) reject(err);
+          else resolve();
+        });
       });
-    });
+
+    const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+    await sendOnce();
+    await delay(250);
+    await sendOnce();
+    await delay(250);
+    await sendOnce();
+    client.close();
 
     log.step = "sent";
+    log.packetsSent = 3;
     log.result = "success";
     console.log("[wake]", JSON.stringify(log));
     return NextResponse.json({ ok: true, message: "Magic packet sent", log });
