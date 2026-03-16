@@ -371,8 +371,8 @@ function buildConfusions() {
           const diffKey = `${from}→${to}`;
           const observed = (diffs[diffKey] || 0) + (diffs[`${to}→${from}`] || 0);
           const winCount = (wins[`${from}→${to}`] || 0) + (wins[`${to}→${from}`] || 0);
-          // Only prune if heavily observed (5+) with zero wins
-          if (observed >= 5 && winCount === 0) {
+          // Only prune if heavily observed (10+) with zero wins
+          if (observed >= 10 && winCount === 0) {
             pruned++;
             return false;
           }
