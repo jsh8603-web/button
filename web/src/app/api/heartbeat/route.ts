@@ -30,14 +30,17 @@ export async function POST(request: NextRequest) {
     // Include KV-stored protection state so agent can sync
     const protectedSessions = await kvGet<string[]>(KEYS.protected) || [];
 
+    // Return stored router cookie so agent can restore session after restart
+    const storedRouterCookie = body.needRouterCookie ? await kvGet<string>(KEYS.routerCookie) : undefined;
+
     // Check for pending commands and return them (queue)
     const commands = await kvGet<Command[]>(KEYS.command);
     if (commands && commands.length > 0) {
       await kvDel(KEYS.command);
-      return NextResponse.json({ ok: true, commands, protectedSessions });
+      return NextResponse.json({ ok: true, commands, protectedSessions, storedRouterCookie });
     }
 
-    return NextResponse.json({ ok: true, commands: null, protectedSessions });
+    return NextResponse.json({ ok: true, commands: null, protectedSessions, storedRouterCookie });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
     return NextResponse.json({ error: message }, { status: 500 });

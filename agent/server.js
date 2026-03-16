@@ -677,8 +677,28 @@ app.listen(PORT, async () => {
   // Wait for tmux/MSYS2 to be ready before starting heartbeat
   await waitForTmux();
 
-  // Initialize router session (non-blocking — heartbeat will retry if this fails)
-  initRouterSession().catch(err => {
+  // Fetch stored router cookie from KV, then initialize router session
+  let storedRouterCookie = null;
+  if (VERCEL_URL && AGENT_SECRET) {
+    try {
+      const res = await fetch(`${VERCEL_URL}/api/heartbeat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${AGENT_SECRET}` },
+        body: JSON.stringify({ uptime: process.uptime(), sessions: [], needRouterCookie: true }),
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        storedRouterCookie = data.storedRouterCookie || null;
+        if (storedRouterCookie) console.log('[boot] Retrieved router cookie from KV');
+      }
+    } catch (err) {
+      console.error('[boot] Failed to fetch stored cookie:', err.message);
+    }
+  }
+
+  // Initialize router session — uses KV cookie if available, else CAPTCHA login
+  initRouterSession(storedRouterCookie).catch(err => {
     console.error('[boot] Router login failed:', err.message);
   });
 

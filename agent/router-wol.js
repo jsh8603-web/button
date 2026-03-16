@@ -891,8 +891,22 @@ async function keepAlive() {
   }
 }
 
-async function initRouterSession() {
+async function initRouterSession(storedCookie) {
   console.log('[router] Initializing router session...');
+
+  // Try stored cookie from KV first (avoids CAPTCHA)
+  if (storedCookie) {
+    currentCookie = storedCookie;
+    const alive = await keepAlive();
+    if (alive) {
+      console.log('[router] Restored session from KV cookie — CAPTCHA skipped');
+      lastLoginTime = Date.now();
+      return currentCookie;
+    }
+    console.log('[router] KV cookie expired, falling back to CAPTCHA login...');
+    currentCookie = null;
+  }
+
   return await loginWithRetry();
 }
 
@@ -901,6 +915,10 @@ async function heartbeatKeepAlive() {
     const alive = await keepAlive();
     if (alive) return currentCookie;
     console.log('[router] Session expired during heartbeat, re-logging in...');
+  }
+  // If login is already in progress, don't block heartbeat — return null
+  if (loginInProgress) {
+    return null;
   }
   return await loginWithRetry();
 }
