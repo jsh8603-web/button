@@ -3,8 +3,8 @@ import { NextRequest, NextResponse } from "next/server";
 export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
-  // Skip auth and heartbeat endpoints
-  if (pathname === "/api/auth" || pathname === "/api/heartbeat") {
+  // Skip auth, heartbeat, and cron endpoints
+  if (pathname === "/api/auth" || pathname === "/api/heartbeat" || pathname.startsWith("/api/cron/")) {
     return NextResponse.next();
   }
 

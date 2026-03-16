@@ -18,6 +18,8 @@ PC에 상주하는 Agent가 30초마다 heartbeat를 보내 온라인 상태와 
 
 - Web↔Agent 직접 통신 없음: Supabase KV를 매개로 비동기 통신
 - WOL 이중 전송: ① Vercel에서 직접 UDP Magic Packet (Shutdown용) ② 공유기 WOL API 호출 (Sleep/Hibernate용, port 88)
+- 공유기 세션 유지: Agent가 최초 CAPTCHA 풀어서 로그인 → Vercel Cron이 30분마다 keep-alive → 세션 영구 유지
+- Sleep/Hibernate 전: 쿠키 유효성 확인 후 KV에 24h TTL로 저장 (CAPTCHA 재풀이 불필요)
 - Agent는 heartbeat 응답으로 대기 명령을 수신하고, 실행 후 KV에서 삭제 (1회 실행 보장)
 - Heartbeat에 `sessions: [{name, protected}]` 포함 → 웹 UI에서 세션 관리
 
@@ -36,6 +38,7 @@ web/                          → Next.js 웹앱 (Vercel 배포)
       shutdown/route.ts       → KV에 shutdown 명령 저장 (TTL 120초)
       run/route.ts            → KV에 action 명령 저장 (모든 action 공통)
       projects/route.ts       → KV에서 프로젝트 목록 캐시 읽기
+      cron/router-keepalive/route.ts → 공유기 세션 keep-alive (Vercel Cron 30분)
   src/lib/
     auth.ts                   → bcrypt PIN 검증 + JWT 생성/검증
     kv.ts                     → Supabase KV 클라이언트 (kvGet/kvSet/kvDel, SessionInfo/Heartbeat 타입)

@@ -11,14 +11,15 @@ export async function POST(request: NextRequest) {
 
   try {
     const body = await request.json();
-    const { uptime, projects, sessions, routerCookie } = body;
+    const { uptime, projects, sessions, routerCookie, routerCookieTTL } = body;
 
     // Store heartbeat (45s TTL)
     await kvSet(KEYS.heartbeat, { timestamp: Date.now(), uptime, sessions: sessions || [] }, 45);
 
-    // Store router session cookie if provided (3600s TTL)
+    // Store router session cookie (default 3600s, pre-sleep sends 86400s for 24h persistence)
     if (routerCookie) {
-      await kvSet(KEYS.routerCookie, routerCookie, 3600);
+      const ttl = typeof routerCookieTTL === 'number' && routerCookieTTL > 0 ? routerCookieTTL : 3600;
+      await kvSet(KEYS.routerCookie, routerCookie, ttl);
     }
 
     // Store project list (300s TTL)

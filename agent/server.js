@@ -5,7 +5,7 @@ const { exec } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 require('dotenv').config({ path: path.join(__dirname, '.env') });
-const { initRouterSession, heartbeatKeepAlive, getCookie } = require('./router-wol');
+const { initRouterSession, heartbeatKeepAlive, getCookie, refreshBeforeSleep } = require('./router-wol');
 
 const app = express();
 const PORT = process.env.PORT || 9876;
@@ -426,17 +426,31 @@ app.post('/run', verifyPin, (req, res) => {
     return res.json({ ok: true, action });
   }
 
-  if (action === 'sleep') {
-    exec('rundll32.exe powrprof.dll,SetSuspendState 0,1,0', (err) => {
-      if (err) console.error('[sleep] Error:', err.message);
-    });
-    return res.json({ ok: true, action });
-  }
+  if (action === 'sleep' || action === 'hibernate') {
+    // Refresh router cookie before sleeping (fire-and-forget, respond immediately)
+    (async () => {
+      try {
+        const freshCookie = await refreshBeforeSleep();
+        if (freshCookie && VERCEL_URL && AGENT_SECRET) {
+          await fetch(`${VERCEL_URL}/api/heartbeat`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${AGENT_SECRET}` },
+            body: JSON.stringify({ uptime: process.uptime(), routerCookie: freshCookie, routerCookieTTL: 86400 }),
+            signal: AbortSignal.timeout(10_000),
+          });
+          console.log(`[${action}] Router cookie refreshed and stored with 24h TTL`);
+        }
+      } catch (err) {
+        console.error(`[${action}] Pre-sleep cookie refresh error:`, err.message);
+      }
 
-  if (action === 'hibernate') {
-    exec('shutdown /h', (err) => {
-      if (err) console.error('[hibernate] Error:', err.message);
-    });
+      const cmd = action === 'sleep'
+        ? 'rundll32.exe powrprof.dll,SetSuspendState 0,1,0'
+        : 'shutdown /h';
+      exec(cmd, (err) => {
+        if (err) console.error(`[${action}] Error:`, err.message);
+      });
+    })();
     return res.json({ ok: true, action });
   }
 
@@ -518,16 +532,32 @@ function executeCommand(command) {
       });
       console.log(`[session] Killed: ${command.name}`);
     }
-  } else if (command.action === 'sleep') {
-    exec('rundll32.exe powrprof.dll,SetSuspendState 0,1,0', (err) => {
-      if (err) console.error('[sleep] Error:', err.message);
-      else console.log('[heartbeat] Entering sleep mode');
-    });
-  } else if (command.action === 'hibernate') {
-    exec('shutdown /h', (err) => {
-      if (err) console.error('[hibernate] Error:', err.message);
-      else console.log('[heartbeat] Entering hibernate mode');
-    });
+  } else if (command.action === 'sleep' || command.action === 'hibernate') {
+    // Refresh router cookie before sleeping — store with 24h TTL for WOL after wake
+    (async () => {
+      try {
+        const freshCookie = await refreshBeforeSleep();
+        if (freshCookie && VERCEL_URL && AGENT_SECRET) {
+          await fetch(`${VERCEL_URL}/api/heartbeat`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${AGENT_SECRET}` },
+            body: JSON.stringify({ uptime: process.uptime(), routerCookie: freshCookie, routerCookieTTL: 86400 }),
+            signal: AbortSignal.timeout(10_000),
+          });
+          console.log(`[${command.action}] Router cookie refreshed and stored with 24h TTL`);
+        }
+      } catch (err) {
+        console.error(`[${command.action}] Pre-sleep cookie refresh error:`, err.message);
+      }
+
+      const cmd = command.action === 'sleep'
+        ? 'rundll32.exe powrprof.dll,SetSuspendState 0,1,0'
+        : 'shutdown /h';
+      exec(cmd, (err) => {
+        if (err) console.error(`[${command.action}] Error:`, err.message);
+        else console.log(`[heartbeat] Entering ${command.action} mode`);
+      });
+    })();
   } else if (command.action === 'display_off') {
     exec('powershell.exe -Command "(Add-Type -MemberDefinition \'[DllImport(\\"user32.dll\\")]public static extern int SendMessage(int hWnd,int Msg,int wParam,int lParam);\' -Name a -Passthru)::SendMessage(-1,0x0112,0xF170,2)"', (err) => {
       if (err) console.error('[display_off] Error:', err.message);
