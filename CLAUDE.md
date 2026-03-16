@@ -77,3 +77,18 @@ cd agent && node server.js    # Agent 실행
 - Heartbeat Bearer 토큰 = `AGENT_SECRET` (Agent↔Vercel 인증)
 - KV TTL: heartbeat 90초, projects 300초, command 120초
 - middleware는 JWT 서명 검증 없이 구조+만료만 체크 (Edge Runtime 호환)
+
+## UI 아이콘 인덱스
+
+| 아이콘 | 위치 | 동작 |
+|--------|------|------|
+| ⏻ 전원 버튼 | 메인 (큰 원) | OFF→WOL, ON→전원 메뉴 토글 |
+| 😴 Sleep | 전원 메뉴 | 절전 모드 (컨텍스트 유지) |
+| 💤 Hibernate | 전원 메뉴 | 최대 절전 |
+| 🖥️ Display Off | 전원 메뉴 | 모니터만 끔 |
+| ⏻ Shut Down | 전원 메뉴 | 완전 종료 (confirm) |
+| 💻 (badge) | Quick Actions | 세션 관리 드롭다운 |
+| 📂 | Quick Actions | 프로젝트 열기 드롭다운 |
+| 🛡️ 녹색(✓) | 세션/프로젝트 목록 | 보호 중 (탭→해제) |
+| 🛡️ 회색 | 세션 목록 | 미보호 (탭→보호) |
+| ✕ | 세션 목록 (미보호만) | 세션 종료 (tmux+Claude+VSCode kill) |
