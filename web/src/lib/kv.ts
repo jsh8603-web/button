@@ -14,9 +14,15 @@ function getClient(): SupabaseClient {
 
 const TABLE = "agent_kv";
 
+export interface SessionInfo {
+  name: string;
+  protected: boolean;
+}
+
 export interface Heartbeat {
   timestamp: number;
   uptime: number;
+  sessions: SessionInfo[];
 }
 
 export interface Command {

@@ -8,7 +8,7 @@ export async function GET() {
     const data = await kvGet<Heartbeat>(KEYS.heartbeat);
 
     if (data && Date.now() - data.timestamp < 90_000) {
-      return NextResponse.json({ status: "online", uptime: data.uptime });
+      return NextResponse.json({ status: "online", uptime: data.uptime, sessions: data.sessions || [] });
     }
 
     return NextResponse.json({ status: "offline" });

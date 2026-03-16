@@ -140,6 +140,8 @@ function PowerIcon({ className }: { className?: string }) {
 
 // ─── Dashboard ───────────────────────────────────────────────
 
+type SessionInfo = { name: string; protected: boolean };
+
 function Dashboard() {
   const [status, setStatus] = useState<PcStatus>("offline");
   const [lastChecked, setLastChecked] = useState<Date>(new Date());
@@ -152,6 +154,8 @@ function Dashboard() {
   const [lastProject, setLastProject] = useState("");
   const [showLogs, setShowLogs] = useState(false);
   const [wakeLogs, setWakeLogs] = useState<Record<string, unknown>[]>([]);
+  const [sessions, setSessions] = useState<SessionInfo[]>([]);
+  const [showSessionDropdown, setShowSessionDropdown] = useState(false);
   const newProjInputRef = useRef<HTMLInputElement>(null);
 
   // Load last project from localStorage
@@ -164,6 +168,7 @@ function Dashboard() {
       const res = await fetch("/api/status");
       const data = await res.json();
       const isOnline = data.status === "online";
+      if (isOnline) setSessions(data.sessions || []);
       setStatus((prev) => {
         if (prev === "waking") return isOnline ? "online" : prev;
         if (prev === "shutting-down") return !isOnline ? "offline" : prev;
@@ -303,6 +308,24 @@ function Dashboard() {
     await handleQuickAction("proj", name);
   };
 
+  const handleSessionAction = async (action: string, name: string) => {
+    // Optimistic UI update
+    if (action === "protect-session") {
+      setSessions(prev => prev.map(s => s.name === name ? { ...s, protected: true } : s));
+    } else if (action === "unprotect-session") {
+      setSessions(prev => prev.map(s => s.name === name ? { ...s, protected: false } : s));
+    } else if (action === "kill-session") {
+      setSessions(prev => prev.filter(s => s.name !== name));
+    }
+    try {
+      await fetch("/api/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action, name }),
+      });
+    } catch { /* optimistic UI already updated */ }
+  };
+
   const handleNewProjSubmit = async () => {
     const name = newProjName.trim();
     if (!name || !/^[a-zA-Z0-9_-]+$/.test(name)) {
@@ -396,13 +419,22 @@ function Dashboard() {
         `}
       >
         <button
-          disabled
-          className="w-12 h-12 rounded-xl bg-white/5 border border-white/10
+          onClick={() => {
+            setShowSessionDropdown(!showSessionDropdown);
+            setShowProjDropdown(false);
+          }}
+          className="relative w-12 h-12 rounded-xl bg-white/5 border border-white/10
             flex items-center justify-center
-            opacity-30 cursor-not-allowed transition-all duration-200"
-          title="Editor"
+            hover:bg-white/10 hover:border-white/20
+            active:scale-90 transition-all duration-200"
+          title="Sessions"
         >
-          <span className="text-xl">🚀</span>
+          <span className="text-xl">💻</span>
+          {sessions.length > 0 && (
+            <span className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-blue-500 text-[10px] text-white flex items-center justify-center font-bold">
+              {sessions.length}
+            </span>
+          )}
         </button>
         <button
           onClick={() => {
@@ -418,6 +450,52 @@ function Dashboard() {
         >
           <span className="text-xl">📂</span>
         </button>
+      </div>
+
+      {/* Session Dropdown */}
+      <div
+        className={`
+          mt-4 w-64 transition-all duration-300 overflow-hidden
+          ${status === "online" && showSessionDropdown ? "max-h-80 opacity-100" : "max-h-0 opacity-0"}
+        `}
+      >
+        <div className="bg-white/5 border border-white/10 rounded-xl overflow-hidden">
+          {sessions.length === 0 ? (
+            <p className="px-4 py-3 text-xs text-white/30">No active sessions</p>
+          ) : (
+            sessions.map((s) => (
+              <div
+                key={s.name}
+                className="flex items-center px-4 py-2.5 hover:bg-white/5 transition-colors"
+              >
+                <span className="flex-1 text-sm text-white/70 truncate">{s.name}</span>
+                <button
+                  onClick={() => handleSessionAction(
+                    s.protected ? "unprotect-session" : "protect-session",
+                    s.name
+                  )}
+                  className="ml-2 text-base hover:scale-110 transition-transform"
+                  title={s.protected ? "Remove protection" : "Protect session"}
+                >
+                  {s.protected ? "🟢🛡️" : "🔵🛡️"}
+                </button>
+                {!s.protected && (
+                  <button
+                    onClick={() => {
+                      if (window.confirm(`Close ${s.name}?`)) {
+                        handleSessionAction("kill-session", s.name);
+                      }
+                    }}
+                    className="ml-2 text-sm text-white/30 hover:text-red-400 transition-colors"
+                    title="Kill session"
+                  >
+                    ✕
+                  </button>
+                )}
+              </div>
+            ))
+          )}
+        </div>
       </div>
 
       {/* Project Dropdown */}
@@ -465,16 +543,20 @@ function Dashboard() {
 
           {/* Project List */}
           <div className="max-h-52 overflow-y-auto">
-            {projects.map((proj) => (
-              <button
-                key={proj}
-                onClick={() => handleOpenProject(proj)}
-                className="w-full px-4 py-2.5 text-left text-sm text-white/70
-                  hover:bg-white/10 hover:text-white transition-colors"
-              >
-                {proj}
-              </button>
-            ))}
+            {projects.map((proj) => {
+              const activeSession = sessions.find(s => s.name === proj);
+              return (
+                <button
+                  key={proj}
+                  onClick={() => handleOpenProject(proj)}
+                  className="w-full px-4 py-2.5 text-left text-sm text-white/70
+                    hover:bg-white/10 hover:text-white transition-colors flex items-center"
+                >
+                  <span className="flex-1 truncate">{proj}</span>
+                  {activeSession?.protected && <span className="ml-2 text-xs">🟢🛡️</span>}
+                </button>
+              );
+            })}
             {projects.length === 0 && (
               <p className="px-4 py-3 text-xs text-white/30">Loading...</p>
             )}

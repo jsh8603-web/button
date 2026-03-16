@@ -155,43 +155,55 @@ function buildTasksJson(name) {
   };
 }
 
-// Persist last web-app-opened project to file (survives agent restart)
-const LAST_PROJ_FILE = path.join(__dirname, '.last-project');
+// Protected sessions file (survives agent restart)
+const PROTECTED_FILE = path.join(__dirname, '.protected-sessions');
 
-function getLastWebAppProject() {
-  try { return fs.readFileSync(LAST_PROJ_FILE, 'utf8').trim() || null; } catch { return null; }
+function getProtectedSessions() {
+  try { return JSON.parse(fs.readFileSync(PROTECTED_FILE, 'utf8')); } catch { return []; }
 }
 
-function setLastWebAppProject(name) {
-  try { fs.writeFileSync(LAST_PROJ_FILE, name || ''); } catch (err) {
-    console.error('[proj] Failed to write .last-project:', err.message);
-  }
+function setProtectedSessions(list) {
+  fs.writeFileSync(PROTECTED_FILE, JSON.stringify(list));
 }
 
-function killExistingSessions() {
-  // Gracefully exit Claude in the LAST project's session only (not all btn-*)
-  const scriptPath = path.join(__dirname, 'kill-sessions.sh').replace(/\\/g, '/');
-  const lastProj = getLastWebAppProject();
-
-  if (!lastProj) return;
-
-  const lastSession = `${SESSION_PREFIX}${lastProj}`;
-  exec(`"${BASH_PATH}" -l "${scriptPath}" "${lastSession}"`, (err) => {
-    if (err) console.error('[kill-sessions] Error:', err.message);
-    // Close editor window AFTER Claude has exited (deregistered remote)
-    const closeScript = path.join(__dirname, 'close-window.ps1');
-    const titleQuery = EDITOR_TITLE ? `${lastProj} - ${EDITOR_TITLE}` : lastProj;
-    exec(`powershell.exe -ExecutionPolicy Bypass -File "${closeScript}" -TitlePrefix "${titleQuery}"`, (err) => {
-      if (err) console.error('[close-window] Error:', err.message);
+async function getActiveSessions() {
+  return new Promise((resolve) => {
+    exec(`"${BASH_PATH}" -lc "tmux list-sessions -F '#S' 2>/dev/null"`, (err, stdout) => {
+      if (err) return resolve([]);
+      resolve(stdout.trim().split('\n')
+        .filter(s => s.startsWith(SESSION_PREFIX))
+        .map(s => s.slice(SESSION_PREFIX.length)));
     });
   });
+}
 
-  setLastWebAppProject('');
+function killUnprotectedSessions() {
+  const scriptPath = path.join(__dirname, 'kill-sessions.sh').replace(/\\/g, '/');
+  const closeScript = path.join(__dirname, 'close-window.ps1');
+
+  getActiveSessions().then(activeSessions => {
+    const protectedList = getProtectedSessions();
+    const toKill = activeSessions.filter(s => !protectedList.includes(s));
+
+    if (toKill.length === 0) return;
+
+    console.log(`[kill] Killing unprotected sessions: ${toKill.join(', ')} (protected: ${protectedList.join(', ') || 'none'})`);
+
+    for (const session of toKill) {
+      exec(`"${BASH_PATH}" -l "${scriptPath}" "${SESSION_PREFIX}${session}"`, (err) => {
+        if (err) console.error(`[kill-sessions] Error killing ${session}:`, err.message);
+        const titleQuery = EDITOR_TITLE ? `${session} - ${EDITOR_TITLE}` : session;
+        exec(`powershell.exe -ExecutionPolicy Bypass -File "${closeScript}" -TitlePrefix "${titleQuery}"`, (err) => {
+          if (err) console.error(`[close-window] Error closing ${session}:`, err.message);
+        });
+      });
+    }
+  });
 }
 
 function openProjectInEditor(name) {
-  // Kill previous web-app-opened editor + tmux sessions
-  killExistingSessions();
+  // Kill all unprotected btn-* sessions before opening new project
+  killUnprotectedSessions();
 
   // Also close any existing window for the project we're about to open
   // (prevents VS Code from reusing an already-open window where folderOpen won't re-trigger)
@@ -221,9 +233,6 @@ function openProjectInEditor(name) {
   // Prevent PowerShell Extension from stealing focus from claude-tmux task terminal
   settings['powershell.integratedConsole.startInBackground'] = true;
   fs.writeFileSync(settingsFile, JSON.stringify(settings, null, 2));
-
-  // Track this project for future cleanup (persisted to file)
-  setLastWebAppProject(name);
 
   // Wait for kill-sessions.sh to finish (~3s) before creating new session
   setTimeout(() => {
@@ -367,6 +376,37 @@ app.post('/run', verifyPin, (req, res) => {
     return res.json({ ok: true, action });
   }
 
+  if (action === 'protect-session') {
+    const list = getProtectedSessions();
+    if (name && !list.includes(name)) {
+      list.push(name);
+      setProtectedSessions(list);
+    }
+    return res.json({ ok: true, action });
+  }
+
+  if (action === 'unprotect-session') {
+    if (name) setProtectedSessions(getProtectedSessions().filter(s => s !== name));
+    return res.json({ ok: true, action });
+  }
+
+  if (action === 'kill-session') {
+    if (!name || !SAFE_NAME_RE.test(name)) {
+      return res.status(400).json({ ok: false, message: 'Invalid session name' });
+    }
+    setProtectedSessions(getProtectedSessions().filter(s => s !== name));
+    const scriptPath = path.join(__dirname, 'kill-sessions.sh').replace(/\\/g, '/');
+    const closeScript = path.join(__dirname, 'close-window.ps1');
+    exec(`"${BASH_PATH}" -l "${scriptPath}" "${SESSION_PREFIX}${name}"`, (err) => {
+      if (err) console.error(`[kill-session] Error:`, err.message);
+      const titleQuery = EDITOR_TITLE ? `${name} - ${EDITOR_TITLE}` : name;
+      exec(`powershell.exe -ExecutionPolicy Bypass -File "${closeScript}" -TitlePrefix "${titleQuery}"`, (err) => {
+        if (err) console.error(`[close-window] Error:`, err.message);
+      });
+    });
+    return res.json({ ok: true, action });
+  }
+
   return res.status(400).json({ ok: false, message: `Unknown action: ${action}` });
 });
 
@@ -412,6 +452,32 @@ function executeCommand(command) {
     const child = exec(`"${EDITOR_CMD}"`);
     child.unref();
     console.log('[heartbeat] Launched editor');
+  } else if (command.action === 'protect-session') {
+    const list = getProtectedSessions();
+    if (command.name && !list.includes(command.name)) {
+      list.push(command.name);
+      setProtectedSessions(list);
+      console.log(`[session] Protected: ${command.name}`);
+    }
+  } else if (command.action === 'unprotect-session') {
+    if (command.name) {
+      setProtectedSessions(getProtectedSessions().filter(s => s !== command.name));
+      console.log(`[session] Unprotected: ${command.name}`);
+    }
+  } else if (command.action === 'kill-session') {
+    if (command.name && SAFE_NAME_RE.test(command.name)) {
+      setProtectedSessions(getProtectedSessions().filter(s => s !== command.name));
+      const scriptPath = path.join(__dirname, 'kill-sessions.sh').replace(/\\/g, '/');
+      const closeScript = path.join(__dirname, 'close-window.ps1');
+      exec(`"${BASH_PATH}" -l "${scriptPath}" "${SESSION_PREFIX}${command.name}"`, (err) => {
+        if (err) console.error(`[kill-session] Error:`, err.message);
+        const titleQuery = EDITOR_TITLE ? `${command.name} - ${EDITOR_TITLE}` : command.name;
+        exec(`powershell.exe -ExecutionPolicy Bypass -File "${closeScript}" -TitlePrefix "${titleQuery}"`, (err) => {
+          if (err) console.error(`[close-window] Error:`, err.message);
+        });
+      });
+      console.log(`[session] Killed: ${command.name}`);
+    }
   }
 }
 
@@ -419,6 +485,19 @@ async function sendHeartbeat() {
   if (!VERCEL_URL || !AGENT_SECRET) return;
 
   try {
+    // Collect active sessions and clean up stale protected entries
+    const activeSessions = await getActiveSessions();
+    const protectedList = getProtectedSessions();
+    const cleanedProtected = protectedList.filter(s => activeSessions.includes(s));
+    if (cleanedProtected.length !== protectedList.length) {
+      setProtectedSessions(cleanedProtected);
+    }
+
+    const sessions = activeSessions.map(name => ({
+      name,
+      protected: cleanedProtected.includes(name),
+    }));
+
     const res = await fetch(`${VERCEL_URL}/api/heartbeat`, {
       method: 'POST',
       headers: {
@@ -428,6 +507,7 @@ async function sendHeartbeat() {
       body: JSON.stringify({
         uptime: process.uptime(),
         projects: getProjectList(),
+        sessions,
       }),
       signal: AbortSignal.timeout(10_000),
     });
