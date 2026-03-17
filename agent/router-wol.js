@@ -779,10 +779,12 @@ async function login() {
 
   const imgPath = parts[0], lpNum = parts[1], eVal = parts[2], nVal = parts[3];
 
-  // With e_val/n_val in form data, lpNum resets on each attempt — no longer a blocker
-  // Still limit total attempts to avoid excessive POST requests
+  // lpNum increments per get_captcha call (~1 per login()), NOT per variant tried.
+  // Does NOT reset on success or logout — only time-based reset.
+  // e_val/n_val must be included in POST (without it, lpNum accumulates instantly → block).
+  // loginWithRetry(5) → ~+15 max. Threshold 30 allows 2 full retry cycles.
   const lpNumInt = parseInt(lpNum, 10);
-  if (lpNumInt >= 10) {
+  if (lpNumInt >= 30) {
     throw new Error(`lpNum=${lpNum} — too many attempts, stopping`);
   }
 
@@ -857,7 +859,7 @@ async function login() {
   const candidateTexts = allReadings.map(r => r.text);
   const solverAnswers = { cap: capAnswer, gptTop: gptTopAnswer };
 
-  for (const { text: variant, score } of scoredVariants.slice(0, 3)) {
+  for (const { text: variant, score } of scoredVariants.slice(0, 5)) {
     if (manualCaptchaMode) return null; // Abort if user solving manually
     const encCap = passEnc2(Buffer.from(variant).toString('base64'), nVal, eVal);
     const formData = `page=web/intro.html&http_passwd=${encodeURIComponent(encPwd)}&captcha=${encodeURIComponent(encCap)}&captcha_image=${encodeURIComponent(captchaImage)}&e_val=${encodeURIComponent(eVal)}&n_val=${encodeURIComponent(nVal)}&lp_num=${lpNum}&hidden_action=Login`;
@@ -885,7 +887,7 @@ async function login() {
 
       const fbImgPath = fbParts[0], fbLpNum = fbParts[1], fbEVal = fbParts[2], fbNVal = fbParts[3];
 
-      // With e_val/n_val included, lpNum resets — no need to abort early
+      // lpNum increments slowly (~1 per get_captcha), threshold 30 gives plenty of room
 
       const fbImgRes = await httpReq('GET', '/' + fbImgPath);
 
@@ -1212,4 +1214,4 @@ async function submitManualCaptcha(answer, params) {
   }
 }
 
-module.exports = { initRouterSession, heartbeatKeepAlive, getCookie, refreshBeforeSleep, fetchManualCaptcha, submitManualCaptcha, setManualCaptchaMode };
+module.exports = { initRouterSession, heartbeatKeepAlive, getCookie, refreshBeforeSleep, fetchManualCaptcha, submitManualCaptcha, setManualCaptchaMode, login, _resetCookie: () => { currentCookie = null; } };
