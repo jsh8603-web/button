@@ -567,14 +567,6 @@ function Dashboard() {
       >
         <div className="bg-white/5 border border-white/10 rounded-xl overflow-hidden">
           <button
-            onClick={() => handlePowerAction("hibernate", "Hibernate")}
-            className="w-full px-4 py-3 text-left text-sm text-white/70
-              hover:bg-white/10 hover:text-white transition-colors flex items-center gap-3"
-          >
-            <SnowflakeIcon size={18} className="text-blue-400" />
-            <span>Hibernate</span>
-          </button>
-          <button
             onClick={() => handlePowerAction("display_off", "Display off")}
             className="w-full px-4 py-3 text-left text-sm text-white/70
               hover:bg-white/10 hover:text-white transition-colors flex items-center gap-3"
@@ -722,7 +714,7 @@ function Dashboard() {
 
               <div className="flex items-start gap-2">
                 <MoonIcon size={14} className="text-purple-400 shrink-0 mt-0.5" />
-                <div><span className="text-white/70">Power Menu</span> — Hibernate, Display Off</div>
+                <div><span className="text-white/70">Power Menu</span> — Display Off</div>
               </div>
               <div className="flex items-start gap-2">
                 <TerminalIcon size={14} className="text-blue-400 shrink-0 mt-0.5" />
