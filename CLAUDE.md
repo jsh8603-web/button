@@ -18,7 +18,7 @@ PC에 상주하는 Agent가 30초마다 heartbeat를 보내 온라인 상태와 
 
 - Web↔Agent 직접 통신 없음: Supabase KV를 매개로 비동기 통신
 - WOL 이중 전송: ① Vercel에서 직접 UDP Magic Packet (Shutdown용) ② 공유기 WOL API 호출 (Sleep/Hibernate용, port 88)
-- 공유기 세션 유지: Agent 부팅 시 KV에 저장된 쿠키 복원 → 유효하면 CAPTCHA 스킵, 만료 시만 CAPTCHA 로그인 → Supabase pg_cron이 30분마다 keep-alive (Agent 독립)
+- 공유기 세션 유지: Agent 부팅 시 KV 쿠키 복원(유효→CAPTCHA 스킵) → pg_cron 5분마다 keep-alive → 세션 영구 유지
 - Sleep/Hibernate 전: 쿠키 유효성 확인 후 KV에 24h TTL로 저장 (CAPTCHA 재풀이 불필요)
 - Agent는 heartbeat 응답으로 대기 명령을 수신하고, 실행 후 KV에서 삭제 (1회 실행 보장)
 - Heartbeat에 `sessions: [{name, protected}]` 포함 → 웹 UI에서 세션 관리
@@ -80,14 +80,13 @@ cd agent && node server.js    # Agent 실행
 - 프로젝트: `aocsyodhcdvhkspfpbyj` (babyplace, Seoul region)
 - 테이블: `agent_kv` (key-value store, RLS 적용)
 - Extensions: `pg_cron` + `pg_net` (라우터 세션 keep-alive용)
-- pg_cron job: `router-keepalive` — 30분마다 `/api/cron/router-keepalive` 호출 → 공유기 세션 영구 유지 (Agent와 독립 실행)
+- pg_cron job: `router-keepalive` — 5분마다 `/api/cron/router-keepalive` 호출 → 공유기 세션 영구 유지
 - 관리: `npx supabase db query --linked "SELECT * FROM cron.job;"`
 
 ## CAPTCHA 시스템
-- 핵심 코드: `agent/router-wol.js`
+- 핵심 코드: `agent/router-wol.js` (3-solver: CapSolver ~69% + Claude Opus + GPT-4o-mini)
 - 학습 데이터: `agent/.captcha-learned.json`
-- 테스트: `agent/test-captcha.js` (솔버 성능), `agent/test-lpnum.js` (lpNum 분석)
-- lpNum 실측/가설/테스트 방법: `memory/project_manual_captcha.md` 참조
+- keepAlive 엔드포인트: `/web/main.html` (inner_data.html은 port 80에서 빈 응답)
 
 ## Critical Rules
 - Agent 화이트리스트 명령만 실행: `shutdown`, `proj`, `editor`, `protect-session`, `unprotect-session`, `kill-session`, `sleep`, `hibernate`, `display_off`, `captcha-fetch`, `captcha-answer`, `captcha-close`
@@ -98,9 +97,10 @@ cd agent && node server.js    # Agent 실행
 - middleware는 JWT 서명 검증 없이 구조+만료만 체크 (Edge Runtime 호환)
 - heartbeat는 라우터 로그인(CAPTCHA)에 블로킹되면 안 됨: 로그인 진행 중이면 쿠키 null로 즉시 전송
 - 세션 보호 optimistic UI: action 후 35초간 서버 sessions 폴링 무시 (깜빡임 방지)
-- 라우터 로그인 POST에 반드시 `e_val`, `n_val` 포함 (필수)
-- lpNum: 실측 진행 중 — 상세 관찰/가설은 memory 참조. 현재 임계값 30.
+- lpNum: 성공 로그인 카운터, 현재 임계값 30 (초과 시 로그인 중단)
 - manualCaptchaMode 중에는 heartbeatKeepAlive/auto-login 전부 skip
+- 공유기 동시 로그인 불가: 브라우저 세션 중이면 Agent 로그인 100% 실패 (CAPTCHA 답 무관)
+- RSA encrypt 출력은 nVal 길이로 zero-pad 필수 (rsa.js가 leading zero 누락)
 
 ## UI 아이콘 인덱스 (모두 SVG)
 

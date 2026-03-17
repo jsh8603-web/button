@@ -34,8 +34,9 @@ export async function GET(request: NextRequest) {
       ip = host;
     }
 
-    // Send keep-alive request to router (same as agent's keepAlive check)
-    const url = `http://${ip}:88/web/inner_data.html?func=get_basic_info`;
+    // Send keep-alive request to router main.html (inner_data.html returns empty on some ports)
+    // Logged in: len > 1000 (full page). Not logged in: len ≈ 733 (intro redirect).
+    const url = `http://${ip}:88/web/main.html`;
     const res = await fetch(url, {
       headers: {
         Cookie: cookie,
@@ -47,16 +48,16 @@ export async function GET(request: NextRequest) {
     const text = await res.text();
 
     // Check if session is still alive
-    if (text.includes("captcha") || text.includes("http_passwd") || text.includes("intro")) {
+    if (text.length < 1000 || text.includes("intro.html")) {
       // Session expired — remove stale cookie from KV
       await kvDel(KEYS.routerCookie);
-      console.log("[cron/router-keepalive] Session expired — cookie removed from KV");
+      console.log(`[cron/router-keepalive] Session expired (len=${text.length}) — cookie removed from KV`);
       return NextResponse.json({ ok: true, action: "expired", detail: "session-expired, cookie removed" });
     }
 
     // Session alive — refresh TTL (86400s = 24h)
     await kvSet(KEYS.routerCookie, cookie, 86400);
-    console.log("[cron/router-keepalive] Session alive — TTL refreshed to 24h");
+    console.log(`[cron/router-keepalive] Session alive (len=${text.length}) — TTL refreshed to 24h`);
     return NextResponse.json({ ok: true, action: "refreshed" });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

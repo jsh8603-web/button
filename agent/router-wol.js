@@ -108,7 +108,10 @@ function initVM() {
 
 function passEnc2(keyStr, nVal, eVal) {
   const escaped = keyStr.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-  return vm.runInContext(`var rsa = new RSAKey(); rsa.setPublic("${nVal}", "${eVal}"); rsa.encrypt("${escaped}") || "";`, vmContext);
+  let hex = vm.runInContext(`var rsa = new RSAKey(); rsa.setPublic("${nVal}", "${eVal}"); rsa.encrypt("${escaped}") || "";`, vmContext);
+  // Pad RSA output to key size — rsa.js only ensures even length, not full modulus length
+  while (hex.length < nVal.length) hex = '0' + hex;
+  return hex;
 }
 
 // --- Session state ---
@@ -962,8 +965,15 @@ async function login() {
 
   initVM();
 
+  // Step 0: Visit intro page first (initializes CAPTCHA session on router)
+  // Track session cookie across requests (browser-like behavior)
+  let sessionCookie = '';
+  const introRes = await httpReq('GET', '/web/intro.html');
+  if (introRes.setCookie) sessionCookie = introRes.setCookie;
+
   // Step 1: Fetch CAPTCHA params
-  const r1 = await httpReq('GET', '/web/public_data.html?func=get_captcha(intro)');
+  const r1 = await httpReq('GET', '/web/public_data.html?func=get_captcha(intro)', null, sessionCookie || undefined);
+  if (r1.setCookie) sessionCookie = r1.setCookie;
   const parts = r1.data.toString().split('&');
   if (parts.length < 4) throw new Error(`Bad CAPTCHA response: ${r1.data.toString().substring(0, 200)}`);
 
@@ -978,8 +988,9 @@ async function login() {
     throw new Error(`lpNum=${lpNum} — too many attempts, stopping`);
   }
 
-  // Step 2: Download CAPTCHA image
-  const imgRes = await httpReq('GET', '/' + imgPath);
+  // Step 2: Download CAPTCHA image (with session cookie)
+  const imgRes = await httpReq('GET', '/' + imgPath, null, sessionCookie || undefined);
+  if (imgRes.setCookie) sessionCookie = imgRes.setCookie;
   console.log('[router] CAPTCHA fetched, solving...');
 
   // --- Phase 1: GPT + Opus + CapSolver parallel (3-solver architecture) ---
@@ -1064,7 +1075,7 @@ async function login() {
     const encCap = passEnc2(Buffer.from(variant).toString('base64'), nVal, eVal);
     const formData = `page=web/intro.html&http_passwd=${encodeURIComponent(encPwd)}&captcha=${encodeURIComponent(encCap)}&captcha_image=${encodeURIComponent(captchaImage)}&e_val=${encodeURIComponent(eVal)}&n_val=${encodeURIComponent(nVal)}&lp_num=${lpNum}&hidden_action=Login`;
 
-    const loginRes = await httpReq('POST', '/web/intro.html', formData);
+    const loginRes = await httpReq('POST', '/web/intro.html', formData, sessionCookie || undefined);
 
     if (loginRes.setCookie) {
       console.log(`[router] Phase 1 success with "${variant}" (s=${score.toFixed(1)})!`);
@@ -1136,17 +1147,19 @@ async function _loginWithRetry(maxRetries, onProgress) {
 }
 
 /**
- * Keep-alive: access a page to prevent session timeout
+ * Keep-alive: access main.html to check session and prevent timeout.
+ * inner_data.html returns empty on port 80 — use main.html instead.
+ * Logged in: len > 1000 (full page). Not logged in: len ≈ 733 (intro redirect).
  */
 async function keepAlive() {
   if (!currentCookie) return false;
 
   try {
-    const res = await httpReq('GET', '/web/inner_data.html?func=get_basic_info', null, currentCookie);
+    const res = await httpReq('GET', '/web/main.html', null, currentCookie);
     const text = res.data.toString();
 
-    if (text.length < 50 || text.includes('captcha') || text.includes('http_passwd') || text.includes('intro.html')) {
-      console.log('[router] Session expired, need re-login');
+    if (text.length < 1000 || text.includes('intro.html')) {
+      console.log(`[router] Session expired, need re-login (len=${text.length})`);
       currentCookie = null;
       return false;
     }
