@@ -28,6 +28,8 @@ export interface Heartbeat {
 export interface Command {
   action: string;
   name?: string;
+  answer?: string;
+  params?: Record<string, string>;
   timestamp: number;
 }
 

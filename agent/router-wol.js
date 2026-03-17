@@ -761,6 +761,13 @@ async function login() {
 
   const imgPath = parts[0], lpNum = parts[1], eVal = parts[2], nVal = parts[3];
 
+  // With e_val/n_val in form data, lpNum resets on each attempt — no longer a blocker
+  // Still limit total attempts to avoid excessive POST requests
+  const lpNumInt = parseInt(lpNum, 10);
+  if (lpNumInt >= 10) {
+    throw new Error(`lpNum=${lpNum} — too many attempts, stopping`);
+  }
+
   // Step 2: Download CAPTCHA image
   const imgRes = await httpReq('GET', '/' + imgPath);
   console.log('[router] CAPTCHA fetched, solving...');
@@ -817,12 +824,14 @@ async function login() {
 
   const captchaImage = imgPath.split('/')[1].split('.')[0];
   const encPwd = passEnc2(password, nVal, eVal);
+  console.log(`[router] Phase 1 login: lpNum=${lpNum}`);
   const candidateTexts = allReadings.map(r => r.text);
   const solverAnswers = { cap: capAnswer, gptTop: gptTopAnswer };
 
-  for (const { text: variant, score } of scoredVariants) {
+  for (const { text: variant, score } of scoredVariants.slice(0, 2)) {
+    if (manualCaptchaMode) return null; // Abort if user solving manually
     const encCap = passEnc2(Buffer.from(variant).toString('base64'), nVal, eVal);
-    const formData = `page=web/intro.html&http_passwd=${encodeURIComponent(encPwd)}&captcha=${encodeURIComponent(encCap)}&captcha_image=${encodeURIComponent(captchaImage)}&lp_num=${lpNum}&hidden_action=Login`;
+    const formData = `page=web/intro.html&http_passwd=${encodeURIComponent(encPwd)}&captcha=${encodeURIComponent(encCap)}&captcha_image=${encodeURIComponent(captchaImage)}&e_val=${encodeURIComponent(eVal)}&n_val=${encodeURIComponent(nVal)}&lp_num=${lpNum}&hidden_action=Login`;
 
     const loginRes = await httpReq('POST', '/web/intro.html', formData);
 
@@ -833,10 +842,12 @@ async function login() {
     }
   }
 
-  // --- Phase 2: CapSolver-only fallback (실질적 해결 — 새 CAPTCHA 3회) ---
-  console.log('[router] Phase 1 failed, trying CapSolver-only fallback (3 attempts)...');
+  // --- Phase 2: CapSolver-only fallback (실질적 해결 — 새 CAPTCHA 2회) ---
+  if (manualCaptchaMode) return null;
+  console.log('[router] Phase 1 failed, trying CapSolver-only fallback (2 attempts)...');
 
-  for (let fb = 1; fb <= 3; fb++) {
+  for (let fb = 1; fb <= 1; fb++) {
+    if (manualCaptchaMode) return null;
     try {
       // Fetch fresh CAPTCHA for each fallback attempt
       const fbR1 = await httpReq('GET', '/web/public_data.html?func=get_captcha(intro)');
@@ -844,6 +855,9 @@ async function login() {
       if (fbParts.length < 4) continue;
 
       const fbImgPath = fbParts[0], fbLpNum = fbParts[1], fbEVal = fbParts[2], fbNVal = fbParts[3];
+
+      // With e_val/n_val included, lpNum resets — no need to abort early
+
       const fbImgRes = await httpReq('GET', '/' + fbImgPath);
 
       // CapSolver with preprocessed image (better accuracy)
@@ -871,9 +885,10 @@ async function login() {
 
       console.log(`[router] Fallback ${fb}/3: CapSolver="${fbAnswer}" + ${fbVariants.length - 1} variants`);
 
-      for (const variant of fbVariants.slice(0, 25)) {
+      for (const variant of fbVariants.slice(0, 2)) {
+        if (manualCaptchaMode) return null;
         const encCap = passEnc2(Buffer.from(variant).toString('base64'), fbNVal, fbEVal);
-        const formData = `page=web/intro.html&http_passwd=${encodeURIComponent(fbEncPwd)}&captcha=${encodeURIComponent(encCap)}&captcha_image=${encodeURIComponent(fbCaptchaImage)}&lp_num=${fbLpNum}&hidden_action=Login`;
+        const formData = `page=web/intro.html&http_passwd=${encodeURIComponent(fbEncPwd)}&captcha=${encodeURIComponent(encCap)}&captcha_image=${encodeURIComponent(fbCaptchaImage)}&e_val=${encodeURIComponent(fbEVal)}&n_val=${encodeURIComponent(fbNVal)}&lp_num=${fbLpNum}&hidden_action=Login`;
 
         const loginRes = await httpReq('POST', '/web/intro.html', formData);
 
@@ -900,8 +915,15 @@ async function login() {
  * Attempt router login with retries
  */
 let loginInProgress = null;
+let manualCaptchaMode = false;
 
-async function loginWithRetry(maxRetries = 5, onProgress = null) {
+function setManualCaptchaMode(on) {
+  manualCaptchaMode = on;
+  if (on) console.log('[router] Manual CAPTCHA mode ON — auto-login paused');
+  else console.log('[router] Manual CAPTCHA mode OFF — auto-login resumed');
+}
+
+async function loginWithRetry(maxRetries = 2, onProgress = null) {
   if (loginInProgress) return loginInProgress;
   loginInProgress = _loginWithRetry(maxRetries, onProgress).finally(() => { loginInProgress = null; });
   return loginInProgress;
@@ -911,6 +933,12 @@ async function _loginWithRetry(maxRetries, onProgress) {
   let consecutiveFails = 0;
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    // Abort auto-login if user is solving manually
+    if (manualCaptchaMode) {
+      console.log(`[router] Auto-login aborted (manual CAPTCHA mode)`);
+      if (onProgress) onProgress('');
+      return null;
+    }
     try {
       console.log(`[router] Login attempt ${attempt}/${maxRetries}...`);
       if (onProgress) onProgress(`Solving CAPTCHA (${attempt}/${maxRetries})`);
@@ -925,13 +953,18 @@ async function _loginWithRetry(maxRetries, onProgress) {
     } catch (err) {
       consecutiveFails++;
       console.error(`[router] Login attempt ${attempt} failed: ${err.message}`);
+      // If lpNum too high, stop immediately and suggest manual solving
+      if (err.message.includes('lpNum=')) {
+        if (onProgress) onProgress('CAPTCHA failed — solve manually');
+        return null;
+      }
       if (attempt < maxRetries) {
         await new Promise(r => setTimeout(r, 2000));
       }
     }
   }
   console.error(`[router] All ${maxRetries} login attempts failed`);
-  if (onProgress) onProgress('CAPTCHA failed');
+  if (onProgress) onProgress('CAPTCHA failed — solve manually');
   return null;
 }
 
@@ -974,12 +1007,13 @@ async function initRouterSession(storedCookie, onProgress = null) {
     currentCookie = null;
   }
 
-  return await loginWithRetry(5, onProgress);
+  return await loginWithRetry(2, onProgress);
 }
 
 let heartbeatLoginFailed = false;
 
 async function heartbeatKeepAlive(onProgress = null) {
+  if (manualCaptchaMode) return null; // Don't touch router while user solving
   if (currentCookie) {
     heartbeatLoginFailed = false;
     const alive = await keepAlive();
@@ -996,7 +1030,7 @@ async function heartbeatKeepAlive(onProgress = null) {
     return null;
   }
   // No cookie and no login in progress — start login but don't block heartbeat
-  loginWithRetry(5, onProgress).then(cookie => {
+  loginWithRetry(2, onProgress).then(cookie => {
     if (!cookie) heartbeatLoginFailed = true;
     else if (onProgress) onProgress('');
   }).catch(err => {
@@ -1025,22 +1059,56 @@ async function refreshBeforeSleep(onProgress = null) {
     }
     console.log('[router] Pre-sleep: session expired — re-logging in...');
   }
-  return await loginWithRetry(5, onProgress);
+  return await loginWithRetry(2, onProgress);
 }
+
+// Cache solver candidates for manual CAPTCHA learning
+let manualCaptchaCandidates = { gptCandidates: [], capAnswer: null, solverAnswers: { cap: null, gptTop: null } };
 
 /**
  * Fetch a fresh CAPTCHA image for manual solving.
+ * Also runs GPT/CapSolver in background to collect candidates for learning.
  * Returns { imageBase64, params } or null on error.
  */
 async function fetchManualCaptcha() {
   try {
+    setManualCaptchaMode(true);
+    // Wait for any in-progress auto-login to fully abort before touching router
+    if (loginInProgress) {
+      console.log('[manual-captcha] Waiting for auto-login to abort...');
+      await loginInProgress.catch(() => {});
+      console.log('[manual-captcha] Auto-login finished, proceeding with manual fetch');
+    }
+    // Reset router login state by visiting login page (resets lpNum counter)
+    console.log('[manual-captcha] Resetting router login page...');
+    await httpReq('GET', '/web/intro.html');
     const r1 = await httpReq('GET', '/web/public_data.html?func=get_captcha(intro)');
     const parts = r1.data.toString().split('&');
     if (parts.length < 4) return null;
 
     const [imgPath, lpNum, eVal, nVal] = parts;
+    console.log(`[manual-captcha] Fetched: lpNum=${lpNum}`);
     const imgRes = await httpReq('GET', '/' + imgPath);
     const captchaImage = imgPath.split('/')[1].split('.')[0];
+
+    // Run solvers in background for learning (don't block manual flow)
+    manualCaptchaCandidates = { gptCandidates: [], capAnswer: null, solverAnswers: { cap: null, gptTop: null } };
+    Promise.allSettled([
+      solveCaptchaGPT(imgRes.data).then(r => {
+        if (r && r.length > 0) {
+          manualCaptchaCandidates.gptCandidates = r;
+          manualCaptchaCandidates.solverAnswers.gptTop = r[0];
+        }
+      }),
+      solveCaptchaCapSolver(imgRes.data).then(r => {
+        if (r && r.length > 0) {
+          manualCaptchaCandidates.capAnswer = r[0];
+          manualCaptchaCandidates.solverAnswers.cap = r[0];
+        }
+      }),
+    ]).then(() => {
+      console.log(`[manual-captcha] Solver hints: GPT=${manualCaptchaCandidates.gptCandidates.join(',') || 'none'}, Cap=${manualCaptchaCandidates.capAnswer || 'none'}`);
+    });
 
     return {
       imageBase64: imgRes.data.toString('base64'),
@@ -1059,26 +1127,60 @@ async function fetchManualCaptcha() {
  */
 async function submitManualCaptcha(answer, params) {
   try {
+    const password = process.env.ROUTER_PASSWORD;
+    if (!password) throw new Error('ROUTER_PASSWORD not set');
+    initVM();
     const { nVal, eVal, lpNum, captchaImage } = params;
+    console.log(`[manual-captcha] Submit: answer="${answer}", lpNum=${lpNum}`);
+    // If already logged in, return existing cookie as success
+    if (currentCookie) {
+      const alive = await keepAlive();
+      if (alive) {
+        console.log(`[manual-captcha] Already logged in — returning existing cookie`);
+        setManualCaptchaMode(false);
+        return currentCookie;
+      }
+      // Cookie expired, proceed with login
+      currentCookie = null;
+    }
     const encPwd = passEnc2(password, nVal, eVal);
     const encCap = passEnc2(Buffer.from(answer).toString('base64'), nVal, eVal);
-    const formData = `page=web/intro.html&http_passwd=${encodeURIComponent(encPwd)}&captcha=${encodeURIComponent(encCap)}&captcha_image=${encodeURIComponent(captchaImage)}&lp_num=${lpNum}&hidden_action=Login`;
+    const formData = `page=web/intro.html&http_passwd=${encodeURIComponent(encPwd)}&captcha=${encodeURIComponent(encCap)}&captcha_image=${encodeURIComponent(captchaImage)}&e_val=${encodeURIComponent(eVal)}&n_val=${encodeURIComponent(nVal)}&lp_num=${lpNum}&hidden_action=Login`;
 
     const loginRes = await httpReq('POST', '/web/intro.html', formData);
+    const bodyStr = loginRes.data?.toString() || '';
+    const alertMatch = bodyStr.match(/alert\(['"](.*?)['"]\)/);
+    console.log(`[manual-captcha] Response: cookie=${!!loginRes.setCookie}, lpNum=${lpNum}${alertMatch ? ', alert=' + alertMatch[1] : ''}`);
 
     if (loginRes.setCookie) {
       currentCookie = loginRes.setCookie;
       lastLoginTime = Date.now();
       heartbeatLoginFailed = false;
-      console.log(`[router] Manual CAPTCHA success: "${answer}"`);
+      setManualCaptchaMode(false);
+      console.log(`[manual-captcha] SUCCESS — user="${answer}", GPT=${manualCaptchaCandidates.gptCandidates.join(',') || 'none'}, Cap=${manualCaptchaCandidates.capAnswer || 'none'}`);
+
+      // Record to learning system
+      const learned = loadLearned();
+      const { gptCandidates, capAnswer, solverAnswers } = manualCaptchaCandidates;
+      const allCandidates = [...gptCandidates];
+      if (capAnswer) allCandidates.push(capAnswer);
+      if (allCandidates.length > 0) {
+        recordSolverDiffs(gptCandidates, capAnswer, learned);
+        recordSuccess(allCandidates, answer, learned, solverAnswers);
+      } else {
+        learned.stats.successes++;
+        learned.stats.attempts++;
+        saveLearned(learned);
+      }
+
       return currentCookie;
     }
-    console.log(`[router] Manual CAPTCHA failed: "${answer}"`);
+    console.log(`[manual-captcha] FAILED — user="${answer}", GPT=${manualCaptchaCandidates.gptCandidates.join(',') || 'none'}, Cap=${manualCaptchaCandidates.capAnswer || 'none'}`);
     return null;
   } catch (err) {
-    console.error('[router] Manual CAPTCHA error:', err.message);
+    console.error('[manual-captcha] ERROR:', err.message);
     return null;
   }
 }
 
-module.exports = { initRouterSession, heartbeatKeepAlive, getCookie, refreshBeforeSleep, fetchManualCaptcha, submitManualCaptcha };
+module.exports = { initRouterSession, heartbeatKeepAlive, getCookie, refreshBeforeSleep, fetchManualCaptcha, submitManualCaptcha, setManualCaptchaMode };

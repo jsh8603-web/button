@@ -5,7 +5,7 @@ const { exec } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 require('dotenv').config({ path: path.join(__dirname, '.env') });
-const { initRouterSession, heartbeatKeepAlive, getCookie, refreshBeforeSleep, fetchManualCaptcha, submitManualCaptcha } = require('./router-wol');
+const { initRouterSession, heartbeatKeepAlive, getCookie, refreshBeforeSleep, fetchManualCaptcha, submitManualCaptcha, setManualCaptchaMode } = require('./router-wol');
 
 const app = express();
 const PORT = process.env.PORT || 9876;
@@ -495,6 +495,21 @@ async function executeSleepAction(action) {
   });
 }
 const HEARTBEAT_INTERVAL = 30_000;
+const FAST_POLL_INTERVAL = 5_000;
+let fastPollTimer = null;
+let captchaFetchInProgress = false;
+
+function startFastPoll() {
+  if (fastPollTimer) return;
+  console.log('[heartbeat] Fast poll ON (5s) for manual CAPTCHA');
+  fastPollTimer = setInterval(sendHeartbeat, FAST_POLL_INTERVAL);
+}
+function stopFastPoll() {
+  if (!fastPollTimer) return;
+  clearInterval(fastPollTimer);
+  fastPollTimer = null;
+  console.log('[heartbeat] Fast poll OFF');
+}
 
 function getProjectList() {
   try {
@@ -562,11 +577,14 @@ function executeCommand(command) {
     executeSleepAction(command.action);
   } else if (command.action === 'captcha-fetch') {
     // User requested manual CAPTCHA — fetch image and store in KV
+    if (captchaFetchInProgress) { console.log('[captcha] Skipping duplicate captcha-fetch'); return; }
+    captchaFetchInProgress = true;
+    startFastPoll();
     (async () => {
       try {
         setCaptchaStatus('Fetching CAPTCHA...');
         const captcha = await fetchManualCaptcha();
-        if (captcha) {
+        if (captcha && captcha.imageBase64) {
           // Store image + params in KV via heartbeat
           await fetch(`${VERCEL_URL}/api/heartbeat`, {
             method: 'POST',
@@ -581,10 +599,14 @@ function executeCommand(command) {
           console.log('[captcha] Manual CAPTCHA image sent to KV');
         } else {
           setCaptchaStatus('Failed to fetch CAPTCHA');
+          stopFastPoll();
         }
       } catch (err) {
         console.error('[captcha] Fetch error:', err.message);
         setCaptchaStatus('Failed to fetch CAPTCHA');
+        stopFastPoll();
+      } finally {
+        captchaFetchInProgress = false;
       }
     })();
   } else if (command.action === 'captcha-answer') {
@@ -594,6 +616,7 @@ function executeCommand(command) {
         setCaptchaStatus('Verifying...');
         const cookie = await submitManualCaptcha(command.answer, command.params);
         if (cookie) {
+          stopFastPoll();
           // Store cookie in KV
           await fetch(`${VERCEL_URL}/api/heartbeat`, {
             method: 'POST',
@@ -610,13 +633,40 @@ function executeCommand(command) {
           // Clear success message after 5s
           setTimeout(() => setCaptchaStatus(''), 5000);
         } else {
-          setCaptchaStatus('Wrong answer — tap to retry');
+          // Wrong answer — auto-fetch new CAPTCHA (old one is invalidated)
+          setCaptchaStatus('Wrong — fetching new CAPTCHA...');
+          captchaFetchInProgress = true;
+          try {
+            const newCaptcha = await fetchManualCaptcha();
+            if (newCaptcha && newCaptcha.imageBase64) {
+              await fetch(`${VERCEL_URL}/api/heartbeat`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${AGENT_SECRET}` },
+                body: JSON.stringify({
+                  uptime: process.uptime(),
+                  captchaManual: { image: newCaptcha.imageBase64, params: newCaptcha.params },
+                  captchaStatus: 'Wrong — try again',
+                }),
+                signal: AbortSignal.timeout(10_000),
+              });
+            }
+          } catch (e) {
+            console.error('[captcha] Auto-refetch error:', e.message);
+          } finally {
+            captchaFetchInProgress = false;
+          }
         }
       } catch (err) {
         console.error('[captcha] Submit error:', err.message);
         setCaptchaStatus('Verification error');
+        stopFastPoll();
       }
     })();
+  } else if (command.action === 'captcha-close') {
+    // User closed manual CAPTCHA modal — resume auto-login
+    setManualCaptchaMode(false);
+    stopFastPoll();
+    console.log('[captcha] Manual CAPTCHA closed by user');
   } else if (command.action === 'display_off') {
     exec('powershell.exe -Command "(Add-Type -MemberDefinition \'[DllImport(\\"user32.dll\\")]public static extern int SendMessage(int hWnd,int Msg,int wParam,int lParam);\' -Name a -Passthru)::SendMessage(-1,0x0112,0xF170,2)"', (err) => {
       if (err) console.error('[display_off] Error:', err.message);
@@ -684,9 +734,12 @@ async function sendHeartbeat() {
 
       // Process command queue
       if (data.commands && Array.isArray(data.commands)) {
+        // If queue has captcha-answer, skip captcha-fetch (answer uses its own params)
+        const hasCaptchaAnswer = data.commands.some(c => c.action === 'captcha-answer');
         for (const command of data.commands) {
           // protect/unprotect already handled via KV state sync above
           if (command.action === 'protect-session' || command.action === 'unprotect-session') continue;
+          if (hasCaptchaAnswer && command.action === 'captcha-fetch') continue;
           executeCommand(command);
         }
       }

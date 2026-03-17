@@ -89,7 +89,7 @@ cd agent && node server.js    # Agent 실행
 - 학습 데이터: `agent/.captcha-learned.json`
 
 ## Critical Rules
-- Agent 화이트리스트 명령만 실행: `shutdown`, `proj`, `editor`, `protect-session`, `unprotect-session`, `kill-session`, `sleep`, `hibernate`, `display_off`
+- Agent 화이트리스트 명령만 실행: `shutdown`, `proj`, `editor`, `protect-session`, `unprotect-session`, `kill-session`, `sleep`, `hibernate`, `display_off`, `captcha-fetch`, `captcha-answer`, `captcha-close`
 - `.env` 파일 커밋 금지
 - `x-pin-hash`에는 평문 PIN 전송 → Agent가 bcrypt.compare
 - Heartbeat Bearer 토큰 = `AGENT_SECRET` (Agent↔Vercel 인증)
@@ -97,6 +97,8 @@ cd agent && node server.js    # Agent 실행
 - middleware는 JWT 서명 검증 없이 구조+만료만 체크 (Edge Runtime 호환)
 - heartbeat는 라우터 로그인(CAPTCHA)에 블로킹되면 안 됨: 로그인 진행 중이면 쿠키 null로 즉시 전송
 - 세션 보호 optimistic UI: action 후 35초간 서버 sessions 폴링 무시 (깜빡임 방지)
+- 라우터 로그인 POST에 반드시 `e_val`, `n_val` 포함 (누락 시 lpNum 미리셋 → 차단)
+- manualCaptchaMode 중에는 heartbeatKeepAlive/auto-login 전부 skip
 
 ## UI 아이콘 인덱스 (모두 SVG)
 

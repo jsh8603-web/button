@@ -1,10 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
-import { kvGet, kvSet, KEYS, type Command } from "@/lib/kv";
+import { kvGet, kvSet, kvDel, KEYS, type Command } from "@/lib/kv";
 
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { action, name } = body;
+    const { action, name, answer, params } = body;
 
     if (!action) {
       return NextResponse.json({ error: "action required" }, { status: 400 });
@@ -30,9 +30,24 @@ export async function POST(request: NextRequest) {
       await kvSet(KEYS.lastPowerAction, action);
     }
 
+    // captcha-fetch: clear stale manual CAPTCHA data immediately
+    if (action === "captcha-fetch") {
+      await kvDel(KEYS.captchaManual);
+    }
+
+    // captcha-close: clear CAPTCHA data + status when user closes modal
+    if (action === "captcha-close") {
+      await kvDel(KEYS.captchaManual);
+      await kvDel(KEYS.captchaStatus);
+    }
+
     // All other actions: append to command queue
     const existing = await kvGet<Command[]>(KEYS.command) || [];
-    existing.push({ action, name, timestamp: Date.now() });
+    const cmd: Command = { action, timestamp: Date.now() };
+    if (name) cmd.name = name;
+    if (answer) cmd.answer = answer;
+    if (params) cmd.params = params;
+    existing.push(cmd);
     await kvSet(KEYS.command, existing, 120);
 
     return NextResponse.json({ ok: true, action });

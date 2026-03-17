@@ -234,6 +234,13 @@ function Dashboard() {
   const newProjInputRef = useRef<HTMLInputElement>(null);
   // Prevent server poll from overwriting optimistic session updates
   const sessionActionTime = useRef(0);
+  // Refs for values read inside polling callback (avoids stale closure)
+  const captchaManualRef = useRef(captchaManual);
+  const showCaptchaModalRef = useRef(showCaptchaModal);
+  const actionFeedbackRef = useRef(actionFeedback);
+  captchaManualRef.current = captchaManual;
+  showCaptchaModalRef.current = showCaptchaModal;
+  actionFeedbackRef.current = actionFeedback;
 
   // Load last project from localStorage
   useEffect(() => {
@@ -251,19 +258,34 @@ function Dashboard() {
       }
       setLastPowerAction(isOnline ? null : data.lastAction || null);
       // Show CAPTCHA progress from agent
+      const af = actionFeedbackRef.current;
       if (data.captchaStatus) {
         setActionFeedback(data.captchaStatus);
-      } else if (actionFeedback?.startsWith("CAPTCHA") || actionFeedback?.startsWith("Solving") || actionFeedback?.startsWith("Fetching") || actionFeedback?.startsWith("Verifying") || actionFeedback?.startsWith("Wrong") || actionFeedback?.startsWith("Failed")) {
+      } else if (af?.startsWith("CAPTCHA") || af?.startsWith("Solving") || af?.startsWith("Fetching") || af?.startsWith("Verifying") || af?.startsWith("Wrong") || af?.startsWith("Failed")) {
         setActionFeedback("");
       }
-      // Update manual CAPTCHA data
-      setCaptchaManual(data.captchaManual || null);
-      if (data.captchaManual && showCaptchaModal) {
-        setTimeout(() => captchaInputRef.current?.focus(), 100);
+      // Update manual CAPTCHA data — always accept if image changed or no current data
+      const curCaptcha = captchaManualRef.current;
+      const modalOpen = showCaptchaModalRef.current;
+      if (data.captchaManual) {
+        const isNew = !curCaptcha || data.captchaManual.image !== curCaptcha.image;
+        if (isNew) {
+          setCaptchaManual(data.captchaManual);
+          if (modalOpen) {
+            setCaptchaInput("");
+            setTimeout(() => captchaInputRef.current?.focus(), 100);
+          }
+        }
+      } else if (!modalOpen) {
+        setCaptchaManual(null);
       }
       // Auto-close modal on success
-      if (data.captchaStatus === "CAPTCHA solved!" && showCaptchaModal) {
+      if (data.captchaStatus === "CAPTCHA solved!" && modalOpen) {
         setTimeout(() => { setShowCaptchaModal(false); setActionFeedback(""); }, 2000);
+      }
+      // Wrong answer while modal is open — clear input, keep modal open for New/retry
+      if (data.captchaStatus?.startsWith("Wrong") && modalOpen) {
+        setCaptchaInput("");
       }
       setStatus((prev) => {
         if (prev === "waking") return isOnline ? "online" : prev;
@@ -522,17 +544,18 @@ function Dashboard() {
 
       {/* Action Feedback — tap CAPTCHA status to solve manually */}
       <div className="h-6 mt-3">
-        {actionFeedback && (
+        {actionFeedback ? (
           <p
             className={`text-xs text-amber-400/80 animate-pulse ${
-              actionFeedback.includes("CAPTCHA") || actionFeedback.includes("Solving") ? "cursor-pointer underline decoration-dotted" : ""
+              actionFeedback.includes("CAPTCHA") || actionFeedback.includes("Solving") || actionFeedback.includes("Wrong") || actionFeedback.includes("Failed") ? "cursor-pointer underline decoration-dotted" : ""
             }`}
             onClick={() => {
-              if (!(actionFeedback.includes("CAPTCHA") || actionFeedback.includes("Solving"))) return;
+              if (showCaptchaModal) return;
+              if (!(actionFeedback.includes("CAPTCHA") || actionFeedback.includes("Solving") || actionFeedback.includes("Wrong") || actionFeedback.includes("Failed"))) return;
               if (!confirm("Solve CAPTCHA manually?")) return;
               setShowCaptchaModal(true);
               setCaptchaInput("");
-              // Request fresh CAPTCHA image from agent
+              setCaptchaManual(null);
               fetch("/api/run", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
@@ -543,12 +566,30 @@ function Dashboard() {
           >
             {actionFeedback}
           </p>
-        )}
+        ) : status === "online" && !showCaptchaModal ? (
+          <p
+            className="text-xs text-white/30 cursor-pointer hover:text-amber-400/60 transition-colors"
+            onClick={() => {
+              if (!confirm("Solve router CAPTCHA manually?")) return;
+              setShowCaptchaModal(true);
+              setCaptchaInput("");
+              setCaptchaManual(null);
+              fetch("/api/run", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ action: "captcha-fetch" }),
+              });
+              setActionFeedback("Requesting CAPTCHA image...");
+            }}
+          >
+            Solve CAPTCHA
+          </p>
+        ) : null}
       </div>
 
       {/* Manual CAPTCHA Modal */}
       {showCaptchaModal && (
-        <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4">
+        <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4" onClick={(e) => e.stopPropagation()}>
           <div className="bg-zinc-900 border border-white/10 rounded-xl p-5 w-full max-w-xs">
             <p className="text-sm text-white/60 mb-3">Solve CAPTCHA</p>
             {captchaManual ? (
@@ -611,7 +652,8 @@ function Dashboard() {
                   </button>
                   <button
                     onClick={() => {
-                      // Request new CAPTCHA
+                      // Request new CAPTCHA — clear current so new one loads
+                      setCaptchaManual(null);
                       fetch("/api/run", {
                         method: "POST",
                         headers: { "Content-Type": "application/json" },
@@ -626,7 +668,16 @@ function Dashboard() {
                     New
                   </button>
                   <button
-                    onClick={() => { setShowCaptchaModal(false); setCaptchaManual(null); }}
+                    onClick={() => {
+                      setShowCaptchaModal(false);
+                      setCaptchaManual(null);
+                      // Notify agent to exit manual CAPTCHA mode (resume auto-login)
+                      fetch("/api/run", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ action: "captcha-close" }),
+                      });
+                    }}
                     className="py-2 px-3 rounded-lg bg-white/5 text-white/40 text-sm
                       hover:bg-white/10 transition-colors"
                   >
