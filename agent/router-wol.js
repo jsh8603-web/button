@@ -208,15 +208,10 @@ async function solveCaptchaGPT(imageBuffer) {
   const processedImage = await preprocessImage(imageBuffer);
   const base64Image = processedImage.toString('base64');
 
-  // 7 parallel reads: 3x low temp (precision) + 3x higher temp (diversity) + 1x grounding prompt
+  // 2 parallel reads: 1x low temp (precision) + 1x higher temp (diversity)
   const readConfigs = [
     { temp: 0.2, topP: 0.3, system: CAPTCHA_SYSTEM_PROMPT, user: CAPTCHA_USER_PROMPT },
-    { temp: 0.2, topP: 0.3, system: CAPTCHA_SYSTEM_PROMPT, user: CAPTCHA_USER_PROMPT },
-    { temp: 0.2, topP: 0.3, system: CAPTCHA_SYSTEM_PROMPT, user: CAPTCHA_USER_PROMPT },
     { temp: 0.5, topP: 0.5, system: CAPTCHA_SYSTEM_PROMPT, user: CAPTCHA_USER_PROMPT },
-    { temp: 0.5, topP: 0.5, system: CAPTCHA_SYSTEM_PROMPT, user: CAPTCHA_USER_PROMPT },
-    { temp: 0.5, topP: 0.5, system: CAPTCHA_SYSTEM_PROMPT, user: CAPTCHA_USER_PROMPT },
-    { temp: 0.2, topP: 0.3, system: CAPTCHA_SYSTEM_PROMPT, user: CAPTCHA_GROUNDING_PROMPT, maxTokens: 200 },
   ];
   const responses = await Promise.all(readConfigs.map(cfg =>
     client.chat.completions.create({
@@ -267,6 +262,67 @@ async function solveCaptchaGPT(imageBuffer) {
   if (candidates.length === 0) throw new Error('All CAPTCHA reads invalid');
 
   console.log(`[router] GPT candidates (${candidates.length}): ${candidates.join(', ')}`);
+  return candidates;
+}
+
+// --- Claude Vision CAPTCHA solver (alternative to GPT) ---
+
+async function solveCaptchaClaude(imageBuffer) {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) throw new Error('ANTHROPIC_API_KEY not set');
+
+  const Anthropic = require('@anthropic-ai/sdk');
+  const client = new Anthropic({ apiKey });
+
+  const processedImage = await preprocessImage(imageBuffer);
+  const base64Image = processedImage.toString('base64');
+
+  // 3 parallel reads: 2x low temp (precision) + 1x grounding prompt
+  const readConfigs = [
+    { temp: 0.2, system: CAPTCHA_SYSTEM_PROMPT, user: CAPTCHA_USER_PROMPT },
+    { temp: 0.2, system: CAPTCHA_SYSTEM_PROMPT, user: CAPTCHA_USER_PROMPT },
+    { temp: 0.2, system: CAPTCHA_SYSTEM_PROMPT, user: CAPTCHA_GROUNDING_PROMPT, maxTokens: 200 },
+  ];
+
+  const responses = await Promise.all(readConfigs.map(cfg =>
+    client.messages.create({
+      model: 'claude-opus-4-6',
+      max_tokens: cfg.maxTokens || 50,
+      temperature: cfg.temp,
+      system: cfg.system,
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'image', source: { type: 'base64', media_type: 'image/png', data: base64Image } },
+          { type: 'text', text: cfg.user },
+        ],
+      }],
+    }).then(r => {
+      const text = r.content[0]?.text || '';
+      const lines = (cfg.maxTokens > 50 ? text.split('\n').slice(-3) : text.split('\n'))
+        .map(l => cleanCaptchaRead(l))
+        .filter(l => isValidCaptcha(l));
+      return lines;
+    }).catch(e => { console.log(`[router] Claude error: ${e.message}`); return []; })
+  ));
+
+  const allReads = new Set();
+  for (const lines of responses) {
+    for (const line of lines) allReads.add(line);
+  }
+
+  const firstChoices = responses.map(lines => lines[0]).filter(Boolean);
+  const voted = charVote(firstChoices);
+  if (voted) allReads.add(voted);
+
+  const allChoices = responses.flatMap(lines => lines).filter(Boolean);
+  const votedAll = charVote(allChoices);
+  if (votedAll) allReads.add(votedAll);
+
+  const candidates = [...allReads];
+  if (candidates.length === 0) throw new Error('All Claude CAPTCHA reads invalid');
+
+  console.log(`[router] Claude candidates (${candidates.length}): ${candidates.join(', ')}`);
   return candidates;
 }
 
@@ -697,7 +753,7 @@ function loadLearned() {
   const defaults = {
     gptToCap: {}, winMappings: {},
     posDiffs: {}, posWins: {},  // positional: "0:a→q" format
-    stats: { attempts: 0, successes: 0, capHits: 0, capTotal: 0, gptHits: 0, gptTotal: 0, capFails: 0 },
+    stats: { attempts: 0, successes: 0, capHits: 0, capTotal: 0, gptHits: 0, gptTotal: 0, opusHits: 0, opusTotal: 0, capFails: 0 },
   };
   try {
     if (fs.existsSync(LEARNED_FILE)) {
@@ -730,36 +786,39 @@ function saveLearned(learned) {
 
 /**
  * Dynamic solver weights based on cumulative accuracy.
+ * 3-solver architecture: GPT-4o-mini (2 reads) + Claude Opus (3 reads) + CapSolver (1 read)
  * ALL weights adapt to observed solver performance — no static values.
- * Returns { cap, gptTop, gpt, cross, confusionBase, learnedCapGpt, learnedCapWin, learnedPosGpt, learnedPosWin, ... }
  */
 function getDynamicWeights(learned) {
   const s = learned.stats;
   const MIN_SAMPLES = 5;
 
-  // Base weights (used when insufficient data)
-  let capW = 3, gptTopW = 3, gptW = 1, crossW = 2, confusionW = 0.3;
+  // Base weights: Opus starts highest (best observed accuracy), then Cap, then GPT
+  let capW = 3, opusTopW = 4, opusW = 2, gptTopW = 2, gptW = 1, crossW = 2, confusionW = 0.3;
 
-  if (s.capTotal >= MIN_SAMPLES && s.gptTotal >= MIN_SAMPLES) {
-    const capRate = s.capHits / s.capTotal;   // 0~1
-    const gptRate = s.gptHits / s.gptTotal;   // 0~1
+  const capRate = s.capTotal >= MIN_SAMPLES ? s.capHits / s.capTotal : 0.73;     // default from historical
+  const gptRate = s.gptTotal >= MIN_SAMPLES ? s.gptHits / s.gptTotal : 0.45;     // default from historical
+  const opusRate = s.opusTotal >= MIN_SAMPLES ? s.opusHits / s.opusTotal : 0.80;  // default: high (10/10 observed)
 
+  if (s.capTotal >= MIN_SAMPLES || s.gptTotal >= MIN_SAMPLES || s.opusTotal >= MIN_SAMPLES) {
     // Primary solver weights: 1.5 + 3.5 * accuracy (range: 1.5 ~ 5.0)
     capW = 1.5 + 3.5 * capRate;
+    opusTopW = 1.5 + 3.5 * opusRate;
     gptTopW = 1.5 + 3.5 * gptRate;
 
-    // Other GPT reads: scale proportionally (lower base, same ratio)
+    // Non-top reads: lower base, same ratio
+    opusW = 0.5 + 2.0 * opusRate;
     gptW = 0.5 + 1.5 * gptRate;
 
-    // Cross-solver weight: peaks when both solvers are decent but different
-    const minRate = Math.min(capRate, gptRate);
+    // Cross-solver weight: based on weakest solver (diversity value)
+    const minRate = Math.min(capRate, gptRate, opusRate);
     crossW = 1.0 + 2.0 * minRate;
 
-    // Confusion base: decreases as solver accuracy improves (less guessing needed)
-    const avgRate = (capRate + gptRate) / 2;
+    // Confusion base: decreases as solver accuracy improves
+    const avgRate = (capRate + gptRate + opusRate) / 3;
     confusionW = Math.max(0.1, 0.5 - 0.3 * avgRate);
 
-    console.log(`[router] Dynamic weights: cap=${capW.toFixed(1)} (${(capRate*100).toFixed(0)}%), gptTop=${gptTopW.toFixed(1)} (${(gptRate*100).toFixed(0)}%), gpt=${gptW.toFixed(1)}, cross=${crossW.toFixed(1)}, conf=${confusionW.toFixed(2)}`);
+    console.log(`[router] Dynamic weights: cap=${capW.toFixed(1)} (${(capRate*100).toFixed(0)}%), opus=${opusTopW.toFixed(1)} (${(opusRate*100).toFixed(0)}%), gpt=${gptTopW.toFixed(1)} (${(gptRate*100).toFixed(0)}%), cross=${crossW.toFixed(1)}, conf=${confusionW.toFixed(2)}`);
   }
 
   // Data confidence: log scale — grows gradually, saturates at ~50 wins
@@ -780,7 +839,7 @@ function getDynamicWeights(learned) {
   const minObsPos = 1; // positional data is sparse, trust even 1 observation
 
   return {
-    cap: capW, gptTop: gptTopW, gpt: gptW, cross: crossW,
+    cap: capW, opusTop: opusTopW, opus: opusW, gptTop: gptTopW, gpt: gptW, cross: crossW,
     confusionBase: confusionW,
     learnedCapGpt, learnedCapWin,
     learnedPosGpt, learnedPosWin,
@@ -789,21 +848,21 @@ function getDynamicWeights(learned) {
 }
 
 /**
- * Record GPT↔CapSolver character diffs on EVERY attempt.
- * Even without a winning answer, CapSolver's reading is valuable.
- * gptToCap: "h→n": 5 means GPT read 'h' where CapSolver read 'n' five times.
+ * Record vision↔CapSolver character diffs on EVERY attempt.
+ * Records diffs from all vision candidates (GPT + Opus) against CapSolver ground truth.
+ * gptToCap: "h→n": 5 means a vision solver read 'h' where CapSolver read 'n' five times.
  */
-function recordSolverDiffs(gptCandidates, capAnswer, learned) {
-  if (!capAnswer || !gptCandidates || gptCandidates.length === 0) return;
+function recordSolverDiffs(visionCandidates, capAnswer, learned) {
+  if (!capAnswer || !visionCandidates || visionCandidates.length === 0) return;
 
   if (!learned.posDiffs) learned.posDiffs = {};
 
-  for (const gpt of gptCandidates) {
-    if (gpt.length !== capAnswer.length) continue;
-    for (let i = 0; i < gpt.length; i++) {
-      if (gpt[i] !== capAnswer[i]) {
-        // Global (backward compat)
-        const key = `${gpt[i]}→${capAnswer[i]}`;
+  for (const cand of visionCandidates) {
+    if (cand.length !== capAnswer.length) continue;
+    for (let i = 0; i < cand.length; i++) {
+      if (cand[i] !== capAnswer[i]) {
+        // Global
+        const key = `${cand[i]}→${capAnswer[i]}`;
         learned.gptToCap[key] = (learned.gptToCap[key] || 0) + 1;
         // Positional
         const posKey = `${i}:${key}`;
@@ -848,15 +907,15 @@ function recordSuccess(candidates, winningVariant, learned, solverAnswers) {
   if (solverAnswers) {
     if (solverAnswers.cap !== undefined) {
       learned.stats.capTotal = (learned.stats.capTotal || 0) + 1;
-      if (solverAnswers.cap === winningVariant) {
-        learned.stats.capHits = (learned.stats.capHits || 0) + 1;
-      }
+      if (solverAnswers.cap === winningVariant) learned.stats.capHits = (learned.stats.capHits || 0) + 1;
     }
     if (solverAnswers.gptTop !== undefined) {
       learned.stats.gptTotal = (learned.stats.gptTotal || 0) + 1;
-      if (solverAnswers.gptTop === winningVariant) {
-        learned.stats.gptHits = (learned.stats.gptHits || 0) + 1;
-      }
+      if (solverAnswers.gptTop === winningVariant) learned.stats.gptHits = (learned.stats.gptHits || 0) + 1;
+    }
+    if (solverAnswers.opusTop !== undefined) {
+      learned.stats.opusTotal = (learned.stats.opusTotal || 0) + 1;
+      if (solverAnswers.opusTop === winningVariant) learned.stats.opusHits = (learned.stats.opusHits || 0) + 1;
     }
   }
 
@@ -875,8 +934,8 @@ function recordSuccess(candidates, winningVariant, learned, solverAnswers) {
   }
 
   saveLearned(learned);
-  const { capHits = 0, capTotal = 0, gptHits = 0, gptTotal = 0 } = learned.stats;
-  console.log(`[router] Recorded win: "${winningVariant}" (overall: ${learned.stats.successes}/${learned.stats.attempts}, cap: ${capHits}/${capTotal}, gpt: ${gptHits}/${gptTotal})`);
+  const { capHits = 0, capTotal = 0, gptHits = 0, gptTotal = 0, opusHits = 0, opusTotal = 0 } = learned.stats;
+  console.log(`[router] Recorded win: "${winningVariant}" (overall: ${learned.stats.successes}/${learned.stats.attempts}, cap: ${capHits}/${capTotal}, opus: ${opusHits}/${opusTotal}, gpt: ${gptHits}/${gptTotal})`);
 }
 
 // --- Router login flow ---
@@ -910,12 +969,15 @@ async function login() {
   const imgRes = await httpReq('GET', '/' + imgPath);
   console.log('[router] CAPTCHA fetched, solving...');
 
-  // --- Phase 1: GPT + CapSolver parallel (학습 + 1차 시도) ---
-  // Send preprocessed image to CapSolver too (better accuracy)
+  // --- Phase 1: GPT + Opus + CapSolver parallel (3-solver architecture) ---
   const processedForCap = await preprocessImage(imgRes.data);
-  const [gptResult, capResult] = await Promise.all([
-    solveCaptchaGPT(imgRes.data).catch(err => {   // GPT preprocesses internally
+  const [gptResult, opusResult, capResult] = await Promise.all([
+    solveCaptchaGPT(imgRes.data).catch(err => {
       console.log(`[router] GPT CAPTCHA failed: ${err.message}`);
+      return [];
+    }),
+    solveCaptchaClaude(imgRes.data).catch(err => {
+      console.log(`[router] Opus CAPTCHA failed: ${err.message}`);
       return [];
     }),
     solveCaptchaCapSolver(processedForCap).catch(() => null),
@@ -925,6 +987,7 @@ async function login() {
   const weights = getDynamicWeights(learned);
   const capAnswer = capResult && capResult.length > 0 ? capResult[0] : null;
   const gptTopAnswer = gptResult && gptResult.length > 0 ? gptResult[0] : null;
+  const opusTopAnswer = opusResult && opusResult.length > 0 ? opusResult[0] : null;
 
   // Track CapSolver failures
   if (!capAnswer) {
@@ -932,43 +995,51 @@ async function login() {
     saveLearned(learned);
   }
 
-  // Record GPT↔CapSolver diffs on EVERY attempt (학습 — winning 불필요)
-  if (capAnswer && gptResult && gptResult.length > 0) {
-    recordSolverDiffs(gptResult, capAnswer, learned);
+  // Record vision↔CapSolver diffs on EVERY attempt (학습)
+  const allVisionCandidates = [...(gptResult || []), ...(opusResult || [])];
+  if (capAnswer && allVisionCandidates.length > 0) {
+    recordSolverDiffs(allVisionCandidates, capAnswer, learned);
   }
 
-  // Build weighted readings (dynamic weights from accuracy history)
+  // Build weighted readings from all 3 solvers
   const allReadings = [];
 
   if (capAnswer) {
     allReadings.push({ text: capAnswer, weight: weights.cap, source: 'capsolver' });
   }
 
+  // Length consensus: use CapSolver as reference if available
+  const refLen = capAnswer ? capAnswer.length : null;
+
+  // Opus readings (highest weight)
+  if (opusResult && opusResult.length > 0) {
+    const opusFiltered = refLen ? opusResult.filter(g => g.length === refLen) : opusResult;
+    const opusFinal = opusFiltered.length > 0 ? opusFiltered : opusResult;
+    if (refLen && opusFinal.length < opusResult.length) {
+      console.log(`[router] Opus length filter: ${opusResult.length}→${opusFinal.length} (ref=${refLen})`);
+    }
+    allReadings.push({ text: opusFinal[0], weight: weights.opusTop, source: 'opus-top' });
+    for (let i = 1; i < opusFinal.length; i++) {
+      allReadings.push({ text: opusFinal[i], weight: weights.opus, source: 'opus' });
+    }
+  }
+
+  // GPT readings (lower weight)
   if (gptResult && gptResult.length > 0) {
-    // Length consensus: if CapSolver gives a reference length, filter GPT candidates
-    // GPT often returns inconsistent lengths (5-7), CapSolver is consistent
-    const refLen = capAnswer ? capAnswer.length : null;
-    const gptFiltered = refLen
-      ? gptResult.filter(g => g.length === refLen)
-      : gptResult;
-    // Use filtered list if non-empty, otherwise fall back to original
+    const gptFiltered = refLen ? gptResult.filter(g => g.length === refLen) : gptResult;
     const gptFinal = gptFiltered.length > 0 ? gptFiltered : gptResult;
     if (refLen && gptFinal.length < gptResult.length) {
       console.log(`[router] GPT length filter: ${gptResult.length}→${gptFinal.length} (ref=${refLen})`);
     }
     allReadings.push({ text: gptFinal[0], weight: weights.gptTop, source: 'gpt-top' });
-    // Cap total non-top GPT weight: don't let GPT consensus overwhelm CapSolver
-    // Total non-top GPT weight capped at cap weight (prevents 4 GPT reads from 2x-ing CapSolver)
-    const maxNonTopTotal = weights.cap;
-    const perGptW = gptFinal.length > 1 ? Math.min(weights.gpt, maxNonTopTotal / (gptFinal.length - 1)) : weights.gpt;
     for (let i = 1; i < gptFinal.length; i++) {
-      allReadings.push({ text: gptFinal[i], weight: perGptW, source: 'gpt' });
+      allReadings.push({ text: gptFinal[i], weight: weights.gpt, source: 'gpt' });
     }
   }
 
-  // Cross-solver variants
-  if (capAnswer && gptResult && gptResult.length > 0) {
-    const crossVariants = generateCrossSolverVariants(gptResult, capAnswer);
+  // Cross-solver variants (from all vision candidates against CapSolver)
+  if (capAnswer && allVisionCandidates.length > 0) {
+    const crossVariants = generateCrossSolverVariants(allVisionCandidates, capAnswer);
     for (const cv of crossVariants) {
       allReadings.push({ text: cv, weight: weights.cross, source: 'cross' });
     }
@@ -986,7 +1057,7 @@ async function login() {
   const encPwd = passEnc2(password, nVal, eVal);
   console.log(`[router] Phase 1 login: lpNum=${lpNum}`);
   const candidateTexts = allReadings.map(r => r.text);
-  const solverAnswers = { cap: capAnswer, gptTop: gptTopAnswer };
+  const solverAnswers = { cap: capAnswer, gptTop: gptTopAnswer, opusTop: opusTopAnswer };
 
   for (const { text: variant, score } of scoredVariants.slice(0, 7)) {
     if (manualCaptchaMode) return null; // Abort if user solving manually
@@ -1187,13 +1258,19 @@ async function fetchManualCaptcha() {
     const imgRes = await httpReq('GET', '/' + imgPath);
     const captchaImage = imgPath.split('/')[1].split('.')[0];
 
-    // Run solvers in background for learning (don't block manual flow)
-    manualCaptchaCandidates = { gptCandidates: [], capAnswer: null, solverAnswers: { cap: null, gptTop: null } };
+    // Run all 3 solvers in background for learning (don't block manual flow)
+    manualCaptchaCandidates = { gptCandidates: [], capAnswer: null, solverAnswers: { cap: null, gptTop: null, opusTop: null } };
     Promise.allSettled([
       solveCaptchaGPT(imgRes.data).then(r => {
         if (r && r.length > 0) {
-          manualCaptchaCandidates.gptCandidates = r;
+          manualCaptchaCandidates.gptCandidates.push(...r);
           manualCaptchaCandidates.solverAnswers.gptTop = r[0];
+        }
+      }),
+      solveCaptchaClaude(imgRes.data).then(r => {
+        if (r && r.length > 0) {
+          manualCaptchaCandidates.gptCandidates.push(...r);
+          manualCaptchaCandidates.solverAnswers.opusTop = r[0];
         }
       }),
       solveCaptchaCapSolver(imgRes.data).then(r => {
@@ -1203,7 +1280,7 @@ async function fetchManualCaptcha() {
         }
       }),
     ]).then(() => {
-      console.log(`[manual-captcha] Solver hints: GPT=${manualCaptchaCandidates.gptCandidates.join(',') || 'none'}, Cap=${manualCaptchaCandidates.capAnswer || 'none'}`);
+      console.log(`[manual-captcha] Solver hints: Opus=${manualCaptchaCandidates.solverAnswers.opusTop || 'none'}, GPT=${manualCaptchaCandidates.solverAnswers.gptTop || 'none'}, Cap=${manualCaptchaCandidates.capAnswer || 'none'}`);
     });
 
     return {
