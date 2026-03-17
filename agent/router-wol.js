@@ -793,10 +793,10 @@ async function login() {
 
   const imgPath = parts[0], lpNum = parts[1], eVal = parts[2], nVal = parts[3];
 
-  // lpNum increments per get_captcha call (~1 per login()), NOT per variant tried.
-  // Does NOT reset on success or logout — only time-based reset.
-  // e_val/n_val must be included in POST (without it, lpNum accumulates instantly → block).
-  // loginWithRetry(5) → ~+15 max. Threshold 30 allows 2 full retry cycles.
+  // lpNum = successful login counter. Increments +1 per successful login(), NOT per failed attempt.
+  // Failed login() and failed POSTs do NOT increment lpNum.
+  // Reset mechanism unclear (not time-based within 30min, possibly router reboot).
+  // e_val/n_val must be included in POST.
   const lpNumInt = parseInt(lpNum, 10);
   if (lpNumInt >= 30) {
     throw new Error(`lpNum=${lpNum} — too many attempts, stopping`);
@@ -868,13 +868,6 @@ async function login() {
   const conf = scoredVariants.avgConfidence || 0;
   console.log(`[router] Phase 1: ${scoredVariants.length} variants (top: "${scoredVariants[0]?.text}" s=${scoredVariants[0]?.score.toFixed(1)}, conf=${(conf*100).toFixed(0)}%)`);
 
-  // Skip hard CAPTCHAs: if confidence too low, don't waste attempts — fetch a new one
-  const SKIP_THRESHOLD = 0.55;
-  if (conf < SKIP_THRESHOLD) {
-    console.log(`[router] Confidence ${(conf*100).toFixed(0)}% < ${SKIP_THRESHOLD*100}% — skipping hard CAPTCHA`);
-    throw new Error('low-confidence CAPTCHA skipped');
-  }
-
   const captchaImage = imgPath.split('/')[1].split('.')[0];
   const encPwd = passEnc2(password, nVal, eVal);
   console.log(`[router] Phase 1 login: lpNum=${lpNum}`);
@@ -895,25 +888,19 @@ async function login() {
     }
   }
 
-  // --- Phase 2: CapSolver-only fallback (실질적 해결 — 새 CAPTCHA 2회) ---
+  // --- Phase 2: CapSolver-only fallback with fresh CAPTCHA ---
   if (manualCaptchaMode) return null;
-  console.log('[router] Phase 1 failed, trying CapSolver-only fallback (2 attempts)...');
+  console.log('[router] Phase 1 failed, trying CapSolver-only fallback...');
 
   for (let fb = 1; fb <= 2; fb++) {
     if (manualCaptchaMode) return null;
     try {
-      // Fetch fresh CAPTCHA for each fallback attempt
       const fbR1 = await httpReq('GET', '/web/public_data.html?func=get_captcha(intro)');
       const fbParts = fbR1.data.toString().split('&');
       if (fbParts.length < 4) continue;
 
       const fbImgPath = fbParts[0], fbLpNum = fbParts[1], fbEVal = fbParts[2], fbNVal = fbParts[3];
-
-      // lpNum increments slowly (~1 per get_captcha), threshold 30 gives plenty of room
-
       const fbImgRes = await httpReq('GET', '/' + fbImgPath);
-
-      // CapSolver with preprocessed image (better accuracy)
       const fbProcessed = await preprocessImage(fbImgRes.data);
       const fbCap = await solveCaptchaCapSolver(fbProcessed).catch(() => null);
       if (!fbCap || fbCap.length === 0) continue;
@@ -922,17 +909,12 @@ async function login() {
       const fbCaptchaImage = fbImgPath.split('/')[1].split('.')[0];
       const fbEncPwd = passEnc2(password, fbNVal, fbEVal);
 
-      // Try CapSolver answer directly + confusion variants from learned data
       const fbVariants = [fbAnswer];
-
-      // Add learned confusion variants anchored on CapSolver answer
       for (let i = 0; i < fbAnswer.length; i++) {
         const ch = fbAnswer[i];
         const alts = CONFUSIONS[ch] || [];
         for (const alt of alts) {
-          if (alt.length === 1) {
-            fbVariants.push(fbAnswer.substring(0, i) + alt + fbAnswer.substring(i + 1));
-          }
+          if (alt.length === 1) fbVariants.push(fbAnswer.substring(0, i) + alt + fbAnswer.substring(i + 1));
         }
       }
 
@@ -944,10 +926,8 @@ async function login() {
         const formData = `page=web/intro.html&http_passwd=${encodeURIComponent(fbEncPwd)}&captcha=${encodeURIComponent(encCap)}&captcha_image=${encodeURIComponent(fbCaptchaImage)}&e_val=${encodeURIComponent(fbEVal)}&n_val=${encodeURIComponent(fbNVal)}&lp_num=${fbLpNum}&hidden_action=Login`;
 
         const loginRes = await httpReq('POST', '/web/intro.html', formData);
-
         if (loginRes.setCookie) {
           console.log(`[router] Fallback success with "${variant}"!`);
-          // Learn: CapSolver was close, record the diff if variant ≠ original
           if (variant !== fbAnswer) {
             recordSuccess([fbAnswer], variant, learned, { cap: fbAnswer });
           } else {
@@ -961,7 +941,7 @@ async function login() {
     }
   }
 
-  throw new Error('All phases failed (scored variants + CapSolver fallback)');
+  throw new Error('All phases failed');
 }
 
 /**
@@ -1010,10 +990,6 @@ async function _loginWithRetry(maxRetries, onProgress) {
       if (err.message.includes('lpNum=')) {
         if (onProgress) onProgress('CAPTCHA failed — solve manually');
         return null;
-      }
-      // Skip low-confidence CAPTCHAs immediately (no delay needed)
-      if (err.message.includes('low-confidence')) {
-        if (attempt < maxRetries) continue;
       }
       if (attempt < maxRetries) {
         await new Promise(r => setTimeout(r, 2000));
