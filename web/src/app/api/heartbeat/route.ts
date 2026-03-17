@@ -11,10 +11,10 @@ export async function POST(request: NextRequest) {
 
   try {
     const body = await request.json();
-    const { uptime, projects, sessions, routerCookie, routerCookieTTL, captchaStatus } = body;
+    const { uptime, projects, sessions, routerCookie, routerCookieTTL, captchaStatus, routerLoggedIn } = body;
 
     // Store heartbeat (45s TTL)
-    await kvSet(KEYS.heartbeat, { timestamp: Date.now(), uptime, sessions: sessions || [] }, 45);
+    await kvSet(KEYS.heartbeat, { timestamp: Date.now(), uptime, sessions: sessions || [], routerLoggedIn: !!routerLoggedIn }, 45);
 
     // Store router session cookie (default 86400s/24h — Cron refreshes every 30min, agent heartbeat every 30s)
     if (routerCookie) {

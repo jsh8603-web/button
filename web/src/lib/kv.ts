@@ -23,6 +23,7 @@ export interface Heartbeat {
   timestamp: number;
   uptime: number;
   sessions: SessionInfo[];
+  routerLoggedIn?: boolean;
 }
 
 export interface Command {

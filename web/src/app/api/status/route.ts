@@ -18,6 +18,7 @@ export async function GET() {
         status: "online",
         uptime: data.uptime,
         sessions: data.sessions || [],
+        routerLoggedIn: !!data.routerLoggedIn,
         ...(captchaStatus ? { captchaStatus } : {}),
         ...(captchaManual ? { captchaManual } : {}),
       });

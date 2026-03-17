@@ -715,6 +715,7 @@ async function sendHeartbeat() {
         projects: getProjectList(),
         sessions,
         routerCookie,
+        routerLoggedIn: !!getCookie(),
       }),
       signal: AbortSignal.timeout(10_000),
     });

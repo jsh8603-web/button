@@ -227,6 +227,7 @@ function Dashboard() {
   const [showPowerMenu, setShowPowerMenu] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
   const [lastPowerAction, setLastPowerAction] = useState<string | null>(null);
+  const [routerLoggedIn, setRouterLoggedIn] = useState(false);
   const [captchaManual, setCaptchaManual] = useState<{ image: string; params: Record<string, string> } | null>(null);
   const [captchaInput, setCaptchaInput] = useState("");
   const [showCaptchaModal, setShowCaptchaModal] = useState(false);
@@ -257,6 +258,7 @@ function Dashboard() {
         setSessions(data.sessions || []);
       }
       setLastPowerAction(isOnline ? null : data.lastAction || null);
+      setRouterLoggedIn(!!data.routerLoggedIn);
       // Show CAPTCHA progress from agent
       const af = actionFeedbackRef.current;
       if (data.captchaStatus) {
@@ -567,23 +569,27 @@ function Dashboard() {
             {actionFeedback}
           </p>
         ) : status === "online" && !showCaptchaModal ? (
-          <p
-            className="text-xs text-white/30 cursor-pointer hover:text-amber-400/60 transition-colors"
-            onClick={() => {
-              if (!confirm("Solve router CAPTCHA manually?")) return;
-              setShowCaptchaModal(true);
-              setCaptchaInput("");
-              setCaptchaManual(null);
-              fetch("/api/run", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ action: "captcha-fetch" }),
-              });
-              setActionFeedback("Requesting CAPTCHA image...");
-            }}
-          >
-            Solve CAPTCHA
-          </p>
+          routerLoggedIn ? (
+            <p className="text-xs text-emerald-400/60">Router ✓</p>
+          ) : (
+            <p
+              className="text-xs text-white/30 cursor-pointer hover:text-amber-400/60 transition-colors"
+              onClick={() => {
+                if (!confirm("Solve router CAPTCHA manually?")) return;
+                setShowCaptchaModal(true);
+                setCaptchaInput("");
+                setCaptchaManual(null);
+                fetch("/api/run", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ action: "captcha-fetch" }),
+                });
+                setActionFeedback("Requesting CAPTCHA image...");
+              }}
+            >
+              Solve CAPTCHA
+            </p>
+          )
         ) : null}
       </div>
 
@@ -933,6 +939,21 @@ function Dashboard() {
               <div className="flex items-start gap-2">
                 <FolderIcon size={14} className="text-amber-400 shrink-0 mt-0.5" />
                 <div><span className="text-white/70">Projects</span> — Open project. <span className="text-red-400/70">Kills unprotected sessions</span></div>
+              </div>
+
+              <div className="border-t border-white/10 pt-2 text-white/40 text-[10px]">Router Status</div>
+
+              <div className="flex items-start gap-2">
+                <span className="text-emerald-400/60 shrink-0 mt-0.5 text-[10px]">✓</span>
+                <div><span className="text-emerald-400/60">Router ✓</span> — Router session active</div>
+              </div>
+              <div className="flex items-start gap-2">
+                <span className="text-amber-400/80 shrink-0 mt-0.5 text-[10px]">⋯</span>
+                <div><span className="text-amber-400/80">Solving...</span> — Agent solving CAPTCHA</div>
+              </div>
+              <div className="flex items-start gap-2">
+                <span className="text-white/30 shrink-0 mt-0.5 text-[10px]">?</span>
+                <div><span className="text-white/50">Solve CAPTCHA</span> — Tap to solve manually</div>
               </div>
             </div>
           )}
