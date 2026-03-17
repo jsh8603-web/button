@@ -147,22 +147,22 @@ async function preprocessImage(imageBuffer) {
 const CAPTCHA_SYSTEM_PROMPT = `You are an expert CAPTCHA OCR reader. You specialize in reading distorted text from CAPTCHA images.
 
 Rules:
-- Output ONLY lowercase letters (a-z) and digits (0-9)
-- CAPTCHAs are typically 4-7 characters long
-- Watch for commonly confused characters: i/j/l/1, o/0/a, c/e/s, b/d/h, n/r/m, v/y/u, p/q/g, t/f/7, z/2, w/vv
+- The answer is EXACTLY 6 lowercase letters (a-z only, NO digits, NO uppercase)
+- Watch for commonly confused characters: i/j/l, o/a, c/e/s, b/d/h, n/r/m, v/y/u, p/q/g, t/f, w/vv
 - Read each character position independently — do not form English words
 - Give exactly 3 guesses, one per line, most confident first`;
 
 // #14: Strict user prompt with format enforcement
 const CAPTCHA_USER_PROMPT = `Read the distorted text in this CAPTCHA image.
 Output exactly 3 guesses, one per line.
-Each guess: lowercase letters and digits only, 4-7 characters.
+Each guess: exactly 6 lowercase letters (a-z only, no digits).
 Most confident guess first. Nothing else.`;
 
 // #15: Position-by-position grounding prompt (forces visual analysis per character)
 const CAPTCHA_GROUNDING_PROMPT = `Analyze this CAPTCHA image character by character.
-For each position (1st, 2nd, 3rd...), describe what you see visually, then decide the character.
-After analysis, output your final answer on the LAST line: just the characters, lowercase letters and digits only.`;
+The answer is exactly 6 lowercase letters (a-z only, no digits).
+For each of the 6 positions, describe what you see visually, then decide the character.
+After analysis, output your final answer on the LAST line: exactly 6 lowercase letters.`;
 
 function charVote(reads) {
   const validReads = reads.filter(r => r.length >= 4 && r.length <= 8);
@@ -187,15 +187,31 @@ function charVote(reads) {
 }
 
 // #11: Regex post-processing validation
+// CAPTCHA format: exactly 6 lowercase letters (a-z only, no digits).
+// Verified across 105+ successful logins — zero exceptions.
+// If format changes, update CAPTCHA_LENGTH, CAPTCHA_PATTERN, and solver prompts.
+const CAPTCHA_LENGTH = 6;
+const CAPTCHA_PATTERN = new RegExp(`^[a-z]{${CAPTCHA_LENGTH}}$`);
+const DIGIT_TO_LETTER = { '0': 'o', '1': 'l', '2': 'z', '3': 'a', '4': 'q', '5': 's', '6': 'g', '7': 't', '8': 'b', '9': 'g' };
+
 function cleanCaptchaRead(raw) {
   let s = raw.trim().toLowerCase();
   // Strip leading list numbers like "1.", "2)", "3:" etc.
   s = s.replace(/^\d+[.):\-\s]+/, '');
-  return s.replace(/[^a-z0-9]/g, '');
+  // Convert digits to most likely letter equivalents (from win data)
+  s = s.replace(/[0-9]/g, d => DIGIT_TO_LETTER[d] || '');
+  // Keep only lowercase letters
+  return s.replace(/[^a-z]/g, '');
 }
 
+// Common garbage fragments from vision models (natural language leaking into CAPTCHA reads)
+// Filter natural language fragments that happen to be 6 lowercase letters
+const GARBAGE_PATTERNS = /^(letme|sorry|position|thetext|thisis|icanno|cannot|image|captcha|charac|appear|readin|analyz|lookin|hereis|herear|based|second|letter|number|please|answer|should|output|result)/;
+
 function isValidCaptcha(s) {
-  return /^[a-z0-9]{4,8}$/.test(s);
+  if (!CAPTCHA_PATTERN.test(s)) return false;
+  if (GARBAGE_PATTERNS.test(s)) return false;
+  return true;
 }
 
 async function solveCaptchaGPT(imageBuffer) {
@@ -370,38 +386,40 @@ async function solveCaptchaCapSolver(imageBuffer) {
     return null;
   }
 
-  const answer = result.solution?.text?.trim()?.toLowerCase();
-  if (!answer) {
+  const raw = result.solution?.text?.trim()?.toLowerCase();
+  if (!raw) {
     console.log('[router] CapSolver returned no text');
     return null;
   }
 
-  console.log(`[router] CapSolver solved: "${answer}"`);
+  // Apply same cleaning as other solvers (digit→letter conversion)
+  const answer = cleanCaptchaRead(raw);
+  console.log(`[router] CapSolver solved: "${answer}"${raw !== answer ? ` (raw: "${raw}")` : ''}`);
+  if (!isValidCaptcha(answer)) {
+    console.log(`[router] CapSolver answer invalid after cleaning: "${answer}"`);
+    return null;
+  }
   return [answer];
 }
 
 // --- Confidence-scored variant generation ---
 
+// All answers are lowercase a-z only — no digits in confusion map
 const BASE_CONFUSIONS = {
-  'i': ['j', 'l', '1', 't'], 'j': ['i', 'l', '1'],
-  'l': ['i', 'j', '1', 't'], '1': ['i', 'l', 'j', '7'],
-  'c': ['s', 'e', 'o', 'a', 'q'], 's': ['c', 'e', '5', 'z', 'd'],
-  'b': ['d', 'h', '6', '8', 'u', 'k'], 'd': ['b', 'a', 'o', 'z', 's'],
-  'p': ['q', 'g', '9'], 'q': ['p', 'g', 'a', '9'],
-  'n': ['h', 'r', 'm', 'u'], 'h': ['n', 'b', 'k', 'l', 'f'],
-  'v': ['y', 'u', 'w'], 'y': ['v', 'u', 'j'],
-  'u': ['v', 'n', 'a', 'b'], 'a': ['o', 'e', 'q', 'u', 'd', 'g'],
-  'o': ['a', 'c', '0', 'e', 'q'], 'e': ['c', 'a', 'o', '3', 'd'],
-  'r': ['n', 't', 'v'], 't': ['r', 'f', '7', 'l', 'i'],
-  'k': ['h', 'x', 'b'], 'f': ['t', 'r', '7', 'j'],
-  'g': ['q', 'p', '9', 'a', 'u', 'f'],
-  '0': ['o', 'a', 'c', 'q', 's'], '2': ['z', 'a', 'q'],
-  '3': ['e', '8'], '4': ['a', 'f', 'q'],
-  '5': ['s', 'c', '6'], '6': ['b', 'g', '5'],
-  '7': ['t', 'f', '1', 's'], '8': ['b', '3', '6'],
-  '9': ['g', 'q', 'p', 'a'],
-  'z': ['2', 's', 'd'], 'w': ['v'],
-  'm': ['n'], 'x': ['k', 'z'],
+  'i': ['j', 'l', 't'], 'j': ['i', 'l', 'r'],
+  'l': ['i', 'j', 't'], 'c': ['s', 'e', 'o', 'a', 'q'],
+  's': ['c', 'e', 'z', 'd'], 'b': ['d', 'h', 'u', 'k'],
+  'd': ['b', 'a', 'o', 'z', 's'], 'p': ['q', 'g', 'r'],
+  'q': ['p', 'g', 'a'], 'n': ['h', 'r', 'm', 'u', 'k'],
+  'h': ['n', 'b', 'k', 'l', 'f', 'j'], 'v': ['y', 'u', 'w'],
+  'y': ['v', 'u', 'j', 'f'], 'u': ['v', 'n', 'a', 'b'],
+  'a': ['o', 'e', 'q', 'u', 'd', 'g', 'n'],
+  'o': ['a', 'c', 'e', 'q', 'd'], 'e': ['c', 'a', 'o', 'd'],
+  'r': ['n', 't', 'v', 'p'], 't': ['r', 'f', 'l', 'i'],
+  'k': ['h', 'x', 'b', 'g'], 'f': ['t', 'r', 'j', 'y'],
+  'g': ['q', 'p', 'a', 'u', 'f', 'k'],
+  'z': ['s', 'd'], 'w': ['v', 'u'],
+  'm': ['n', 'r'], 'x': ['k', 'z', 'v'],
 };
 
 // Build CONFUSIONS from BASE + learned wins, then prune low-value mappings.
@@ -481,11 +499,12 @@ const CONFUSIONS = buildConfusions();
  *   - Confusion map alternatives: 0.3 points
  */
 function buildPositionScores(allReadings, learned, weights) {
-  // Determine target length from PRIMARY solvers only (exclude cross-solver variants)
-  // Cross variants inherit length from their inputs and should not shift length consensus
+  // Target length from readings (isValidCaptcha enforces allowed lengths upstream)
+  // Currently all readings are 6 chars (enforced by isValidCaptcha /^[a-z]{6}$/)
+  // If CAPTCHA format changes, update isValidCaptcha and this adapts automatically
   const lenCounts = {};
   for (const { text, weight, source } of allReadings) {
-    if (source === 'cross') continue; // exclude from length vote
+    if (source === 'cross') continue;
     lenCounts[text.length] = (lenCounts[text.length] || 0) + weight;
   }
   const targetLen = parseInt(Object.entries(lenCounts).sort((a, b) => b[1] - a[1])[0][0]);
@@ -538,24 +557,37 @@ function buildPositionScores(allReadings, learned, weights) {
 
     // Step 1: Positional learned data (higher weight, position-specific)
     // CRITICAL: Only derive bonuses from SOLVER-originated chars to prevent cascade amplification
-    // Confusion-map chars should NOT generate learned bonuses (they're speculative)
+    // Precompute O(1) lookups from positional data (instead of scanning all entries per char)
     const posApplied = new Set();
     if (learned.posDiffs || learned.posWins) {
+      const posDiffLookup = {}; // posDiffLookup[pos:from] = [{to, count}, ...]
+      for (const [posKey, count] of Object.entries(learned.posDiffs || {})) {
+        const m = posKey.match(/^(\d+):(.+)→(.+)$/);
+        if (!m) continue;
+        const key = `${m[1]}:${m[2]}`;
+        if (!posDiffLookup[key]) posDiffLookup[key] = [];
+        posDiffLookup[key].push({ to: m[3], count });
+      }
+      const posWinLookup = {};
+      for (const [posKey, count] of Object.entries(learned.posWins || {})) {
+        const m = posKey.match(/^(\d+):(.+)→(.+)$/);
+        if (!m) continue;
+        const key = `${m[1]}:${m[2]}`;
+        if (!posWinLookup[key]) posWinLookup[key] = [];
+        posWinLookup[key].push({ to: m[3], count });
+      }
+
       for (let i = 0; i < targetLen; i++) {
         for (const ch of solverChars[i]) {
-          for (const [posKey, count] of Object.entries(learned.posDiffs || {})) {
-            const m = posKey.match(/^(\d+):(.+)→(.+)$/);
-            if (!m || parseInt(m[1]) !== i || m[2] !== ch) continue;
+          for (const { to, count } of (posDiffLookup[`${i}:${ch}`] || [])) {
             if (count < weights.minObsPos) continue;
-            addBonus(i, m[3], Math.min(count * 0.15, weights.learnedPosGpt));
-            posApplied.add(`${i}:${ch}→${m[3]}`);
+            addBonus(i, to, Math.min(count * 0.15, weights.learnedPosGpt));
+            posApplied.add(`${i}:${ch}→${to}`);
           }
-          for (const [posKey, count] of Object.entries(learned.posWins || {})) {
-            const m = posKey.match(/^(\d+):(.+)→(.+)$/);
-            if (!m || parseInt(m[1]) !== i || m[2] !== ch) continue;
+          for (const { to, count } of (posWinLookup[`${i}:${ch}`] || [])) {
             if (count < weights.minObsWin) continue;
-            addBonus(i, m[3], Math.min(count * 0.25, weights.learnedPosWin));
-            posApplied.add(`${i}:${ch}→${m[3]}`);
+            addBonus(i, to, Math.min(count * 0.25, weights.learnedPosWin));
+            posApplied.add(`${i}:${ch}→${to}`);
           }
         }
       }
@@ -612,13 +644,6 @@ function buildPositionScores(allReadings, learned, weights) {
     }
   }
 
-  // Also compute scores for ±1 length as secondary
-  const altLens = Object.entries(lenCounts)
-    .sort((a, b) => b[1] - a[1])
-    .filter(([len]) => parseInt(len) !== targetLen)
-    .map(([len]) => parseInt(len))
-    .slice(0, 2);
-
   // Compute per-position confidence: ratio of top1 to top2 score
   // High ratio = clear winner, low ratio = ambiguous position
   let confidence = 1.0;
@@ -631,7 +656,7 @@ function buildPositionScores(allReadings, learned, weights) {
   // Normalize: confidence^(1/len) gives per-position average
   const avgConfidence = Math.pow(confidence, 1 / targetLen);
 
-  return { positions, targetLen, altLens, avgConfidence };
+  return { positions, targetLen, avgConfidence };
 }
 
 /**
@@ -639,7 +664,7 @@ function buildPositionScores(allReadings, learned, weights) {
  * Uses beam search: at each position, keep top-K candidates.
  */
 function generateScoredVariants(allReadings, learned, weights, maxTotal = 30) {
-  const { positions, targetLen, altLens, avgConfidence } = buildPositionScores(allReadings, learned, weights);
+  const { positions, targetLen, avgConfidence } = buildPositionScores(allReadings, learned, weights);
 
   // Log position analysis + confidence
   console.log(`[router] Confidence: ${(avgConfidence * 100).toFixed(0)}%`);
@@ -685,24 +710,7 @@ function generateScoredVariants(allReadings, learned, weights, maxTotal = 30) {
     }
   }
 
-  // Add raw readings that didn't match targetLen (high confidence originals)
-  for (const { text, weight } of allReadings) {
-    if (text.length !== targetLen && !seen.has(text) && isValidCaptcha(text)) {
-      seen.add(text);
-      result.push({ text, score: weight * 2 }); // raw readings get decent score
-    }
-  }
-
-  // Add length variants (±1) of top candidates
-  for (const item of result.slice(0, 5)) {
-    if (item.text.length > 4) {
-      const trimLast = item.text.substring(0, item.text.length - 1);
-      const trimFirst = item.text.substring(1);
-      if (!seen.has(trimLast)) { seen.add(trimLast); result.push({ text: trimLast, score: item.score * 0.5 }); }
-      if (!seen.has(trimFirst)) { seen.add(trimFirst); result.push({ text: trimFirst, score: item.score * 0.5 }); }
-    }
-  }
-
+  // All variants are exactly 6 chars (enforced by isValidCaptcha + targetLen=6)
   result.avgConfidence = avgConfidence;
   return result;
 }
@@ -714,8 +722,8 @@ function generateCrossSolverVariants(gptCandidates, capAnswer) {
   if (!capAnswer) return [];
 
   for (const gpt of gptCandidates) {
-    // Strict length match: ±1 length cross variants overwhelm length consensus
-    if (gpt.length !== capAnswer.length) continue;
+    // Allow ±1 length (cross variants excluded from length vote, so safe)
+    if (Math.abs(gpt.length - capAnswer.length) > 1) continue;
 
     const baseLen = Math.min(gpt.length, capAnswer.length);
     const diffPositions = [];
@@ -1006,39 +1014,26 @@ async function login() {
     recordSolverDiffs(allVisionCandidates, capAnswer, learned);
   }
 
-  // Build weighted readings from all 3 solvers
+  // Build weighted readings from all 3 solvers (isValidCaptcha enforces 6 a-z)
   const allReadings = [];
 
   if (capAnswer) {
     allReadings.push({ text: capAnswer, weight: weights.cap, source: 'capsolver' });
   }
 
-  // Length consensus: use CapSolver as reference if available
-  const refLen = capAnswer ? capAnswer.length : null;
-
   // Opus readings (highest weight)
   if (opusResult && opusResult.length > 0) {
-    const opusFiltered = refLen ? opusResult.filter(g => g.length === refLen) : opusResult;
-    const opusFinal = opusFiltered.length > 0 ? opusFiltered : opusResult;
-    if (refLen && opusFinal.length < opusResult.length) {
-      console.log(`[router] Opus length filter: ${opusResult.length}→${opusFinal.length} (ref=${refLen})`);
-    }
-    allReadings.push({ text: opusFinal[0], weight: weights.opusTop, source: 'opus-top' });
-    for (let i = 1; i < opusFinal.length; i++) {
-      allReadings.push({ text: opusFinal[i], weight: weights.opus, source: 'opus' });
+    allReadings.push({ text: opusResult[0], weight: weights.opusTop, source: 'opus-top' });
+    for (let i = 1; i < opusResult.length; i++) {
+      allReadings.push({ text: opusResult[i], weight: weights.opus, source: 'opus' });
     }
   }
 
   // GPT readings (lower weight)
   if (gptResult && gptResult.length > 0) {
-    const gptFiltered = refLen ? gptResult.filter(g => g.length === refLen) : gptResult;
-    const gptFinal = gptFiltered.length > 0 ? gptFiltered : gptResult;
-    if (refLen && gptFinal.length < gptResult.length) {
-      console.log(`[router] GPT length filter: ${gptResult.length}→${gptFinal.length} (ref=${refLen})`);
-    }
-    allReadings.push({ text: gptFinal[0], weight: weights.gptTop, source: 'gpt-top' });
-    for (let i = 1; i < gptFinal.length; i++) {
-      allReadings.push({ text: gptFinal[i], weight: weights.gpt, source: 'gpt' });
+    allReadings.push({ text: gptResult[0], weight: weights.gptTop, source: 'gpt-top' });
+    for (let i = 1; i < gptResult.length; i++) {
+      allReadings.push({ text: gptResult[i], weight: weights.gpt, source: 'gpt' });
     }
   }
 
@@ -1064,7 +1059,7 @@ async function login() {
   const candidateTexts = allReadings.map(r => r.text);
   const solverAnswers = { cap: capAnswer, gptTop: gptTopAnswer, opusTop: opusTopAnswer };
 
-  for (const { text: variant, score } of scoredVariants.slice(0, 7)) {
+  for (const { text: variant, score } of scoredVariants.slice(0, 10)) {
     if (manualCaptchaMode) return null; // Abort if user solving manually
     const encCap = passEnc2(Buffer.from(variant).toString('base64'), nVal, eVal);
     const formData = `page=web/intro.html&http_passwd=${encodeURIComponent(encPwd)}&captcha=${encodeURIComponent(encCap)}&captcha_image=${encodeURIComponent(captchaImage)}&e_val=${encodeURIComponent(eVal)}&n_val=${encodeURIComponent(nVal)}&lp_num=${lpNum}&hidden_action=Login`;
