@@ -227,7 +227,6 @@ function Dashboard() {
   const [showPowerMenu, setShowPowerMenu] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
   const [lastPowerAction, setLastPowerAction] = useState<string | null>(null);
-  const [routerLoggedIn, setRouterLoggedIn] = useState(false);
   const newProjInputRef = useRef<HTMLInputElement>(null);
   // Prevent server poll from overwriting optimistic session updates
   const sessionActionTime = useRef(0);
@@ -249,7 +248,6 @@ function Dashboard() {
         setSessions(data.sessions || []);
       }
       setLastPowerAction(isOnline ? null : data.lastAction || null);
-      setRouterLoggedIn(!!data.routerLoggedIn);
       // Show CAPTCHA progress from agent
       const af = actionFeedbackRef.current;
       if (data.captchaStatus) {
@@ -512,13 +510,11 @@ function Dashboard() {
         Refresh in {lastCheckedText}
       </p>
 
-      {/* Action Feedback / Router Status */}
+      {/* Action Feedback */}
       <div className="h-6 mt-3">
-        {actionFeedback ? (
+        {actionFeedback && (
           <p className="text-xs text-amber-400/80 animate-pulse">{actionFeedback}</p>
-        ) : status === "online" && routerLoggedIn ? (
-          <p className="text-xs text-emerald-400/60">Router ✓</p>
-        ) : null}
+        )}
       </div>
 
       {/* Quick Actions — only visible when PC is ON */}
@@ -749,12 +745,6 @@ function Dashboard() {
                 <div><span className="text-white/70">Projects</span> — Open project. <span className="text-red-400/70">Kills unprotected sessions</span></div>
               </div>
 
-              <div className="border-t border-white/10 pt-2 text-white/40 text-[10px]">Router Status</div>
-
-              <div className="flex items-start gap-2">
-                <span className="text-emerald-400/60 shrink-0 mt-0.5 text-[10px]">✓</span>
-                <div><span className="text-emerald-400/60">Router ✓</span> — Router session active (WOL via router API available)</div>
-              </div>
             </div>
           )}
         </div>
