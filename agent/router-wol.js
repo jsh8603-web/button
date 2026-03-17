@@ -446,22 +446,64 @@ function buildPositionScores(allReadings, learned, weights) {
     }
   }
 
-  // Add confusion alternatives with small weight (only for chars already seen by solvers)
+  // Snapshot solver-originated chars BEFORE learned/confusion additions
+  // Used to cap injection weight for chars no solver ever read
+  const solverChars = [];
   for (let i = 0; i < targetLen; i++) {
-    const existingChars = Object.keys(positions[i]);
-    for (const ch of existingChars) {
+    solverChars.push(new Set(Object.keys(positions[i])));
+  }
+
+  // Add confusion alternatives with dynamic weight (only for chars already seen by solvers)
+  const confW = (weights && weights.confusionBase) || 0.3;
+  for (let i = 0; i < targetLen; i++) {
+    for (const ch of solverChars[i]) {
       const alts = CONFUSIONS[ch] || [];
       for (const alt of alts) {
         if (alt.length === 1 && !positions[i][alt]) {
-          positions[i][alt] = 0.3;
+          positions[i][alt] = confW;
         }
       }
     }
   }
 
-  // Add learned confusion bonuses (only boost chars that already have some score)
-  // This prevents phantom candidates from appearing at positions where no solver saw them
+  // Add learned confusion bonuses: positional data (precise) + global fallback
+  // Key anti-pollution: chars not from any solver get hard-capped total weight
   if (learned && weights) {
+    // Accumulate learned bonuses into a separate map, then merge with caps
+    const learnedBonus = [];
+    for (let i = 0; i < targetLen; i++) learnedBonus.push({});
+
+    // Helper: accumulate bonus for position i, char `to`
+    const addBonus = (i, to, w) => {
+      learnedBonus[i][to] = (learnedBonus[i][to] || 0) + w;
+    };
+
+    // Step 1: Positional learned data (higher weight, position-specific)
+    // CRITICAL: Only derive bonuses from SOLVER-originated chars to prevent cascade amplification
+    // Confusion-map chars should NOT generate learned bonuses (they're speculative)
+    const posApplied = new Set();
+    if (learned.posDiffs || learned.posWins) {
+      for (let i = 0; i < targetLen; i++) {
+        for (const ch of solverChars[i]) {
+          for (const [posKey, count] of Object.entries(learned.posDiffs || {})) {
+            const m = posKey.match(/^(\d+):(.+)→(.+)$/);
+            if (!m || parseInt(m[1]) !== i || m[2] !== ch) continue;
+            if (count < weights.minObsPos) continue;
+            addBonus(i, m[3], Math.min(count * 0.15, weights.learnedPosGpt));
+            posApplied.add(`${i}:${ch}→${m[3]}`);
+          }
+          for (const [posKey, count] of Object.entries(learned.posWins || {})) {
+            const m = posKey.match(/^(\d+):(.+)→(.+)$/);
+            if (!m || parseInt(m[1]) !== i || m[2] !== ch) continue;
+            if (count < weights.minObsWin) continue;
+            addBonus(i, m[3], Math.min(count * 0.25, weights.learnedPosWin));
+            posApplied.add(`${i}:${ch}→${m[3]}`);
+          }
+        }
+      }
+    }
+
+    // Step 2: Global learned data as fallback (lower weight)
     const learnedLookup = {};
     for (const [key, count] of Object.entries(learned.gptToCap || {})) {
       const parts = key.split('→');
@@ -472,7 +514,6 @@ function buildPositionScores(allReadings, learned, weights) {
         learnedLookup[from].push({ to, weight: Math.min(count * 0.1, weights.learnedCapGpt) });
       }
     }
-    // Win mappings: higher weight, verified corrections
     for (const [key, count] of Object.entries(learned.winMappings || {})) {
       const parts = key.split('→');
       if (parts.length !== 2) continue;
@@ -484,18 +525,30 @@ function buildPositionScores(allReadings, learned, weights) {
     }
 
     for (let i = 0; i < targetLen; i++) {
-      const existingChars = Object.keys(positions[i]);
-      for (const ch of existingChars) {
+      // Only derive bonuses from solver-originated chars (prevent cascade amplification)
+      for (const ch of solverChars[i]) {
         const alts = learnedLookup[ch] || [];
         for (const { to, weight } of alts) {
-          // Only add bonus if target char already has some score from solvers or base confusions
-          // This prevents learned mappings from injecting phantom candidates (e.g. 'q' everywhere)
-          if (positions[i][to]) {
-            positions[i][to] += weight;
-          } else {
-            // New char from learned data: use reduced weight (25% of normal)
-            positions[i][to] = weight * 0.25;
-          }
+          if (posApplied.has(`${i}:${ch}→${to}`)) continue;
+          addBonus(i, to, weight);
+        }
+      }
+    }
+
+    // Step 3: Merge learned bonuses into positions with anti-pollution cap
+    // Chars from solvers: add full bonus. Chars NOT from solvers: cap at 15% of top solver score.
+    for (let i = 0; i < targetLen; i++) {
+      const topSolverScore = Math.max(...Object.values(positions[i]), 1);
+      const injectionCap = topSolverScore * 0.15; // max weight for non-solver chars
+
+      for (const [ch, bonus] of Object.entries(learnedBonus[i])) {
+        if (solverChars[i].has(ch)) {
+          // Solver-originated char: add full bonus
+          positions[i][ch] = (positions[i][ch] || 0) + bonus;
+        } else {
+          // Non-solver char: cap total injection weight
+          const existing = positions[i][ch] || 0;
+          positions[i][ch] = Math.min(existing + bonus, injectionCap);
         }
       }
     }
@@ -643,7 +696,8 @@ const LEARNED_FILE = path.join(__dirname, '.captcha-learned.json');
 function loadLearned() {
   const defaults = {
     gptToCap: {}, winMappings: {},
-    stats: { attempts: 0, successes: 0, capHits: 0, capTotal: 0, gptHits: 0, gptTotal: 0 },
+    posDiffs: {}, posWins: {},  // positional: "0:a→q" format
+    stats: { attempts: 0, successes: 0, capHits: 0, capTotal: 0, gptHits: 0, gptTotal: 0, capFails: 0 },
   };
   try {
     if (fs.existsSync(LEARNED_FILE)) {
@@ -651,10 +705,13 @@ function loadLearned() {
       const result = {
         gptToCap: data.gptToCap || {},
         winMappings: data.winMappings || {},
+        posDiffs: data.posDiffs || {},
+        posWins: data.posWins || {},
         stats: { ...defaults.stats, ...(data.stats || {}) },
       };
       const n = Object.keys(result.gptToCap).length;
-      if (n > 0) console.log(`[router] Loaded ${n} GPT→CapSolver confusion patterns`);
+      const np = Object.keys(result.posDiffs).length;
+      if (n > 0) console.log(`[router] Loaded ${n} global + ${np} positional confusion patterns`);
       return result;
     }
   } catch (err) {
@@ -673,44 +730,61 @@ function saveLearned(learned) {
 
 /**
  * Dynamic solver weights based on cumulative accuracy.
- * Starts with equal base weights, then adjusts as accuracy data accumulates.
- * Returns { cap, gptTop, gpt, cross, confusionBase, learnedCapGpt, learnedCapWin }
+ * ALL weights adapt to observed solver performance — no static values.
+ * Returns { cap, gptTop, gpt, cross, confusionBase, learnedCapGpt, learnedCapWin, learnedPosGpt, learnedPosWin, ... }
  */
 function getDynamicWeights(learned) {
   const s = learned.stats;
-  const MIN_SAMPLES = 5; // need at least 5 data points before adjusting
+  const MIN_SAMPLES = 5;
 
   // Base weights (used when insufficient data)
-  const BASE_CAP = 3, BASE_GPT_TOP = 3, BASE_GPT = 1, BASE_CROSS = 2;
-
-  let capW = BASE_CAP, gptTopW = BASE_GPT_TOP;
+  let capW = 3, gptTopW = 3, gptW = 1, crossW = 2, confusionW = 0.3;
 
   if (s.capTotal >= MIN_SAMPLES && s.gptTotal >= MIN_SAMPLES) {
     const capRate = s.capHits / s.capTotal;   // 0~1
     const gptRate = s.gptHits / s.gptTotal;   // 0~1
 
-    // Scale weights: 1.5 + 3.5 * accuracy  (range: 1.5 ~ 5.0)
+    // Primary solver weights: 1.5 + 3.5 * accuracy (range: 1.5 ~ 5.0)
     capW = 1.5 + 3.5 * capRate;
     gptTopW = 1.5 + 3.5 * gptRate;
 
-    console.log(`[router] Dynamic weights: cap=${capW.toFixed(1)} (${(capRate*100).toFixed(0)}% of ${s.capTotal}), gptTop=${gptTopW.toFixed(1)} (${(gptRate*100).toFixed(0)}% of ${s.gptTotal})`);
+    // Other GPT reads: scale proportionally (lower base, same ratio)
+    gptW = 0.5 + 1.5 * gptRate;
+
+    // Cross-solver weight: peaks when both solvers are decent but different
+    const minRate = Math.min(capRate, gptRate);
+    crossW = 1.0 + 2.0 * minRate;
+
+    // Confusion base: decreases as solver accuracy improves (less guessing needed)
+    const avgRate = (capRate + gptRate) / 2;
+    confusionW = Math.max(0.1, 0.5 - 0.3 * avgRate);
+
+    console.log(`[router] Dynamic weights: cap=${capW.toFixed(1)} (${(capRate*100).toFixed(0)}%), gptTop=${gptTopW.toFixed(1)} (${(gptRate*100).toFixed(0)}%), gpt=${gptW.toFixed(1)}, cross=${crossW.toFixed(1)}, conf=${confusionW.toFixed(2)}`);
   }
 
-  // Learned bonus caps scale with data confidence
-  // More successes → trust learned data more (cap: 0.5~2.0 for gptToCap, 0.5~3.0 for winMappings)
-  const dataConfidence = Math.min(s.successes / 10, 1.0); // 0~1, saturates at 10 wins
+  // Data confidence: log scale — grows gradually, saturates at ~50 wins
+  // log2(1+10)/log2(51) ≈ 0.61, log2(1+30)/log2(51) ≈ 0.88, log2(1+50)/log2(51) = 1.0
+  const dataConfidence = Math.min(Math.log2(1 + s.successes) / Math.log2(51), 1.0);
+
+  // Global learned data weights
   const learnedCapGpt = 0.5 + 1.5 * dataConfidence;      // 0.5 → 2.0
   const learnedCapWin = 0.5 + 2.5 * dataConfidence;      // 0.5 → 3.0
 
-  // Min observation threshold scales inversely with total attempts (more data → trust smaller counts)
+  // Positional learned data: higher weight (more precise signal)
+  const learnedPosGpt = 0.5 + 2.0 * dataConfidence;      // 0.5 → 2.5
+  const learnedPosWin = 0.5 + 3.5 * dataConfidence;      // 0.5 → 4.0
+
+  // Min observation thresholds
   const minObsGptToCap = s.attempts >= 20 ? 2 : 3;
-  const minObsWin = 1; // win data is always high-value
+  const minObsWin = 1;
+  const minObsPos = 1; // positional data is sparse, trust even 1 observation
 
   return {
-    cap: capW, gptTop: gptTopW, gpt: BASE_GPT, cross: BASE_CROSS,
-    confusionBase: 0.3,
+    cap: capW, gptTop: gptTopW, gpt: gptW, cross: crossW,
+    confusionBase: confusionW,
     learnedCapGpt, learnedCapWin,
-    minObsGptToCap, minObsWin,
+    learnedPosGpt, learnedPosWin,
+    minObsGptToCap, minObsWin, minObsPos,
   };
 }
 
@@ -722,23 +796,36 @@ function getDynamicWeights(learned) {
 function recordSolverDiffs(gptCandidates, capAnswer, learned) {
   if (!capAnswer || !gptCandidates || gptCandidates.length === 0) return;
 
+  if (!learned.posDiffs) learned.posDiffs = {};
+
   for (const gpt of gptCandidates) {
     if (gpt.length !== capAnswer.length) continue;
     for (let i = 0; i < gpt.length; i++) {
       if (gpt[i] !== capAnswer[i]) {
+        // Global (backward compat)
         const key = `${gpt[i]}→${capAnswer[i]}`;
         learned.gptToCap[key] = (learned.gptToCap[key] || 0) + 1;
+        // Positional
+        const posKey = `${i}:${key}`;
+        learned.posDiffs[posKey] = (learned.posDiffs[posKey] || 0) + 1;
       }
     }
   }
 
   learned.stats.attempts++;
 
-  // Prune: keep top 100 mappings by count, remove noise (count ≤ 1 if >80 entries)
+  // Prune global: remove noise (count ≤ 1 if >80 entries)
   const keys = Object.keys(learned.gptToCap);
   if (keys.length > 80) {
     for (const k of keys) {
       if (learned.gptToCap[k] <= 1) delete learned.gptToCap[k];
+    }
+  }
+  // Prune positional: remove noise (count ≤ 1 if >200 entries)
+  const posKeys = Object.keys(learned.posDiffs);
+  if (posKeys.length > 200) {
+    for (const k of posKeys) {
+      if (learned.posDiffs[k] <= 1) delete learned.posDiffs[k];
     }
   }
 
@@ -755,16 +842,21 @@ function recordSolverDiffs(gptCandidates, capAnswer, learned) {
  */
 function recordSuccess(candidates, winningVariant, learned, solverAnswers) {
   learned.stats.successes++;
+  if (!learned.posWins) learned.posWins = {};
 
   // Per-solver accuracy: did this solver's direct answer match the winning variant?
   if (solverAnswers) {
     if (solverAnswers.cap !== undefined) {
       learned.stats.capTotal = (learned.stats.capTotal || 0) + 1;
-      if (solverAnswers.cap === winningVariant) learned.stats.capHits = (learned.stats.capHits || 0) + 1;
+      if (solverAnswers.cap === winningVariant) {
+        learned.stats.capHits = (learned.stats.capHits || 0) + 1;
+      }
     }
     if (solverAnswers.gptTop !== undefined) {
       learned.stats.gptTotal = (learned.stats.gptTotal || 0) + 1;
-      if (solverAnswers.gptTop === winningVariant) learned.stats.gptHits = (learned.stats.gptHits || 0) + 1;
+      if (solverAnswers.gptTop === winningVariant) {
+        learned.stats.gptHits = (learned.stats.gptHits || 0) + 1;
+      }
     }
   }
 
@@ -772,8 +864,12 @@ function recordSuccess(candidates, winningVariant, learned, solverAnswers) {
     if (cand.length !== winningVariant.length) continue;
     for (let i = 0; i < cand.length; i++) {
       if (cand[i] !== winningVariant[i]) {
+        // Global (backward compat)
         const key = `${cand[i]}→${winningVariant[i]}`;
         learned.winMappings[key] = (learned.winMappings[key] || 0) + 1;
+        // Positional
+        const posKey = `${i}:${key}`;
+        learned.posWins[posKey] = (learned.posWins[posKey] || 0) + 1;
       }
     }
   }
@@ -830,6 +926,12 @@ async function login() {
   const capAnswer = capResult && capResult.length > 0 ? capResult[0] : null;
   const gptTopAnswer = gptResult && gptResult.length > 0 ? gptResult[0] : null;
 
+  // Track CapSolver failures
+  if (!capAnswer) {
+    learned.stats.capFails = (learned.stats.capFails || 0) + 1;
+    saveLearned(learned);
+  }
+
   // Record GPT↔CapSolver diffs on EVERY attempt (학습 — winning 불필요)
   if (capAnswer && gptResult && gptResult.length > 0) {
     recordSolverDiffs(gptResult, capAnswer, learned);
@@ -855,8 +957,12 @@ async function login() {
       console.log(`[router] GPT length filter: ${gptResult.length}→${gptFinal.length} (ref=${refLen})`);
     }
     allReadings.push({ text: gptFinal[0], weight: weights.gptTop, source: 'gpt-top' });
+    // Cap total non-top GPT weight: don't let GPT consensus overwhelm CapSolver
+    // Total non-top GPT weight capped at cap weight (prevents 4 GPT reads from 2x-ing CapSolver)
+    const maxNonTopTotal = weights.cap;
+    const perGptW = gptFinal.length > 1 ? Math.min(weights.gpt, maxNonTopTotal / (gptFinal.length - 1)) : weights.gpt;
     for (let i = 1; i < gptFinal.length; i++) {
-      allReadings.push({ text: gptFinal[i], weight: weights.gpt, source: 'gpt' });
+      allReadings.push({ text: gptFinal[i], weight: perGptW, source: 'gpt' });
     }
   }
 
