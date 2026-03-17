@@ -41,10 +41,10 @@ const HEADERS = {
 
 // --- HTTP helper (matches proven router-login.js pattern) ---
 
-function httpReq(method, reqPath, body, cookie) {
+function httpReq(method, reqPath, body, cookie, hostOverride, portOverride) {
   return new Promise((resolve, reject) => {
     const opts = {
-      hostname: ROUTER_IP, port: 80, path: reqPath, method,
+      hostname: hostOverride || ROUTER_IP, port: portOverride || 80, path: reqPath, method,
       headers: { ...HEADERS },
     };
     if (cookie) opts.headers.Cookie = cookie;
@@ -956,23 +956,27 @@ function recordSuccess(candidates, winningVariant, learned, solverAnswers) {
 
 // --- Router login flow ---
 
-async function login() {
+async function login(host, port) {
   const password = process.env.ROUTER_PASSWORD;
   if (!password) {
     console.error('[router] ROUTER_PASSWORD not set, skipping login');
     return null;
   }
 
+  const h = host || undefined;
+  const p = port || undefined;
+  const tag = host ? `external(${host}:${port})` : 'local';
+
   initVM();
 
   // Step 0: Visit intro page first (initializes CAPTCHA session on router)
   // Track session cookie across requests (browser-like behavior)
   let sessionCookie = '';
-  const introRes = await httpReq('GET', '/web/intro.html');
+  const introRes = await httpReq('GET', '/web/intro.html', null, null, h, p);
   if (introRes.setCookie) sessionCookie = introRes.setCookie;
 
   // Step 1: Fetch CAPTCHA params
-  const r1 = await httpReq('GET', '/web/public_data.html?func=get_captcha(intro)', null, sessionCookie || undefined);
+  const r1 = await httpReq('GET', '/web/public_data.html?func=get_captcha(intro)', null, sessionCookie || undefined, h, p);
   if (r1.setCookie) sessionCookie = r1.setCookie;
   const parts = r1.data.toString().split('&');
   if (parts.length < 4) throw new Error(`Bad CAPTCHA response: ${r1.data.toString().substring(0, 200)}`);
@@ -989,9 +993,9 @@ async function login() {
   }
 
   // Step 2: Download CAPTCHA image (with session cookie)
-  const imgRes = await httpReq('GET', '/' + imgPath, null, sessionCookie || undefined);
+  const imgRes = await httpReq('GET', '/' + imgPath, null, sessionCookie || undefined, h, p);
   if (imgRes.setCookie) sessionCookie = imgRes.setCookie;
-  console.log('[router] CAPTCHA fetched, solving...');
+  console.log(`[router][${tag}] CAPTCHA fetched, solving...`);
 
   // --- Phase 1: GPT + Opus + CapSolver parallel (3-solver architecture) ---
   const processedForCap = await preprocessImage(imgRes.data);
@@ -1077,15 +1081,15 @@ async function login() {
   const encCap = passEnc2(Buffer.from(bestVariant.text).toString('base64'), nVal, eVal);
   const formData = `page=web/intro.html&http_passwd=${encodeURIComponent(encPwd)}&captcha=${encodeURIComponent(encCap)}&captcha_image=${encodeURIComponent(captchaImage)}&e_val=${encodeURIComponent(eVal)}&n_val=${encodeURIComponent(nVal)}&lp_num=${lpNum}&hidden_action=Login`;
 
-  const loginRes = await httpReq('POST', '/web/intro.html', formData, sessionCookie || undefined);
+  const loginRes = await httpReq('POST', '/web/intro.html', formData, sessionCookie || undefined, h, p);
 
   if (loginRes.setCookie) {
-    console.log(`[router] Login success with "${bestVariant.text}" (s=${bestVariant.score.toFixed(1)})!`);
+    console.log(`[router][${tag}] Login success with "${bestVariant.text}" (s=${bestVariant.score.toFixed(1)})!`);
     recordSuccess(candidateTexts, bestVariant.text, learned, solverAnswers);
     return loginRes.setCookie;
   }
 
-  throw new Error(`Login failed with "${bestVariant.text}" — CAPTCHA single-use, need fresh one`);
+  throw new Error(`[${tag}] Login failed with "${bestVariant.text}" — CAPTCHA single-use, need fresh one`);
 }
 
 /**
@@ -1100,36 +1104,41 @@ function setManualCaptchaMode(on) {
   else console.log('[router] Manual CAPTCHA mode OFF — auto-login resumed');
 }
 
-async function loginWithRetry(maxRetries = 10, onProgress = null) {
+async function loginWithRetry(maxRetries = 10, onProgress = null, host, port) {
   if (loginInProgress) return loginInProgress;
-  loginInProgress = _loginWithRetry(maxRetries, onProgress).finally(() => { loginInProgress = null; });
+  loginInProgress = _loginWithRetry(maxRetries, onProgress, host, port).finally(() => { loginInProgress = null; });
   return loginInProgress;
 }
 
-async function _loginWithRetry(maxRetries, onProgress) {
+async function _loginWithRetry(maxRetries, onProgress, host, port) {
+  const tag = host ? `external(${host}:${port})` : 'local';
   let consecutiveFails = 0;
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     // Abort auto-login if user is solving manually
     if (manualCaptchaMode) {
-      console.log(`[router] Auto-login aborted (manual CAPTCHA mode)`);
+      console.log(`[router][${tag}] Auto-login aborted (manual CAPTCHA mode)`);
       if (onProgress) onProgress('');
       return null;
     }
     try {
-      console.log(`[router] Login attempt ${attempt}/${maxRetries}...`);
+      console.log(`[router][${tag}] Login attempt ${attempt}/${maxRetries}...`);
       if (onProgress) onProgress(`Solving CAPTCHA (${attempt}/${maxRetries})`);
 
-      const cookie = await login();
+      const cookie = await login(host, port);
       if (cookie) {
-        currentCookie = cookie;
-        lastLoginTime = Date.now();
+        if (!host) {
+          currentCookie = cookie;
+          lastLoginTime = Date.now();
+        } else {
+          externalCookie = cookie;
+        }
         if (onProgress) onProgress('CAPTCHA solved!');
         return cookie;
       }
     } catch (err) {
       consecutiveFails++;
-      console.error(`[router] Login attempt ${attempt} failed: ${err.message}`);
+      console.error(`[router][${tag}] Login attempt ${attempt} failed: ${err.message}`);
       // If lpNum too high, stop immediately and suggest manual solving
       if (err.message.includes('lpNum=')) {
         if (onProgress) onProgress('CAPTCHA failed — solve manually');
@@ -1140,7 +1149,7 @@ async function _loginWithRetry(maxRetries, onProgress) {
       }
     }
   }
-  console.error(`[router] All ${maxRetries} login attempts failed`);
+  console.error(`[router][${tag}] All ${maxRetries} login attempts failed`);
   if (onProgress) onProgress('CAPTCHA failed — solve manually');
   return null;
 }
@@ -1223,6 +1232,37 @@ function getCookie() {
   return currentCookie;
 }
 
+// External cookie for port 88 (WAN) — separate session from port 80 (LAN)
+let externalCookie = null;
+
+function getExternalCookie() {
+  return externalCookie;
+}
+
+/**
+ * Login to router via external IP:88 (WAN port).
+ * Router binds sessions to IP, so LAN cookie doesn't work from Vercel.
+ * This creates a separate session for Cron keepalive and WOL API.
+ */
+async function loginExternal(onProgress = null) {
+  const externalHost = process.env.PC_HOST;
+  if (!externalHost) {
+    console.log('[router] No PC_HOST — skipping external login');
+    return null;
+  }
+
+  let externalIp;
+  try {
+    const dns = require('dns/promises');
+    const addrs = await dns.resolve4(externalHost);
+    externalIp = addrs[0];
+  } catch {
+    externalIp = externalHost;
+  }
+
+  return await loginWithRetry(10, onProgress, externalIp, 88);
+}
+
 /**
  * Refresh router cookie right before sleep/hibernate.
  * If current session is alive, just return it (no CAPTCHA needed).
@@ -1233,12 +1273,20 @@ async function refreshBeforeSleep(onProgress = null) {
     const alive = await keepAlive();
     if (alive) {
       console.log('[router] Pre-sleep: session alive — reusing current cookie');
+      // Also refresh external cookie for Cron keepalive during sleep
+      if (!externalCookie) {
+        try { await loginExternal(); } catch {}
+      }
       if (onProgress) onProgress('CAPTCHA 성공');
       return currentCookie;
     }
     console.log('[router] Pre-sleep: session expired — re-logging in...');
   }
-  return await loginWithRetry(10, onProgress);
+  const cookie = await loginWithRetry(10, onProgress);
+  if (cookie) {
+    try { await loginExternal(); } catch {}
+  }
+  return cookie;
 }
 
 // Cache solver candidates for manual CAPTCHA learning
@@ -1368,4 +1416,4 @@ async function submitManualCaptcha(answer, params) {
   }
 }
 
-module.exports = { initRouterSession, heartbeatKeepAlive, getCookie, refreshBeforeSleep, fetchManualCaptcha, submitManualCaptcha, setManualCaptchaMode, login, _resetCookie: () => { currentCookie = null; }, _initVM: initVM, _passEnc2: passEnc2 };
+module.exports = { initRouterSession, heartbeatKeepAlive, getCookie, getExternalCookie, loginExternal, refreshBeforeSleep, fetchManualCaptcha, submitManualCaptcha, setManualCaptchaMode, login, _resetCookie: () => { currentCookie = null; }, _initVM: initVM, _passEnc2: passEnc2 };

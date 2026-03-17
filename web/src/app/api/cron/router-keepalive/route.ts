@@ -49,10 +49,9 @@ export async function GET(request: NextRequest) {
 
     // Check if session is still alive
     if (text.length < 1000 || text.includes("intro.html")) {
-      // Session expired — remove stale cookie from KV
-      await kvDel(KEYS.routerCookie);
-      console.log(`[cron/router-keepalive] Session expired (len=${text.length}) — cookie removed from KV`);
-      return NextResponse.json({ ok: true, action: "expired", detail: "session-expired, cookie removed" });
+      // Don't delete cookie — agent may still have valid session on port 80
+      console.log(`[cron/router-keepalive] Session not valid via port 88 (len=${text.length}, status=${res.status}, snippet=${text.substring(0, 100)})`);
+      return NextResponse.json({ ok: false, action: "session-invalid", detail: `len=${text.length}, status=${res.status}` });
     }
 
     // Session alive — refresh TTL (86400s = 24h)

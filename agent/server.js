@@ -5,7 +5,7 @@ const { exec } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 require('dotenv').config({ path: path.join(__dirname, '.env') });
-const { initRouterSession, heartbeatKeepAlive, getCookie, refreshBeforeSleep, fetchManualCaptcha, submitManualCaptcha, setManualCaptchaMode } = require('./router-wol');
+const { initRouterSession, heartbeatKeepAlive, getCookie, getExternalCookie, refreshBeforeSleep, loginExternal, fetchManualCaptcha, submitManualCaptcha, setManualCaptchaMode } = require('./router-wol');
 
 const app = express();
 const PORT = process.env.PORT || 9876;
@@ -714,7 +714,7 @@ async function sendHeartbeat() {
         uptime: process.uptime(),
         projects: getProjectList(),
         sessions,
-        routerCookie,
+        routerCookie: getExternalCookie() || routerCookie,
         routerLoggedIn: !!getCookie(),
       }),
       signal: AbortSignal.timeout(10_000),
@@ -812,8 +812,22 @@ app.listen(PORT, async () => {
 
   // Initialize router session — uses KV cookie if available, else CAPTCHA login
   const bootProgress = (msg) => setCaptchaStatus(msg);
-  initRouterSession(storedRouterCookie, bootProgress).then(cookie => {
-    if (cookie) setCaptchaStatus('');
+  initRouterSession(storedRouterCookie, bootProgress).then(async cookie => {
+    if (cookie) {
+      setCaptchaStatus('');
+      // Also login via external IP:88 for Cron keepalive and WOL API
+      try {
+        const extCookie = await loginExternal((msg) => setCaptchaStatus(`External: ${msg}`));
+        if (extCookie) {
+          console.log('[boot] External router login success');
+          setCaptchaStatus('');
+        } else {
+          console.log('[boot] External router login failed — Cron keepalive may not work');
+        }
+      } catch (err) {
+        console.error('[boot] External router login error:', err.message);
+      }
+    }
   }).catch(err => {
     console.error('[boot] Router login failed:', err.message);
   });
