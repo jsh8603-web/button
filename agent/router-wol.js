@@ -314,22 +314,22 @@ async function solveCaptchaCapSolver(imageBuffer) {
 const BASE_CONFUSIONS = {
   'i': ['j', 'l', '1', 't'], 'j': ['i', 'l', '1'],
   'l': ['i', 'j', '1', 't'], '1': ['i', 'l', 'j', '7'],
-  'c': ['s', 'e', 'o', 'a'], 's': ['c', 'e', '5', 'z'],
-  'b': ['d', 'h', '6', '8', 'u', 'k'], 'd': ['b', 'a', 'o'],
+  'c': ['s', 'e', 'o', 'a', 'q'], 's': ['c', 'e', '5', 'z', 'd'],
+  'b': ['d', 'h', '6', '8', 'u', 'k'], 'd': ['b', 'a', 'o', 'z', 's'],
   'p': ['q', 'g', '9'], 'q': ['p', 'g', 'a', '9'],
-  'n': ['h', 'r', 'm', 'u'], 'h': ['n', 'b', 'k', 'l'],
+  'n': ['h', 'r', 'm', 'u'], 'h': ['n', 'b', 'k', 'l', 'f'],
   'v': ['y', 'u', 'w'], 'y': ['v', 'u', 'j'],
   'u': ['v', 'n', 'a', 'b'], 'a': ['o', 'e', 'q', 'u', 'd', 'g'],
-  'o': ['a', 'c', '0', 'e', 'q'], 'e': ['c', 'a', 'o', '3'],
+  'o': ['a', 'c', '0', 'e', 'q'], 'e': ['c', 'a', 'o', '3', 'd'],
   'r': ['n', 't', 'v'], 't': ['r', 'f', '7', 'l', 'i'],
-  'k': ['h', 'x', 'b'], 'f': ['t', 'r', '7'],
-  'g': ['q', 'p', '9', 'a', 'u'],
-  '0': ['o', 'a', 'c'], '2': ['z', 'a'],
-  '3': ['e', '8'], '4': ['a'],
+  'k': ['h', 'x', 'b'], 'f': ['t', 'r', '7', 'j'],
+  'g': ['q', 'p', '9', 'a', 'u', 'f'],
+  '0': ['o', 'a', 'c', 'q', 's'], '2': ['z', 'a', 'q'],
+  '3': ['e', '8'], '4': ['a', 'f', 'q'],
   '5': ['s', 'c', '6'], '6': ['b', 'g', '5'],
-  '7': ['t', 'f', '1'], '8': ['b', '3', '6'],
+  '7': ['t', 'f', '1', 's'], '8': ['b', '3', '6'],
   '9': ['g', 'q', 'p', 'a'],
-  'z': ['2', 's'], 'w': ['v'],
+  'z': ['2', 's', 'd'], 'w': ['v'],
   'm': ['n'], 'x': ['k', 'z'],
 };
 
@@ -801,9 +801,20 @@ async function login() {
   }
 
   if (gptResult && gptResult.length > 0) {
-    allReadings.push({ text: gptResult[0], weight: weights.gptTop, source: 'gpt-top' });
-    for (let i = 1; i < gptResult.length; i++) {
-      allReadings.push({ text: gptResult[i], weight: weights.gpt, source: 'gpt' });
+    // Length consensus: if CapSolver gives a reference length, filter GPT candidates
+    // GPT often returns inconsistent lengths (5-7), CapSolver is consistent
+    const refLen = capAnswer ? capAnswer.length : null;
+    const gptFiltered = refLen
+      ? gptResult.filter(g => g.length === refLen)
+      : gptResult;
+    // Use filtered list if non-empty, otherwise fall back to original
+    const gptFinal = gptFiltered.length > 0 ? gptFiltered : gptResult;
+    if (refLen && gptFinal.length < gptResult.length) {
+      console.log(`[router] GPT length filter: ${gptResult.length}→${gptFinal.length} (ref=${refLen})`);
+    }
+    allReadings.push({ text: gptFinal[0], weight: weights.gptTop, source: 'gpt-top' });
+    for (let i = 1; i < gptFinal.length; i++) {
+      allReadings.push({ text: gptFinal[i], weight: weights.gpt, source: 'gpt' });
     }
   }
 
@@ -828,7 +839,7 @@ async function login() {
   const candidateTexts = allReadings.map(r => r.text);
   const solverAnswers = { cap: capAnswer, gptTop: gptTopAnswer };
 
-  for (const { text: variant, score } of scoredVariants.slice(0, 2)) {
+  for (const { text: variant, score } of scoredVariants.slice(0, 3)) {
     if (manualCaptchaMode) return null; // Abort if user solving manually
     const encCap = passEnc2(Buffer.from(variant).toString('base64'), nVal, eVal);
     const formData = `page=web/intro.html&http_passwd=${encodeURIComponent(encPwd)}&captcha=${encodeURIComponent(encCap)}&captcha_image=${encodeURIComponent(captchaImage)}&e_val=${encodeURIComponent(eVal)}&n_val=${encodeURIComponent(nVal)}&lp_num=${lpNum}&hidden_action=Login`;
@@ -846,7 +857,7 @@ async function login() {
   if (manualCaptchaMode) return null;
   console.log('[router] Phase 1 failed, trying CapSolver-only fallback (2 attempts)...');
 
-  for (let fb = 1; fb <= 1; fb++) {
+  for (let fb = 1; fb <= 2; fb++) {
     if (manualCaptchaMode) return null;
     try {
       // Fetch fresh CAPTCHA for each fallback attempt
@@ -883,9 +894,9 @@ async function login() {
         }
       }
 
-      console.log(`[router] Fallback ${fb}/3: CapSolver="${fbAnswer}" + ${fbVariants.length - 1} variants`);
+      console.log(`[router] Fallback ${fb}/2: CapSolver="${fbAnswer}" + ${fbVariants.length - 1} variants`);
 
-      for (const variant of fbVariants.slice(0, 2)) {
+      for (const variant of fbVariants.slice(0, 3)) {
         if (manualCaptchaMode) return null;
         const encCap = passEnc2(Buffer.from(variant).toString('base64'), fbNVal, fbEVal);
         const formData = `page=web/intro.html&http_passwd=${encodeURIComponent(fbEncPwd)}&captcha=${encodeURIComponent(encCap)}&captcha_image=${encodeURIComponent(fbCaptchaImage)}&e_val=${encodeURIComponent(fbEVal)}&n_val=${encodeURIComponent(fbNVal)}&lp_num=${fbLpNum}&hidden_action=Login`;
@@ -923,7 +934,7 @@ function setManualCaptchaMode(on) {
   else console.log('[router] Manual CAPTCHA mode OFF — auto-login resumed');
 }
 
-async function loginWithRetry(maxRetries = 2, onProgress = null) {
+async function loginWithRetry(maxRetries = 5, onProgress = null) {
   if (loginInProgress) return loginInProgress;
   loginInProgress = _loginWithRetry(maxRetries, onProgress).finally(() => { loginInProgress = null; });
   return loginInProgress;
@@ -1007,7 +1018,7 @@ async function initRouterSession(storedCookie, onProgress = null) {
     currentCookie = null;
   }
 
-  return await loginWithRetry(2, onProgress);
+  return await loginWithRetry(5, onProgress);
 }
 
 let heartbeatLoginFailed = false;
@@ -1030,7 +1041,7 @@ async function heartbeatKeepAlive(onProgress = null) {
     return null;
   }
   // No cookie and no login in progress — start login but don't block heartbeat
-  loginWithRetry(2, onProgress).then(cookie => {
+  loginWithRetry(5, onProgress).then(cookie => {
     if (!cookie) heartbeatLoginFailed = true;
     else if (onProgress) onProgress('');
   }).catch(err => {
@@ -1059,7 +1070,7 @@ async function refreshBeforeSleep(onProgress = null) {
     }
     console.log('[router] Pre-sleep: session expired — re-logging in...');
   }
-  return await loginWithRetry(2, onProgress);
+  return await loginWithRetry(5, onProgress);
 }
 
 // Cache solver candidates for manual CAPTCHA learning
