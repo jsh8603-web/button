@@ -500,7 +500,19 @@ function buildPositionScores(allReadings, learned, weights) {
     .map(([len]) => parseInt(len))
     .slice(0, 2);
 
-  return { positions, targetLen, altLens };
+  // Compute per-position confidence: ratio of top1 to top2 score
+  // High ratio = clear winner, low ratio = ambiguous position
+  let confidence = 1.0;
+  for (let i = 0; i < targetLen; i++) {
+    const sorted = Object.entries(positions[i]).sort((a, b) => b[1] - a[1]);
+    if (sorted.length >= 2 && sorted[0][1] > 0) {
+      confidence *= (sorted[0][1] / (sorted[0][1] + sorted[1][1]));
+    }
+  }
+  // Normalize: confidence^(1/len) gives per-position average
+  const avgConfidence = Math.pow(confidence, 1 / targetLen);
+
+  return { positions, targetLen, altLens, avgConfidence };
 }
 
 /**
@@ -508,9 +520,10 @@ function buildPositionScores(allReadings, learned, weights) {
  * Uses beam search: at each position, keep top-K candidates.
  */
 function generateScoredVariants(allReadings, learned, weights, maxTotal = 30) {
-  const { positions, targetLen, altLens } = buildPositionScores(allReadings, learned, weights);
+  const { positions, targetLen, altLens, avgConfidence } = buildPositionScores(allReadings, learned, weights);
 
-  // Log position analysis
+  // Log position analysis + confidence
+  console.log(`[router] Confidence: ${(avgConfidence * 100).toFixed(0)}%`);
   for (let i = 0; i < targetLen; i++) {
     const sorted = Object.entries(positions[i]).sort((a, b) => b[1] - a[1]).slice(0, 5);
     const display = sorted.map(([ch, sc]) => `${ch}:${sc.toFixed(1)}`).join(' ');
@@ -571,6 +584,7 @@ function generateScoredVariants(allReadings, learned, weights, maxTotal = 30) {
     }
   }
 
+  result.avgConfidence = avgConfidence;
   return result;
 }
 
@@ -851,7 +865,15 @@ async function login() {
 
   // Generate scored variants and try login
   const scoredVariants = generateScoredVariants(allReadings, learned, weights);
-  console.log(`[router] Phase 1: ${scoredVariants.length} scored variants (top: "${scoredVariants[0]?.text}" s=${scoredVariants[0]?.score.toFixed(1)})`);
+  const conf = scoredVariants.avgConfidence || 0;
+  console.log(`[router] Phase 1: ${scoredVariants.length} variants (top: "${scoredVariants[0]?.text}" s=${scoredVariants[0]?.score.toFixed(1)}, conf=${(conf*100).toFixed(0)}%)`);
+
+  // Skip hard CAPTCHAs: if confidence too low, don't waste attempts — fetch a new one
+  const SKIP_THRESHOLD = 0.55;
+  if (conf < SKIP_THRESHOLD) {
+    console.log(`[router] Confidence ${(conf*100).toFixed(0)}% < ${SKIP_THRESHOLD*100}% — skipping hard CAPTCHA`);
+    throw new Error('low-confidence CAPTCHA skipped');
+  }
 
   const captchaImage = imgPath.split('/')[1].split('.')[0];
   const encPwd = passEnc2(password, nVal, eVal);
@@ -988,6 +1010,10 @@ async function _loginWithRetry(maxRetries, onProgress) {
       if (err.message.includes('lpNum=')) {
         if (onProgress) onProgress('CAPTCHA failed — solve manually');
         return null;
+      }
+      // Skip low-confidence CAPTCHAs immediately (no delay needed)
+      if (err.message.includes('low-confidence')) {
+        if (attempt < maxRetries) continue;
       }
       if (attempt < maxRetries) {
         await new Promise(r => setTimeout(r, 2000));
@@ -1214,4 +1240,4 @@ async function submitManualCaptcha(answer, params) {
   }
 }
 
-module.exports = { initRouterSession, heartbeatKeepAlive, getCookie, refreshBeforeSleep, fetchManualCaptcha, submitManualCaptcha, setManualCaptchaMode, login, _resetCookie: () => { currentCookie = null; } };
+module.exports = { initRouterSession, heartbeatKeepAlive, getCookie, refreshBeforeSleep, fetchManualCaptcha, submitManualCaptcha, setManualCaptchaMode, login, _resetCookie: () => { currentCookie = null; }, _initVM: initVM, _passEnc2: passEnc2 };
