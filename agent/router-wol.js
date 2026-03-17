@@ -280,7 +280,7 @@ async function solveCaptchaClaude(imageBuffer) {
   // 3 parallel reads: 2x low temp (precision) + 1x grounding prompt
   const readConfigs = [
     { temp: 0.2, system: CAPTCHA_SYSTEM_PROMPT, user: CAPTCHA_USER_PROMPT },
-    { temp: 0.2, system: CAPTCHA_SYSTEM_PROMPT, user: CAPTCHA_USER_PROMPT },
+    { temp: 0.3, system: CAPTCHA_SYSTEM_PROMPT, user: CAPTCHA_USER_PROMPT },
     { temp: 0.2, system: CAPTCHA_SYSTEM_PROMPT, user: CAPTCHA_GROUNDING_PROMPT, maxTokens: 200 },
   ];
 
@@ -481,9 +481,11 @@ const CONFUSIONS = buildConfusions();
  *   - Confusion map alternatives: 0.3 points
  */
 function buildPositionScores(allReadings, learned, weights) {
-  // Determine target length (weighted majority vote — higher-weight sources have more say)
+  // Determine target length from PRIMARY solvers only (exclude cross-solver variants)
+  // Cross variants inherit length from their inputs and should not shift length consensus
   const lenCounts = {};
-  for (const { text, weight } of allReadings) {
+  for (const { text, weight, source } of allReadings) {
+    if (source === 'cross') continue; // exclude from length vote
     lenCounts[text.length] = (lenCounts[text.length] || 0) + weight;
   }
   const targetLen = parseInt(Object.entries(lenCounts).sort((a, b) => b[1] - a[1])[0][0]);
@@ -712,8 +714,8 @@ function generateCrossSolverVariants(gptCandidates, capAnswer) {
   if (!capAnswer) return [];
 
   for (const gpt of gptCandidates) {
-    // Only compare same-length reads (or ±1)
-    if (Math.abs(gpt.length - capAnswer.length) > 1) continue;
+    // Strict length match: ±1 length cross variants overwhelm length consensus
+    if (gpt.length !== capAnswer.length) continue;
 
     const baseLen = Math.min(gpt.length, capAnswer.length);
     const diffPositions = [];
@@ -767,7 +769,8 @@ function loadLearned() {
       };
       const n = Object.keys(result.gptToCap).length;
       const np = Object.keys(result.posDiffs).length;
-      if (n > 0) console.log(`[router] Loaded ${n} global + ${np} positional confusion patterns`);
+      const nw = Object.keys(result.posWins).length;
+      if (n > 0) console.log(`[router] Loaded ${n} global + ${np} pos-diffs + ${nw} pos-wins patterns`);
       return result;
     }
   } catch (err) {
@@ -786,21 +789,23 @@ function saveLearned(learned) {
 
 /**
  * Dynamic solver weights based on cumulative accuracy.
- * 3-solver architecture: GPT-4o-mini (2 reads) + Claude Opus (3 reads) + CapSolver (1 read)
+ * 3-solver architecture: GPT-4o-mini (2 reads) + Claude Opus (3 reads) + CapSolver (1)
  * ALL weights adapt to observed solver performance — no static values.
  */
 function getDynamicWeights(learned) {
   const s = learned.stats;
-  const MIN_SAMPLES = 5;
-
   // Base weights: Opus starts highest (best observed accuracy), then Cap, then GPT
   let capW = 3, opusTopW = 4, opusW = 2, gptTopW = 2, gptW = 1, crossW = 2, confusionW = 0.3;
 
-  const capRate = s.capTotal >= MIN_SAMPLES ? s.capHits / s.capTotal : 0.73;     // default from historical
-  const gptRate = s.gptTotal >= MIN_SAMPLES ? s.gptHits / s.gptTotal : 0.45;     // default from historical
-  const opusRate = s.opusTotal >= MIN_SAMPLES ? s.opusHits / s.opusTotal : 0.80;  // default: high (10/10 observed)
+  // Bayesian smoothed accuracy: blend prior belief with observed data
+  // Prior weight = 10 virtual samples — prevents volatile swings from small samples
+  // As real samples grow, prior influence shrinks (e.g., 84 cap samples → prior is ~11% of estimate)
+  const PRIOR_WEIGHT = 10;
+  const capRate = (0.73 * PRIOR_WEIGHT + (s.capHits || 0)) / (PRIOR_WEIGHT + (s.capTotal || 0));
+  const gptRate = (0.45 * PRIOR_WEIGHT + (s.gptHits || 0)) / (PRIOR_WEIGHT + (s.gptTotal || 0));
+  const opusRate = (0.80 * PRIOR_WEIGHT + (s.opusHits || 0)) / (PRIOR_WEIGHT + (s.opusTotal || 0));
 
-  if (s.capTotal >= MIN_SAMPLES || s.gptTotal >= MIN_SAMPLES || s.opusTotal >= MIN_SAMPLES) {
+  if ((s.capTotal || 0) >= 5 || (s.gptTotal || 0) >= 5 || (s.opusTotal || 0) >= 5) {
     // Primary solver weights: 1.5 + 3.5 * accuracy (range: 1.5 ~ 5.0)
     capW = 1.5 + 3.5 * capRate;
     opusTopW = 1.5 + 3.5 * opusRate;
@@ -810,9 +815,9 @@ function getDynamicWeights(learned) {
     opusW = 0.5 + 2.0 * opusRate;
     gptW = 0.5 + 1.5 * gptRate;
 
-    // Cross-solver weight: based on weakest solver (diversity value)
-    const minRate = Math.min(capRate, gptRate, opusRate);
-    crossW = 1.0 + 2.0 * minRate;
+    // Cross-solver weight: based on cap+opus avg (primary solvers, GPT too volatile)
+    const primaryAvg = (capRate + opusRate) / 2;
+    crossW = 1.0 + 2.0 * primaryAvg;
 
     // Confusion base: decreases as solver accuracy improves
     const avgRate = (capRate + gptRate + opusRate) / 3;
@@ -880,9 +885,9 @@ function recordSolverDiffs(visionCandidates, capAnswer, learned) {
       if (learned.gptToCap[k] <= 1) delete learned.gptToCap[k];
     }
   }
-  // Prune positional: remove noise (count ≤ 1 if >200 entries)
+  // Prune positional: remove noise (count ≤ 1 if >500 entries)
   const posKeys = Object.keys(learned.posDiffs);
-  if (posKeys.length > 200) {
+  if (posKeys.length > 500) {
     for (const k of posKeys) {
       if (learned.posDiffs[k] <= 1) delete learned.posDiffs[k];
     }
