@@ -446,7 +446,7 @@ function buildPositionScores(allReadings, learned, weights) {
     }
   }
 
-  // Add confusion alternatives with small weight
+  // Add confusion alternatives with small weight (only for chars already seen by solvers)
   for (let i = 0; i < targetLen; i++) {
     const existingChars = Object.keys(positions[i]);
     for (const ch of existingChars) {
@@ -459,7 +459,8 @@ function buildPositionScores(allReadings, learned, weights) {
     }
   }
 
-  // Add learned confusion bonuses (dynamic caps based on data confidence)
+  // Add learned confusion bonuses (only boost chars that already have some score)
+  // This prevents phantom candidates from appearing at positions where no solver saw them
   if (learned && weights) {
     const learnedLookup = {};
     for (const [key, count] of Object.entries(learned.gptToCap || {})) {
@@ -487,7 +488,14 @@ function buildPositionScores(allReadings, learned, weights) {
       for (const ch of existingChars) {
         const alts = learnedLookup[ch] || [];
         for (const { to, weight } of alts) {
-          positions[i][to] = (positions[i][to] || 0) + weight;
+          // Only add bonus if target char already has some score from solvers or base confusions
+          // This prevents learned mappings from injecting phantom candidates (e.g. 'q' everywhere)
+          if (positions[i][to]) {
+            positions[i][to] += weight;
+          } else {
+            // New char from learned data: use reduced weight (25% of normal)
+            positions[i][to] = weight * 0.25;
+          }
         }
       }
     }
@@ -874,7 +882,7 @@ async function login() {
   const candidateTexts = allReadings.map(r => r.text);
   const solverAnswers = { cap: capAnswer, gptTop: gptTopAnswer };
 
-  for (const { text: variant, score } of scoredVariants.slice(0, 5)) {
+  for (const { text: variant, score } of scoredVariants.slice(0, 7)) {
     if (manualCaptchaMode) return null; // Abort if user solving manually
     const encCap = passEnc2(Buffer.from(variant).toString('base64'), nVal, eVal);
     const formData = `page=web/intro.html&http_passwd=${encodeURIComponent(encPwd)}&captcha=${encodeURIComponent(encCap)}&captcha_image=${encodeURIComponent(captchaImage)}&e_val=${encodeURIComponent(eVal)}&n_val=${encodeURIComponent(nVal)}&lp_num=${lpNum}&hidden_action=Login`;
@@ -888,60 +896,9 @@ async function login() {
     }
   }
 
-  // --- Phase 2: CapSolver-only fallback with fresh CAPTCHA ---
-  if (manualCaptchaMode) return null;
-  console.log('[router] Phase 1 failed, trying CapSolver-only fallback...');
-
-  for (let fb = 1; fb <= 2; fb++) {
-    if (manualCaptchaMode) return null;
-    try {
-      const fbR1 = await httpReq('GET', '/web/public_data.html?func=get_captcha(intro)');
-      const fbParts = fbR1.data.toString().split('&');
-      if (fbParts.length < 4) continue;
-
-      const fbImgPath = fbParts[0], fbLpNum = fbParts[1], fbEVal = fbParts[2], fbNVal = fbParts[3];
-      const fbImgRes = await httpReq('GET', '/' + fbImgPath);
-      const fbProcessed = await preprocessImage(fbImgRes.data);
-      const fbCap = await solveCaptchaCapSolver(fbProcessed).catch(() => null);
-      if (!fbCap || fbCap.length === 0) continue;
-
-      const fbAnswer = fbCap[0];
-      const fbCaptchaImage = fbImgPath.split('/')[1].split('.')[0];
-      const fbEncPwd = passEnc2(password, fbNVal, fbEVal);
-
-      const fbVariants = [fbAnswer];
-      for (let i = 0; i < fbAnswer.length; i++) {
-        const ch = fbAnswer[i];
-        const alts = CONFUSIONS[ch] || [];
-        for (const alt of alts) {
-          if (alt.length === 1) fbVariants.push(fbAnswer.substring(0, i) + alt + fbAnswer.substring(i + 1));
-        }
-      }
-
-      console.log(`[router] Fallback ${fb}/2: CapSolver="${fbAnswer}" + ${fbVariants.length - 1} variants`);
-
-      for (const variant of fbVariants.slice(0, 3)) {
-        if (manualCaptchaMode) return null;
-        const encCap = passEnc2(Buffer.from(variant).toString('base64'), fbNVal, fbEVal);
-        const formData = `page=web/intro.html&http_passwd=${encodeURIComponent(fbEncPwd)}&captcha=${encodeURIComponent(encCap)}&captcha_image=${encodeURIComponent(fbCaptchaImage)}&e_val=${encodeURIComponent(fbEVal)}&n_val=${encodeURIComponent(fbNVal)}&lp_num=${fbLpNum}&hidden_action=Login`;
-
-        const loginRes = await httpReq('POST', '/web/intro.html', formData);
-        if (loginRes.setCookie) {
-          console.log(`[router] Fallback success with "${variant}"!`);
-          if (variant !== fbAnswer) {
-            recordSuccess([fbAnswer], variant, learned, { cap: fbAnswer });
-          } else {
-            recordSuccess([], variant, learned, { cap: fbAnswer });
-          }
-          return loginRes.setCookie;
-        }
-      }
-    } catch (err) {
-      console.log(`[router] Fallback ${fb} error: ${err.message}`);
-    }
-  }
-
-  throw new Error('All phases failed');
+  // Phase 2 (CapSolver-only fallback) removed: ~1/50 success rate wastes ~10s per failure.
+  // loginWithRetry retries full login() with fresh CAPTCHA (GPT+CapSolver) — faster and more effective.
+  throw new Error('Phase 1 failed — retry with fresh CAPTCHA');
 }
 
 /**
