@@ -87,6 +87,7 @@ cd agent && node server.js    # Agent 실행
 - 핵심 코드: `agent/router-wol.js` (3-solver: CapSolver ~69% + Claude Opus + GPT-4o-mini)
 - 학습 데이터: `agent/.captcha-learned.json`
 - keepAlive 엔드포인트: `/web/main.html` (inner_data.html은 port 80에서 빈 응답)
+- **CAPTCHA는 1회용**: 첫 오답 후 무효화됨 → 같은 CAPTCHA로 재시도 불가 → POST는 최고 점수 1회만 시도
 
 ## Critical Rules
 - Agent 화이트리스트 명령만 실행: `shutdown`, `proj`, `editor`, `protect-session`, `unprotect-session`, `kill-session`, `sleep`, `hibernate`, `display_off`, `captcha-fetch`, `captcha-answer`, `captcha-close`

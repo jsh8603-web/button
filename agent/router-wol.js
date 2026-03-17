@@ -1070,23 +1070,22 @@ async function login() {
   const candidateTexts = allReadings.map(r => r.text);
   const solverAnswers = { cap: capAnswer, gptTop: gptTopAnswer, opusTop: opusTopAnswer };
 
-  for (const { text: variant, score } of scoredVariants.slice(0, 10)) {
-    if (manualCaptchaMode) return null; // Abort if user solving manually
-    const encCap = passEnc2(Buffer.from(variant).toString('base64'), nVal, eVal);
-    const formData = `page=web/intro.html&http_passwd=${encodeURIComponent(encPwd)}&captcha=${encodeURIComponent(encCap)}&captcha_image=${encodeURIComponent(captchaImage)}&e_val=${encodeURIComponent(eVal)}&n_val=${encodeURIComponent(nVal)}&lp_num=${lpNum}&hidden_action=Login`;
+  // CAPTCHA is single-use: invalidated after first wrong answer.
+  // Only the top-scored variant matters — retrying on same CAPTCHA is useless.
+  if (manualCaptchaMode) return null;
+  const bestVariant = scoredVariants[0];
+  const encCap = passEnc2(Buffer.from(bestVariant.text).toString('base64'), nVal, eVal);
+  const formData = `page=web/intro.html&http_passwd=${encodeURIComponent(encPwd)}&captcha=${encodeURIComponent(encCap)}&captcha_image=${encodeURIComponent(captchaImage)}&e_val=${encodeURIComponent(eVal)}&n_val=${encodeURIComponent(nVal)}&lp_num=${lpNum}&hidden_action=Login`;
 
-    const loginRes = await httpReq('POST', '/web/intro.html', formData, sessionCookie || undefined);
+  const loginRes = await httpReq('POST', '/web/intro.html', formData, sessionCookie || undefined);
 
-    if (loginRes.setCookie) {
-      console.log(`[router] Phase 1 success with "${variant}" (s=${score.toFixed(1)})!`);
-      recordSuccess(candidateTexts, variant, learned, solverAnswers);
-      return loginRes.setCookie;
-    }
+  if (loginRes.setCookie) {
+    console.log(`[router] Login success with "${bestVariant.text}" (s=${bestVariant.score.toFixed(1)})!`);
+    recordSuccess(candidateTexts, bestVariant.text, learned, solverAnswers);
+    return loginRes.setCookie;
   }
 
-  // Phase 2 (CapSolver-only fallback) removed: ~1/50 success rate wastes ~10s per failure.
-  // loginWithRetry retries full login() with fresh CAPTCHA (GPT+CapSolver) — faster and more effective.
-  throw new Error('Phase 1 failed — retry with fresh CAPTCHA');
+  throw new Error(`Login failed with "${bestVariant.text}" — CAPTCHA single-use, need fresh one`);
 }
 
 /**
