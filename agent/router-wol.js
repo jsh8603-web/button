@@ -982,6 +982,7 @@ async function login(host, port) {
   if (parts.length < 4) throw new Error(`Bad CAPTCHA response: ${r1.data.toString().substring(0, 200)}`);
 
   const imgPath = parts[0], lpNum = parts[1], eVal = parts[2], nVal = parts[3];
+  if (host) console.log(`[router][${tag}] sessionCookie=${sessionCookie ? sessionCookie.substring(0, 30) + '...' : 'none'}, nVal.len=${nVal.length}`);
 
   // lpNum = successful login counter. Increments +1 per successful login(), NOT per failed attempt.
   // Failed login() and failed POSTs do NOT increment lpNum.
@@ -1089,7 +1090,8 @@ async function login(host, port) {
     return loginRes.setCookie;
   }
 
-  throw new Error(`[${tag}] Login failed with "${bestVariant.text}" — CAPTCHA single-use, need fresh one`);
+  const resBody = loginRes.data.toString().substring(0, 300);
+  throw new Error(`[${tag}] Login failed with "${bestVariant.text}" (status=${loginRes.status}, len=${loginRes.data.length}, body=${resBody})`);
 }
 
 /**
@@ -1161,14 +1163,18 @@ async function _loginWithRetry(maxRetries, onProgress, host, port) {
  */
 async function keepAlive() {
   if (!currentCookie) return false;
+  return keepAliveWith(currentCookie);
+}
+
+async function keepAliveWith(cookie, host, port) {
+  if (!cookie) return false;
 
   try {
-    const res = await httpReq('GET', '/web/main.html', null, currentCookie);
+    const res = await httpReq('GET', '/web/main.html', null, cookie, host, port);
     const text = res.data.toString();
 
     if (text.length < 1000 || text.includes('intro.html')) {
       console.log(`[router] Session expired, need re-login (len=${text.length})`);
-      currentCookie = null;
       return false;
     }
 
@@ -1202,21 +1208,19 @@ let heartbeatLoginFailed = false;
 
 async function heartbeatKeepAlive(onProgress = null) {
   if (manualCaptchaMode) return null; // Don't touch router while user solving
-  if (currentCookie) {
+
+  const activeCookie = externalCookie || currentCookie;
+  if (activeCookie) {
     heartbeatLoginFailed = false;
-    const alive = await keepAlive();
-    if (alive) return currentCookie;
+    const alive = await keepAliveWith(activeCookie);
+    if (alive) return activeCookie;
     console.log('[router] Session expired during heartbeat, re-logging in...');
-    heartbeatLoginFailed = false; // allow retry on expiry
+    externalCookie = null;
+    currentCookie = null;
+    heartbeatLoginFailed = false;
   }
-  // If login is already in progress, don't block heartbeat — return null
-  if (loginInProgress) {
-    return null;
-  }
-  // Don't retry if previous background login already failed
-  if (heartbeatLoginFailed) {
-    return null;
-  }
+  if (loginInProgress) return null;
+  if (heartbeatLoginFailed) return null;
   // No cookie and no login in progress — start login but don't block heartbeat
   loginWithRetry(10, onProgress).then(cookie => {
     if (!cookie) heartbeatLoginFailed = true;
@@ -1229,7 +1233,7 @@ async function heartbeatKeepAlive(onProgress = null) {
 }
 
 function getCookie() {
-  return currentCookie;
+  return externalCookie || currentCookie;
 }
 
 // External cookie for port 88 (WAN) — separate session from port 80 (LAN)

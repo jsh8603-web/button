@@ -228,19 +228,10 @@ function Dashboard() {
   const [showHelp, setShowHelp] = useState(false);
   const [lastPowerAction, setLastPowerAction] = useState<string | null>(null);
   const [routerLoggedIn, setRouterLoggedIn] = useState(false);
-  const [captchaManual, setCaptchaManual] = useState<{ image: string; params: Record<string, string> } | null>(null);
-  const [captchaInput, setCaptchaInput] = useState("");
-  const [showCaptchaModal, setShowCaptchaModal] = useState(false);
-  const captchaInputRef = useRef<HTMLInputElement>(null);
   const newProjInputRef = useRef<HTMLInputElement>(null);
   // Prevent server poll from overwriting optimistic session updates
   const sessionActionTime = useRef(0);
-  // Refs for values read inside polling callback (avoids stale closure)
-  const captchaManualRef = useRef(captchaManual);
-  const showCaptchaModalRef = useRef(showCaptchaModal);
   const actionFeedbackRef = useRef(actionFeedback);
-  captchaManualRef.current = captchaManual;
-  showCaptchaModalRef.current = showCaptchaModal;
   actionFeedbackRef.current = actionFeedback;
 
   // Load last project from localStorage
@@ -265,29 +256,6 @@ function Dashboard() {
         setActionFeedback(data.captchaStatus);
       } else if (af?.startsWith("CAPTCHA") || af?.startsWith("Solving") || af?.startsWith("Fetching") || af?.startsWith("Verifying") || af?.startsWith("Wrong") || af?.startsWith("Failed")) {
         setActionFeedback("");
-      }
-      // Update manual CAPTCHA data — always accept if image changed or no current data
-      const curCaptcha = captchaManualRef.current;
-      const modalOpen = showCaptchaModalRef.current;
-      if (data.captchaManual) {
-        const isNew = !curCaptcha || data.captchaManual.image !== curCaptcha.image;
-        if (isNew) {
-          setCaptchaManual(data.captchaManual);
-          if (modalOpen) {
-            setCaptchaInput("");
-            setTimeout(() => captchaInputRef.current?.focus(), 100);
-          }
-        }
-      } else if (!modalOpen) {
-        setCaptchaManual(null);
-      }
-      // Auto-close modal on success
-      if (data.captchaStatus === "CAPTCHA solved!" && modalOpen) {
-        setTimeout(() => { setShowCaptchaModal(false); setActionFeedback(""); }, 2000);
-      }
-      // Wrong answer while modal is open — clear input, keep modal open for New/retry
-      if (data.captchaStatus?.startsWith("Wrong") && modalOpen) {
-        setCaptchaInput("");
       }
       setStatus((prev) => {
         if (prev === "waking") return isOnline ? "online" : prev;
@@ -497,7 +465,7 @@ function Dashboard() {
   }[status];
 
   const offlineLabel = lastPowerAction
-    ? { sleep: "Sleeping", hibernate: "Hibernating", display_off: "Display Off", shutdown: "Shut Down" }[lastPowerAction] || "PC is OFF"
+    ? { hibernate: "Hibernating", display_off: "Display Off", shutdown: "Shut Down" }[lastPowerAction] || "PC is OFF"
     : "PC is OFF";
   const statusText = {
     online: "PC is ON",
@@ -544,166 +512,14 @@ function Dashboard() {
         Refresh in {lastCheckedText}
       </p>
 
-      {/* Action Feedback — tap CAPTCHA status to solve manually */}
+      {/* Action Feedback / Router Status */}
       <div className="h-6 mt-3">
         {actionFeedback ? (
-          <p
-            className={`text-xs text-amber-400/80 animate-pulse ${
-              actionFeedback.includes("CAPTCHA") || actionFeedback.includes("Solving") || actionFeedback.includes("Wrong") || actionFeedback.includes("Failed") ? "cursor-pointer underline decoration-dotted" : ""
-            }`}
-            onClick={() => {
-              if (showCaptchaModal) return;
-              if (!(actionFeedback.includes("CAPTCHA") || actionFeedback.includes("Solving") || actionFeedback.includes("Wrong") || actionFeedback.includes("Failed"))) return;
-              if (!confirm("Solve CAPTCHA manually?")) return;
-              setShowCaptchaModal(true);
-              setCaptchaInput("");
-              setCaptchaManual(null);
-              fetch("/api/run", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ action: "captcha-fetch" }),
-              });
-              setActionFeedback("Requesting CAPTCHA image...");
-            }}
-          >
-            {actionFeedback}
-          </p>
-        ) : status === "online" && !showCaptchaModal ? (
-          routerLoggedIn ? (
-            <p className="text-xs text-emerald-400/60">Router ✓</p>
-          ) : (
-            <p
-              className="text-xs text-white/30 cursor-pointer hover:text-amber-400/60 transition-colors"
-              onClick={() => {
-                if (!confirm("Solve router CAPTCHA manually?")) return;
-                setShowCaptchaModal(true);
-                setCaptchaInput("");
-                setCaptchaManual(null);
-                fetch("/api/run", {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({ action: "captcha-fetch" }),
-                });
-                setActionFeedback("Requesting CAPTCHA image...");
-              }}
-            >
-              Solve CAPTCHA
-            </p>
-          )
+          <p className="text-xs text-amber-400/80 animate-pulse">{actionFeedback}</p>
+        ) : status === "online" && routerLoggedIn ? (
+          <p className="text-xs text-emerald-400/60">Router ✓</p>
         ) : null}
       </div>
-
-      {/* Manual CAPTCHA Modal */}
-      {showCaptchaModal && (
-        <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4" onClick={(e) => e.stopPropagation()}>
-          <div className="bg-zinc-900 border border-white/10 rounded-xl p-5 w-full max-w-xs">
-            <p className="text-sm text-white/60 mb-3">Solve CAPTCHA</p>
-            {captchaManual ? (
-              <>
-                <img
-                  src={`data:image/png;base64,${captchaManual.image}`}
-                  alt="CAPTCHA"
-                  className="w-full rounded border border-white/10 mb-3"
-                  style={{ imageRendering: "pixelated" }}
-                />
-                <input
-                  ref={captchaInputRef}
-                  type="text"
-                  value={captchaInput}
-                  onChange={(e) => setCaptchaInput(e.target.value.toLowerCase())}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" && captchaInput.length >= 4) {
-                      fetch("/api/run", {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({
-                          action: "captcha-answer",
-                          answer: captchaInput,
-                          params: captchaManual.params,
-                        }),
-                      });
-                      setActionFeedback("Verifying...");
-                      setCaptchaInput("");
-                    }
-                  }}
-                  placeholder="Type CAPTCHA text"
-                  className="w-full bg-black/50 border border-white/20 rounded-lg px-3 py-2
-                    text-white text-center text-lg tracking-widest font-mono
-                    focus:outline-none focus:border-amber-400/50"
-                  autoFocus
-                  autoComplete="off"
-                  autoCapitalize="off"
-                />
-                <div className="flex gap-2 mt-3">
-                  <button
-                    onClick={() => {
-                      if (captchaInput.length >= 4) {
-                        fetch("/api/run", {
-                          method: "POST",
-                          headers: { "Content-Type": "application/json" },
-                          body: JSON.stringify({
-                            action: "captcha-answer",
-                            answer: captchaInput,
-                            params: captchaManual.params,
-                          }),
-                        });
-                        setActionFeedback("Verifying...");
-                        setCaptchaInput("");
-                      }
-                    }}
-                    className="flex-1 py-2 rounded-lg bg-amber-500/20 text-amber-400 text-sm
-                      hover:bg-amber-500/30 transition-colors"
-                  >
-                    Submit
-                  </button>
-                  <button
-                    onClick={() => {
-                      // Request new CAPTCHA — clear current so new one loads
-                      setCaptchaManual(null);
-                      fetch("/api/run", {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ action: "captcha-fetch" }),
-                      });
-                      setCaptchaInput("");
-                      setActionFeedback("Requesting new CAPTCHA...");
-                    }}
-                    className="py-2 px-3 rounded-lg bg-white/5 text-white/40 text-sm
-                      hover:bg-white/10 transition-colors"
-                  >
-                    New
-                  </button>
-                  <button
-                    onClick={() => {
-                      setShowCaptchaModal(false);
-                      setCaptchaManual(null);
-                      // Notify agent to exit manual CAPTCHA mode (resume auto-login)
-                      fetch("/api/run", {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ action: "captcha-close" }),
-                      });
-                    }}
-                    className="py-2 px-3 rounded-lg bg-white/5 text-white/40 text-sm
-                      hover:bg-white/10 transition-colors"
-                  >
-                    Close
-                  </button>
-                </div>
-              </>
-            ) : (
-              <div className="text-center py-8">
-                <div className="text-white/30 text-sm animate-pulse">Loading CAPTCHA image...</div>
-              </div>
-            )}
-            {actionFeedback === "CAPTCHA solved!" && (
-              <div className="mt-3 text-center text-green-400 text-sm">
-                Solved! Closing...
-              </div>
-            )}
-          </div>
-        </div>
-      )}
 
       {/* Quick Actions — only visible when PC is ON */}
       <div
@@ -754,14 +570,6 @@ function Dashboard() {
         `}
       >
         <div className="bg-white/5 border border-white/10 rounded-xl overflow-hidden">
-          <button
-            onClick={() => handlePowerAction("sleep", "Sleep")}
-            className="w-full px-4 py-3 text-left text-sm text-white/70
-              hover:bg-white/10 hover:text-white transition-colors flex items-center gap-3"
-          >
-            <MoonIcon size={18} className="text-purple-400" />
-            <span>Sleep</span>
-          </button>
           <button
             onClick={() => handlePowerAction("hibernate", "Hibernate")}
             className="w-full px-4 py-3 text-left text-sm text-white/70
@@ -918,7 +726,7 @@ function Dashboard() {
 
               <div className="flex items-start gap-2">
                 <MoonIcon size={14} className="text-purple-400 shrink-0 mt-0.5" />
-                <div><span className="text-white/70">Power Menu</span> — Sleep, Hibernate, Display Off</div>
+                <div><span className="text-white/70">Power Menu</span> — Hibernate, Display Off</div>
               </div>
               <div className="flex items-start gap-2">
                 <TerminalIcon size={14} className="text-blue-400 shrink-0 mt-0.5" />
@@ -945,15 +753,7 @@ function Dashboard() {
 
               <div className="flex items-start gap-2">
                 <span className="text-emerald-400/60 shrink-0 mt-0.5 text-[10px]">✓</span>
-                <div><span className="text-emerald-400/60">Router ✓</span> — Router session active</div>
-              </div>
-              <div className="flex items-start gap-2">
-                <span className="text-amber-400/80 shrink-0 mt-0.5 text-[10px]">⋯</span>
-                <div><span className="text-amber-400/80">Solving...</span> — Agent solving CAPTCHA</div>
-              </div>
-              <div className="flex items-start gap-2">
-                <span className="text-white/30 shrink-0 mt-0.5 text-[10px]">?</span>
-                <div><span className="text-white/50">Solve CAPTCHA</span> — Tap to solve manually</div>
+                <div><span className="text-emerald-400/60">Router ✓</span> — Router session active (WOL via router API available)</div>
               </div>
             </div>
           )}

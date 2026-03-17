@@ -8,6 +8,7 @@ require('dotenv').config({ path: path.join(__dirname, '.env') });
 const { initRouterSession, heartbeatKeepAlive, getCookie, getExternalCookie, refreshBeforeSleep, loginExternal, fetchManualCaptcha, submitManualCaptcha, setManualCaptchaMode } = require('./router-wol');
 
 const app = express();
+let routerBootDone = false;
 const PORT = process.env.PORT || 9876;
 const PIN_HASH = process.env.PIN_HASH;
 const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN;
@@ -696,12 +697,14 @@ async function sendHeartbeat() {
       protected: protectedList.includes(name),
     }));
 
-    // Keep router session alive and get current cookie
+    // Keep router session alive and get current cookie (skip during boot login)
     let routerCookie = null;
-    try {
-      routerCookie = await heartbeatKeepAlive((msg) => setCaptchaStatus(msg));
-    } catch (err) {
-      console.error('[heartbeat] Router keep-alive error:', err.message);
+    if (routerBootDone) {
+      try {
+        routerCookie = await heartbeatKeepAlive((msg) => setCaptchaStatus(msg));
+      } catch (err) {
+        console.error('[heartbeat] Router keep-alive error:', err.message);
+      }
     }
 
     const res = await fetch(`${VERCEL_URL}/api/heartbeat`, {
@@ -810,26 +813,16 @@ app.listen(PORT, async () => {
     }
   }
 
-  // Initialize router session — uses KV cookie if available, else CAPTCHA login
+  // Initialize router session — local port 80 only
+  // External login (port 88) disabled: router WAN doesn't issue cookies, so
+  // Vercel can't maintain session. Code preserved in router-wol.js for future use.
   const bootProgress = (msg) => setCaptchaStatus(msg);
-  initRouterSession(storedRouterCookie, bootProgress).then(async cookie => {
-    if (cookie) {
-      setCaptchaStatus('');
-      // Also login via external IP:88 for Cron keepalive and WOL API
-      try {
-        const extCookie = await loginExternal((msg) => setCaptchaStatus(`External: ${msg}`));
-        if (extCookie) {
-          console.log('[boot] External router login success');
-          setCaptchaStatus('');
-        } else {
-          console.log('[boot] External router login failed — Cron keepalive may not work');
-        }
-      } catch (err) {
-        console.error('[boot] External router login error:', err.message);
-      }
-    }
+  initRouterSession(storedRouterCookie, bootProgress).then(cookie => {
+    if (cookie) setCaptchaStatus('');
   }).catch(err => {
     console.error('[boot] Router login failed:', err.message);
+  }).finally(() => {
+    routerBootDone = true;
   });
 
   // Start heartbeat loop
