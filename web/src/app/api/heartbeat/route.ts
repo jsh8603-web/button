@@ -16,9 +16,9 @@ export async function POST(request: NextRequest) {
     // Store heartbeat (45s TTL)
     await kvSet(KEYS.heartbeat, { timestamp: Date.now(), uptime, sessions: sessions || [] }, 45);
 
-    // Store router session cookie (default 3600s, pre-sleep sends 86400s for 24h persistence)
+    // Store router session cookie (default 86400s/24h — Cron refreshes every 30min, agent heartbeat every 30s)
     if (routerCookie) {
-      const ttl = typeof routerCookieTTL === 'number' && routerCookieTTL > 0 ? routerCookieTTL : 3600;
+      const ttl = typeof routerCookieTTL === 'number' && routerCookieTTL > 0 ? routerCookieTTL : 86400;
       await kvSet(KEYS.routerCookie, routerCookie, ttl);
     }
 
