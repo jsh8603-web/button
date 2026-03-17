@@ -1100,7 +1100,7 @@ function setManualCaptchaMode(on) {
   else console.log('[router] Manual CAPTCHA mode OFF — auto-login resumed');
 }
 
-async function loginWithRetry(maxRetries = 5, onProgress = null) {
+async function loginWithRetry(maxRetries = 10, onProgress = null) {
   if (loginInProgress) return loginInProgress;
   loginInProgress = _loginWithRetry(maxRetries, onProgress).finally(() => { loginInProgress = null; });
   return loginInProgress;
@@ -1186,7 +1186,7 @@ async function initRouterSession(storedCookie, onProgress = null) {
     currentCookie = null;
   }
 
-  return await loginWithRetry(5, onProgress);
+  return await loginWithRetry(10, onProgress);
 }
 
 let heartbeatLoginFailed = false;
@@ -1209,7 +1209,7 @@ async function heartbeatKeepAlive(onProgress = null) {
     return null;
   }
   // No cookie and no login in progress — start login but don't block heartbeat
-  loginWithRetry(5, onProgress).then(cookie => {
+  loginWithRetry(10, onProgress).then(cookie => {
     if (!cookie) heartbeatLoginFailed = true;
     else if (onProgress) onProgress('');
   }).catch(err => {
@@ -1238,7 +1238,7 @@ async function refreshBeforeSleep(onProgress = null) {
     }
     console.log('[router] Pre-sleep: session expired — re-logging in...');
   }
-  return await loginWithRetry(5, onProgress);
+  return await loginWithRetry(10, onProgress);
 }
 
 // Cache solver candidates for manual CAPTCHA learning
