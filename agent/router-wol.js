@@ -159,6 +159,11 @@ Output exactly 3 guesses, one per line.
 Each guess: lowercase letters and digits only, 4-7 characters.
 Most confident guess first. Nothing else.`;
 
+// #15: Position-by-position grounding prompt (forces visual analysis per character)
+const CAPTCHA_GROUNDING_PROMPT = `Analyze this CAPTCHA image character by character.
+For each position (1st, 2nd, 3rd...), describe what you see visually, then decide the character.
+After analysis, output your final answer on the LAST line: just the characters, lowercase letters and digits only.`;
+
 function charVote(reads) {
   const validReads = reads.filter(r => r.length >= 4 && r.length <= 8);
   if (validReads.length === 0) return null;
@@ -203,31 +208,41 @@ async function solveCaptchaGPT(imageBuffer) {
   const processedImage = await preprocessImage(imageBuffer);
   const base64Image = processedImage.toString('base64');
 
-  // #1-5: 5x parallel reads with GPT-4o mini (detail:high, low temp, expert prompt)
-  const NUM_READS = 5;
-  const responses = await Promise.all(Array.from({ length: NUM_READS }, () =>
+  // 7 parallel reads: 3x low temp (precision) + 3x higher temp (diversity) + 1x grounding prompt
+  const readConfigs = [
+    { temp: 0.2, topP: 0.3, system: CAPTCHA_SYSTEM_PROMPT, user: CAPTCHA_USER_PROMPT },
+    { temp: 0.2, topP: 0.3, system: CAPTCHA_SYSTEM_PROMPT, user: CAPTCHA_USER_PROMPT },
+    { temp: 0.2, topP: 0.3, system: CAPTCHA_SYSTEM_PROMPT, user: CAPTCHA_USER_PROMPT },
+    { temp: 0.5, topP: 0.5, system: CAPTCHA_SYSTEM_PROMPT, user: CAPTCHA_USER_PROMPT },
+    { temp: 0.5, topP: 0.5, system: CAPTCHA_SYSTEM_PROMPT, user: CAPTCHA_USER_PROMPT },
+    { temp: 0.5, topP: 0.5, system: CAPTCHA_SYSTEM_PROMPT, user: CAPTCHA_USER_PROMPT },
+    { temp: 0.2, topP: 0.3, system: CAPTCHA_SYSTEM_PROMPT, user: CAPTCHA_GROUNDING_PROMPT, maxTokens: 200 },
+  ];
+  const responses = await Promise.all(readConfigs.map(cfg =>
     client.chat.completions.create({
       model: 'gpt-4o-mini',
-      max_tokens: 50,
-      temperature: 0.3,           // #2: low temp for OCR but enough diversity across 5 reads
-      top_p: 0.3,                 // #3: restrict to likely tokens
+      max_tokens: cfg.maxTokens || 50,
+      temperature: cfg.temp,
+      top_p: cfg.topP,
       messages: [
-        { role: 'system', content: CAPTCHA_SYSTEM_PROMPT },  // #5: expert prompt
+        { role: 'system', content: cfg.system },
         {
           role: 'user',
           content: [
             { type: 'image_url', image_url: {
               url: `data:image/png;base64,${base64Image}`,
-              detail: 'high',      // #1: high detail for better resolution
+              detail: 'high',
             }},
-            { type: 'text', text: CAPTCHA_USER_PROMPT },     // #14: strict format
+            { type: 'text', text: cfg.user },
           ],
         },
       ],
     }).then(r => {
-      const lines = (r.choices[0]?.message?.content || '').split('\n')
-        .map(l => cleanCaptchaRead(l))       // #11: regex post-processing
-        .filter(l => isValidCaptcha(l));      // #11: validation
+      const text = r.choices[0]?.message?.content || '';
+      // For grounding prompt, take only the last line as the answer
+      const lines = (cfg.maxTokens > 50 ? text.split('\n').slice(-3) : text.split('\n'))
+        .map(l => cleanCaptchaRead(l))
+        .filter(l => isValidCaptcha(l));
       return lines;
     }).catch(e => { console.log(`[router] GPT error: ${e.message}`); return []; })
   ));
@@ -363,7 +378,7 @@ function buildConfusions() {
       }
     }
 
-    // Prune: frequently observed but never winning mappings
+    // Prune: never-winning mappings (BASE or learned)
     // Keep at least 2 alternatives per character to maintain search diversity
     const MIN_ALTS = 2;
     let pruned = 0;
@@ -374,7 +389,10 @@ function buildConfusions() {
         for (const to of alts) {
           const observed = (diffs[`${from}→${to}`] || 0) + (diffs[`${to}→${from}`] || 0);
           const winCount = (wins[`${from}→${to}`] || 0) + (wins[`${to}→${from}`] || 0);
-          if (observed >= 10 && winCount === 0) {
+          // Prune if: (a) 10+ observations but 0 wins, or
+          //           (b) 0 observations + 0 wins after 50+ attempts (dead-weight BASE entry)
+          if ((observed >= 10 && winCount === 0) ||
+              (observed === 0 && winCount === 0 && attempts >= 50)) {
             pruneable.push(to);
           }
         }
