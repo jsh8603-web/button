@@ -205,6 +205,7 @@ function Dashboard() {
   const [showPowerMenu, setShowPowerMenu] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
   const [lastPowerAction, setLastPowerAction] = useState<string | null>(null);
+  const [hibernateScheduled, setHibernateScheduled] = useState<string | null>(null);
   const newProjInputRef = useRef<HTMLInputElement>(null);
   // Prevent server poll from overwriting optimistic session updates
   const sessionActionTime = useRef(0);
@@ -334,6 +335,7 @@ function Dashboard() {
 
   const handlePowerAction = async (action: string, label: string, params?: Record<string, string>) => {
     setShowPowerMenu(false);
+    const delay = params?.delay ? parseInt(params.delay, 10) : 0;
     try {
       setActionFeedback(`${label}...`);
       await fetch("/api/run", {
@@ -341,7 +343,30 @@ function Dashboard() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action, ...(params ? { params } : {}) }),
       });
-      setActionFeedback(`${label} signal sent`);
+      if (delay > 0) {
+        const hours = Math.round(delay / 3600);
+        setHibernateScheduled(`${hours}h`);
+        setActionFeedback(`Hibernate in ${hours}h scheduled`);
+      } else {
+        setHibernateScheduled(null);
+        setActionFeedback(`${label} signal sent`);
+      }
+    } catch {
+      setActionFeedback("Failed to reach PC");
+    }
+    setTimeout(() => setActionFeedback(""), 5000);
+  };
+
+  const handleCancelHibernate = async () => {
+    setShowPowerMenu(false);
+    setHibernateScheduled(null);
+    try {
+      await fetch("/api/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "hibernate-cancel" }),
+      });
+      setActionFeedback("Hibernate cancelled");
     } catch {
       setActionFeedback("Failed to reach PC");
     }
@@ -564,6 +589,17 @@ function Dashboard() {
               <span>{opt.label}</span>
             </button>
           ))}
+          {hibernateScheduled && (
+            <button
+              onClick={handleCancelHibernate}
+              className="w-full px-4 py-3 text-left text-sm text-red-400/80
+                hover:bg-red-500/10 hover:text-red-400 transition-colors flex items-center gap-3
+                border-t border-white/10"
+            >
+              <XIcon size={14} className="text-red-400" />
+              <span>Cancel ({hibernateScheduled})</span>
+            </button>
+          )}
         </div>
       </div>
 

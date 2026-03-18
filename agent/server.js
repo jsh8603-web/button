@@ -113,7 +113,7 @@ app.post('/shutdown', verifyPin, (req, res) => {
   }
 
   recordShutdownAttempt();
-  exec('shutdown /s /t 5', (err) => {
+  exec('shutdown /s /t 10', (err) => {
     if (err) {
       return res.status(500).json({ ok: false, message: err.message });
     }
@@ -440,6 +440,17 @@ app.post('/run', verifyPin, (req, res) => {
     return res.json({ ok: true, action });
   }
 
+  if (action === 'hibernate-cancel') {
+    if (pendingHibernateTimer) {
+      clearTimeout(pendingHibernateTimer);
+      pendingHibernateTimer = null;
+      showToast('Hibernate cancelled');
+      setCaptchaStatus('');
+      console.log('[hibernate] Cancelled by user');
+    }
+    return res.json({ ok: true, action });
+  }
+
   return res.status(400).json({ ok: false, message: `Unknown action: ${action}` });
 });
 
@@ -447,6 +458,14 @@ app.post('/run', verifyPin, (req, res) => {
 
 const VERCEL_URL = process.env.VERCEL_URL;
 const AGENT_SECRET = process.env.AGENT_SECRET;
+
+// Helper: show Windows toast notification (3 seconds)
+function showToast(message) {
+  const escaped = message.replace(/'/g, "''");
+  exec(`powershell.exe -Command "Add-Type -AssemblyName System.Windows.Forms; $n = New-Object System.Windows.Forms.NotifyIcon; $n.Icon = [System.Drawing.SystemIcons]::Information; $n.Visible = $true; $n.ShowBalloonTip(3000, 'Button', '${escaped}', 'Info'); Start-Sleep -Seconds 3; $n.Dispose()"`, (err) => {
+    if (err) console.error('[toast] Error:', err.message);
+  });
+}
 
 // Helper: update CAPTCHA status in KV (for web UI display)
 async function setCaptchaStatus(msg) {
@@ -477,6 +496,7 @@ async function executeSleepAction(action, delaySec = 0) {
     const hours = Math.round(delaySec / 3600);
     console.log(`[hibernate] Scheduled in ${delaySec}s (${hours}h)`);
     setCaptchaStatus(`Hibernate scheduled in ${hours}h`);
+    showToast(`Hibernate in ${hours}h scheduled`);
     pendingHibernateTimer = setTimeout(() => {
       pendingHibernateTimer = null;
       setCaptchaStatus('');
@@ -486,11 +506,14 @@ async function executeSleepAction(action, delaySec = 0) {
   }
 
   if (action === 'hibernate') {
-    // Direct hibernate — no CAPTCHA needed (wake from hibernate not expected)
-    exec('shutdown /h', (err) => {
-      if (err) console.error('[hibernate] Error:', err.message);
-      else console.log('[hibernate] Entering hibernate mode');
-    });
+    // Direct hibernate — toast 3s then shutdown /h
+    showToast('Hibernating now...');
+    setTimeout(() => {
+      exec('shutdown /h', (err) => {
+        if (err) console.error('[hibernate] Error:', err.message);
+        else console.log('[hibernate] Entering hibernate mode');
+      });
+    }, 3000);
     return;
   }
 
@@ -562,7 +585,7 @@ function executeCommand(command) {
       return;
     }
     recordShutdownAttempt();
-    exec('shutdown /s /t 5', (err) => {
+    exec('shutdown /s /t 10', (err) => {
       if (err) console.error('[heartbeat] Shutdown error:', err.message);
       else console.log('[heartbeat] Shutting down in 5s');
     });
@@ -698,6 +721,14 @@ function executeCommand(command) {
     setManualCaptchaMode(false);
     stopFastPoll();
     console.log('[captcha] Manual CAPTCHA closed by user');
+  } else if (command.action === 'hibernate-cancel') {
+    if (pendingHibernateTimer) {
+      clearTimeout(pendingHibernateTimer);
+      pendingHibernateTimer = null;
+      showToast('Hibernate cancelled');
+      setCaptchaStatus('');
+      console.log('[hibernate] Cancelled by user');
+    }
   } else if (command.action === 'display_off') {
     exec('powershell.exe -Command "(Add-Type -MemberDefinition \'[DllImport(\\"user32.dll\\")]public static extern int SendMessage(int hWnd,int Msg,int wParam,int lParam);\' -Name a -Passthru)::SendMessage(-1,0x0112,0xF170,2)"', (err) => {
       if (err) console.error('[display_off] Error:', err.message);
