@@ -21,6 +21,4 @@
 - Optimistic UI: action 후 35초간 서버 sessions 폴링 무시 (깜빡임 방지)
 
 ## Power actions
-- `sleep`: `rundll32 powrprof.dll,SetSuspendState 0,1,0`
-- `hibernate`: `shutdown /h`
-- `display_off`: `SendMessage(HWND_BROADCAST, WM_SYSCOMMAND, SC_MONITORPOWER, 2)`
+- `hibernate`: `shutdown /h` (즉시 또는 지연 실행, params.delay로 초 단위 지정)

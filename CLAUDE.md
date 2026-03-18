@@ -113,16 +113,15 @@ cd agent && node server.js    # Agent 실행
 ### Quick Actions (온라인 시 표시, 활성 드롭다운은 색상 하이라이트)
 | 아이콘 | 색상 | 이름 | 동작 |
 |--------|------|------|------|
-| Moon | 보라 | Power Menu | Sleep/Hibernate/Display Off 드롭다운 |
+| Snowflake | 파랑 | Hibernate | Hibernate 드롭다운 (Now/1h/2h/3h) |
 | Terminal | 파랑 (badge: 세션수) | Sessions | 세션 관리 드롭다운 |
 | Folder | 앰버 | Projects | 프로젝트 열기 드롭다운. **미보호 세션 전부 kill 후 열기** |
 
-### Power Menu 드롭다운
-| 아이콘 | 색상 | 이름 | Windows 명령 |
-|--------|------|------|-------------|
-| Moon | 보라 | Sleep | `rundll32 powrprof.dll,SetSuspendState` (컨텍스트 유지) |
-| Snowflake | 파랑 | Hibernate | `shutdown /h` (최대 절전) |
-| MonitorOff | 시안 | Display Off | `SendMessage SC_MONITORPOWER` (모니터만 끔) |
+### Hibernate 드롭다운
+| 아이콘 | 색상 | 이름 | 동작 |
+|--------|------|------|------|
+| Snowflake | 파랑 | Hibernate Now | 즉시 `shutdown /h` (confirm) |
+| Snowflake | 파랑/60% | In 1/2/3 hours | 지연 실행 (Agent에서 setTimeout) |
 
 ### Sessions 드롭다운
 | 아이콘 | 색상 | 동작 |

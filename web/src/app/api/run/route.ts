@@ -25,7 +25,7 @@ export async function POST(request: NextRequest) {
     }
 
     // Track power actions for offline status display
-    const powerActions = ["sleep", "hibernate", "display_off"];
+    const powerActions = ["sleep", "hibernate"];
     if (powerActions.includes(action)) {
       await kvSet(KEYS.lastPowerAction, action);
     }

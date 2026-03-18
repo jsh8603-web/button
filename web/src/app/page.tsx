@@ -143,34 +143,12 @@ function ShieldIcon({ active, size = 18 }: { active: boolean; size?: number }) {
   );
 }
 
-function MoonIcon({ size = 20, className }: { size?: number; className?: string }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none"
-      stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"
-      className={className}>
-      <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
-    </svg>
-  );
-}
-
 function SnowflakeIcon({ size = 20, className }: { size?: number; className?: string }) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none"
       stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"
       className={className}>
       <path d="M12 2v20M17 7l-5 5-5-5M7 17l5-5 5 5M2 12h20M7 7l-5 5 5 5M17 7l5 5-5 5" />
-    </svg>
-  );
-}
-
-function MonitorOffIcon({ size = 20, className }: { size?: number; className?: string }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none"
-      stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"
-      className={className}>
-      <rect x="2" y="3" width="20" height="14" rx="2" ry="2" />
-      <path d="M8 21h8M12 17v4" />
-      <path d="M2 3l20 18" strokeWidth={2.5} />
     </svg>
   );
 }
@@ -354,14 +332,14 @@ function Dashboard() {
     }
   };
 
-  const handlePowerAction = async (action: string, label: string) => {
+  const handlePowerAction = async (action: string, label: string, params?: Record<string, string>) => {
     setShowPowerMenu(false);
     try {
       setActionFeedback(`${label}...`);
       await fetch("/api/run", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action }),
+        body: JSON.stringify({ action, ...(params ? { params } : {}) }),
       });
       setActionFeedback(`${label} signal sent`);
     } catch {
@@ -463,7 +441,7 @@ function Dashboard() {
   }[status];
 
   const offlineLabel = lastPowerAction
-    ? { hibernate: "Hibernating", display_off: "Display Off", shutdown: "Shut Down" }[lastPowerAction] || "PC is OFF"
+    ? { hibernate: "Hibernating", shutdown: "Shut Down" }[lastPowerAction] || "PC is OFF"
     : "PC is OFF";
   const statusText = {
     online: "PC is ON",
@@ -528,10 +506,10 @@ function Dashboard() {
           onClick={() => { closeAllDropdowns(); setShowPowerMenu(v => !v); }}
           className={`w-12 h-12 rounded-xl bg-white/5 border flex items-center justify-center
             active:scale-90 transition-all duration-200
-            ${showPowerMenu ? "border-purple-500/50 bg-purple-500/10" : "border-white/10 hover:bg-white/10 hover:border-white/20"}`}
-          title="Power Options"
+            ${showPowerMenu ? "border-blue-500/50 bg-blue-500/10" : "border-white/10 hover:bg-white/10 hover:border-white/20"}`}
+          title="Hibernate"
         >
-          <MoonIcon size={22} className="text-purple-400" />
+          <SnowflakeIcon size={22} className="text-blue-400" />
         </button>
         <button
           onClick={() => { closeAllDropdowns(); setShowSessionDropdown(v => !v); }}
@@ -562,18 +540,30 @@ function Dashboard() {
       <div
         className={`
           mt-4 w-52 transition-all duration-300 overflow-hidden
-          ${status === "online" && showPowerMenu ? "max-h-60 opacity-100" : "max-h-0 opacity-0"}
+          ${status === "online" && showPowerMenu ? "max-h-80 opacity-100" : "max-h-0 opacity-0"}
         `}
       >
         <div className="bg-white/5 border border-white/10 rounded-xl overflow-hidden">
-          <button
-            onClick={() => handlePowerAction("display_off", "Display off")}
-            className="w-full px-4 py-3 text-left text-sm text-white/70
-              hover:bg-white/10 hover:text-white transition-colors flex items-center gap-3"
-          >
-            <MonitorOffIcon size={18} className="text-cyan-400" />
-            <span>Display Off</span>
-          </button>
+          {[
+            { label: "Hibernate Now", delay: "0" },
+            { label: "In 1 hour", delay: "3600" },
+            { label: "In 2 hours", delay: "7200" },
+            { label: "In 3 hours", delay: "10800" },
+          ].map((opt) => (
+            <button
+              key={opt.delay}
+              onClick={() => {
+                if (opt.delay === "0" && !window.confirm("Hibernate now?")) return;
+                handlePowerAction("hibernate", opt.label, { delay: opt.delay });
+              }}
+              className="w-full px-4 py-3 text-left text-sm text-white/70
+                hover:bg-white/10 hover:text-white transition-colors flex items-center gap-3
+                border-b border-white/5 last:border-b-0"
+            >
+              <SnowflakeIcon size={18} className={opt.delay === "0" ? "text-blue-400" : "text-blue-400/60"} />
+              <span>{opt.label}</span>
+            </button>
+          ))}
         </div>
       </div>
 
@@ -713,8 +703,8 @@ function Dashboard() {
               <div className="border-t border-white/10 pt-2 text-white/40 text-[10px]">Quick Actions (online only)</div>
 
               <div className="flex items-start gap-2">
-                <MoonIcon size={14} className="text-purple-400 shrink-0 mt-0.5" />
-                <div><span className="text-white/70">Power Menu</span> — Display Off</div>
+                <SnowflakeIcon size={14} className="text-blue-400 shrink-0 mt-0.5" />
+                <div><span className="text-white/70">Hibernate</span> — Now or scheduled (1-3h)</div>
               </div>
               <div className="flex items-start gap-2">
                 <TerminalIcon size={14} className="text-blue-400 shrink-0 mt-0.5" />

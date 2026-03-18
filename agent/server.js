@@ -428,7 +428,8 @@ app.post('/run', verifyPin, (req, res) => {
   }
 
   if (action === 'sleep' || action === 'hibernate') {
-    executeSleepAction(action);
+    const delaySec = req.body.params?.delay ? parseInt(req.body.params.delay, 10) : 0;
+    executeSleepAction(action, delaySec);
     return res.json({ ok: true, action });
   }
 
@@ -460,10 +461,41 @@ async function setCaptchaStatus(msg) {
   } catch {}
 }
 
-// Helper: execute sleep/hibernate with CAPTCHA pre-check
-async function executeSleepAction(action) {
-  const onProgress = (msg) => setCaptchaStatus(msg);
+// Helper: execute sleep/hibernate
+let pendingHibernateTimer = null;
 
+async function executeSleepAction(action, delaySec = 0) {
+  // Cancel any pending scheduled hibernate
+  if (pendingHibernateTimer) {
+    clearTimeout(pendingHibernateTimer);
+    pendingHibernateTimer = null;
+    console.log('[hibernate] Cancelled pending scheduled hibernate');
+  }
+
+  // Delayed execution: schedule and return
+  if (delaySec > 0) {
+    const hours = Math.round(delaySec / 3600);
+    console.log(`[hibernate] Scheduled in ${delaySec}s (${hours}h)`);
+    setCaptchaStatus(`Hibernate scheduled in ${hours}h`);
+    pendingHibernateTimer = setTimeout(() => {
+      pendingHibernateTimer = null;
+      setCaptchaStatus('');
+      executeSleepAction(action, 0);
+    }, delaySec * 1000);
+    return;
+  }
+
+  if (action === 'hibernate') {
+    // Direct hibernate — no CAPTCHA needed (wake from hibernate not expected)
+    exec('shutdown /h', (err) => {
+      if (err) console.error('[hibernate] Error:', err.message);
+      else console.log('[hibernate] Entering hibernate mode');
+    });
+    return;
+  }
+
+  // Sleep flow with CAPTCHA pre-check (preserved for future use)
+  const onProgress = (msg) => setCaptchaStatus(msg);
   try {
     const freshCookie = await refreshBeforeSleep(onProgress);
     if (!freshCookie) {
@@ -487,10 +519,7 @@ async function executeSleepAction(action) {
   }
 
   setCaptchaStatus('');
-  const cmd = action === 'sleep'
-    ? 'rundll32.exe powrprof.dll,SetSuspendState 0,1,0'
-    : 'shutdown /h';
-  exec(cmd, (err) => {
+  exec('rundll32.exe powrprof.dll,SetSuspendState 0,1,0', (err) => {
     if (err) console.error(`[${action}] Error:`, err.message);
     else console.log(`[${action}] Entering ${action} mode`);
   });
@@ -575,7 +604,8 @@ function executeCommand(command) {
       console.log(`[session] Killed: ${command.name}`);
     }
   } else if (command.action === 'sleep' || command.action === 'hibernate') {
-    executeSleepAction(command.action);
+    const delaySec = command.params?.delay ? parseInt(command.params.delay, 10) : 0;
+    executeSleepAction(command.action, delaySec);
   } else if (command.action === 'captcha-fetch') {
     // User requested manual CAPTCHA — fetch image and store in KV
     if (captchaFetchInProgress) { console.log('[captcha] Skipping duplicate captcha-fetch'); return; }
