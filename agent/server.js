@@ -113,11 +113,12 @@ app.post('/shutdown', verifyPin, (req, res) => {
   }
 
   recordShutdownAttempt();
+  showToast('Shutting down in 10s...', 10);
   exec('shutdown /s /t 10', (err) => {
     if (err) {
       return res.status(500).json({ ok: false, message: err.message });
     }
-    res.json({ ok: true, message: 'Shutting down in 5s' });
+    res.json({ ok: true, message: 'Shutting down in 10s' });
   });
 });
 
@@ -459,10 +460,9 @@ app.post('/run', verifyPin, (req, res) => {
 const VERCEL_URL = process.env.VERCEL_URL;
 const AGENT_SECRET = process.env.AGENT_SECRET;
 
-// Helper: show Windows toast notification (3 seconds)
-function showToast(message) {
-  const escaped = message.replace(/'/g, "''");
-  exec(`powershell.exe -Command "Add-Type -AssemblyName System.Windows.Forms; $n = New-Object System.Windows.Forms.NotifyIcon; $n.Icon = [System.Drawing.SystemIcons]::Information; $n.Visible = $true; $n.ShowBalloonTip(3000, 'Button', '${escaped}', 'Info'); Start-Sleep -Seconds 3; $n.Dispose()"`, (err) => {
+// Helper: show Windows toast notification via msg command (works from SYSTEM session)
+function showToast(message, seconds = 3) {
+  exec(`msg * /TIME:${seconds} "${message.replace(/"/g, "'')}"`, (err) => {
     if (err) console.error('[toast] Error:', err.message);
   });
 }
@@ -585,9 +585,10 @@ function executeCommand(command) {
       return;
     }
     recordShutdownAttempt();
+    showToast('Shutting down in 10s...', 10);
     exec('shutdown /s /t 10', (err) => {
       if (err) console.error('[heartbeat] Shutdown error:', err.message);
-      else console.log('[heartbeat] Shutting down in 5s');
+      else console.log('[heartbeat] Shutting down in 10s');
     });
   } else if (command.action === 'proj') {
     if (command.name && SAFE_NAME_RE.test(command.name)) {
