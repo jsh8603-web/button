@@ -462,7 +462,8 @@ const AGENT_SECRET = process.env.AGENT_SECRET;
 
 // Helper: show Windows toast notification via msg command (works from SYSTEM session)
 function showToast(message, seconds = 3) {
-  exec(`msg * /TIME:${seconds} "${message.replace(/"/g, "'')}"`, (err) => {
+  const safe = message.replace(/"/g, "'");
+  exec(`msg * /TIME:${seconds} "${safe}"`, (err) => {
     if (err) console.error('[toast] Error:', err.message);
   });
 }
