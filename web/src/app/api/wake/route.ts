@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import dns from "dns/promises";
-import { kvGet, KEYS } from "@/lib/kv";
+// Router WOL (legacy, preserved — see external-login-dormant.md)
+// import { kvGet, KEYS } from "@/lib/kv";
 
 function createMagicPacket(mac: string): Buffer {
   const macBytes = mac
@@ -24,37 +25,27 @@ function createMagicPacket(mac: string): Buffer {
   return packet;
 }
 
-// Send WOL via router's built-in Wake On LAN (LAN broadcast — works for Sleep/Hibernate)
-async function sendRouterWol(host: string, mac: string): Promise<{ ok: boolean; detail: string }> {
+// Send WOL via Raspberry Pi relay on LAN (works for Sleep/Hibernate/Shutdown)
+async function sendPiWol(host: string): Promise<{ ok: boolean; detail: string }> {
   try {
-    // Get router session cookie from KV (set by agent's heartbeat)
-    const routerCookie = await kvGet<string>(KEYS.routerCookie);
-    if (!routerCookie) {
-      return { ok: false, detail: "No router session cookie in KV" };
+    const piPort = process.env.PI_WOL_PORT || "7777";
+    const secret = process.env.AGENT_SECRET;
+    if (!secret) {
+      return { ok: false, detail: "AGENT_SECRET not configured" };
     }
 
-    // Use remote port 88 with session cookie authentication
-    const baseUrl = `http://${host}:88`;
-    const wolUrl = `${baseUrl}/web/inner_data.html?func=wake_on_lan(%221%22,%22${mac}%22)`;
-
-    const res = await fetch(wolUrl, {
+    const res = await fetch(`http://${host}:${piPort}/wake`, {
+      method: "POST",
       headers: {
-        'Cookie': routerCookie,
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        "Authorization": `Bearer ${secret}`,
       },
       signal: AbortSignal.timeout(10000),
     });
 
-    const text = await res.text();
-
-    // Check if session expired (redirected to login)
-    if (text.includes('captcha') || text.includes('http_passwd') || text.includes('intro')) {
-      return { ok: false, detail: `session-expired: status=${res.status}` };
-    }
-
+    const data = await res.json();
     return {
-      ok: res.ok,
-      detail: `cookie-auth: status=${res.status}, body=${text.substring(0, 200)}`,
+      ok: res.ok && data.ok,
+      detail: `pi-relay: status=${res.status}, packets=${data.packets || 0}`,
     };
   } catch (err) {
     return { ok: false, detail: err instanceof Error ? err.message : String(err) };
@@ -130,12 +121,12 @@ export async function POST() {
         await sendOnce();
         client.close();
       })(),
-      sendRouterWol(targetIp, mac),
+      sendPiWol(host),
     ]);
 
     log.step = "sent";
     log.udp = udpResult.status === "fulfilled" ? "success" : (udpResult as PromiseRejectedResult).reason?.message;
-    log.routerWol = routerResult.status === "fulfilled" ? (routerResult as PromiseFulfilledResult<{ ok: boolean; detail: string }>).value : (routerResult as PromiseRejectedResult).reason?.message;
+    log.piWol = routerResult.status === "fulfilled" ? (routerResult as PromiseFulfilledResult<{ ok: boolean; detail: string }>).value : (routerResult as PromiseRejectedResult).reason?.message;
     log.result = "success";
     console.log("[wake]", JSON.stringify(log));
     return NextResponse.json({ ok: true, message: "Magic packet sent", log });

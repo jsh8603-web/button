@@ -518,7 +518,18 @@ async function executeSleepAction(action, delaySec = 0) {
     return;
   }
 
-  // Sleep flow with CAPTCHA pre-check (preserved for future use)
+  // Sleep — Pi relay handles WOL wake, no CAPTCHA needed
+  showToast('Entering sleep...');
+  setTimeout(() => {
+    exec('rundll32.exe powrprof.dll,SetSuspendState 0,1,0', (err) => {
+      if (err) console.error('[sleep] Error:', err.message);
+      else console.log('[sleep] Entering sleep mode');
+    });
+  }, 3000);
+
+  // --- Legacy CAPTCHA-based sleep flow (preserved for router-only wake) ---
+  // To re-enable: remove the block above and uncomment below.
+  /*
   const onProgress = (msg) => setCaptchaStatus(msg);
   try {
     const freshCookie = await refreshBeforeSleep(onProgress);
@@ -541,12 +552,12 @@ async function executeSleepAction(action, delaySec = 0) {
     setCaptchaStatus(`CAPTCHA 실패 — ${action} 취소됨`);
     return;
   }
-
   setCaptchaStatus('');
   exec('rundll32.exe powrprof.dll,SetSuspendState 0,1,0', (err) => {
     if (err) console.error(`[${action}] Error:`, err.message);
     else console.log(`[${action}] Entering ${action} mode`);
   });
+  */
 }
 const HEARTBEAT_INTERVAL = 30_000;
 const FAST_POLL_INTERVAL = 5_000;

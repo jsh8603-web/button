@@ -10,14 +10,18 @@ PC에 상주하는 Agent가 30초마다 heartbeat를 보내 온라인 상태와 
 ```
 [모바일 브라우저] → [Vercel Next.js API] ←→ [Supabase KV] ←→ [PC Agent]
                          │                                         │
-                    WOL: UDP 직접 + 공유기 API 이중 전송   30초 heartbeat 루프
+                    WOL: UDP 직접 + Pi 릴레이 이중 전송    30초 heartbeat 루프
                     그 외: KV에 command 저장               KV에서 command pull → 실행
+                         │
+                    [Raspberry Pi] ← HTTP POST /wake
+                         │
+                    LAN 브로드캐스트 매직패킷 → PC Wake
 ```
 
 ## 아키텍처 (Heartbeat Push Model)
 
 - Web↔Agent 직접 통신 없음: Supabase KV를 매개로 비동기 통신
-- WOL 이중 전송: ① Vercel에서 직접 UDP Magic Packet (Shutdown용) ② 공유기 WOL API 호출 (Sleep/Hibernate용, port 88)
+- WOL 이중 전송: ① Vercel에서 직접 UDP Magic Packet ② Raspberry Pi 릴레이 (LAN 브로드캐스트, port 7777) — Sleep/Hibernate/Shutdown 모두 대응
 - 공유기 세션 유지: Agent 부팅 시 KV 쿠키 복원(유효→CAPTCHA 스킵) → pg_cron 5분마다 keep-alive → 세션 영구 유지
 - Sleep/Hibernate 전: 쿠키 유효성 확인 후 KV에 24h TTL로 저장 (CAPTCHA 재풀이 불필요)
 - Agent는 heartbeat 응답으로 대기 명령을 수신하고, 실행 후 KV에서 삭제 (1회 실행 보장)
@@ -54,6 +58,10 @@ agent/                        → PC Agent (Express, Windows 서비스)
   install.bat                 → Task Scheduler 등록 (SYSTEM, onstart)
   enable-autologin.bat        → Windows 자동 로그인 레지스트리 설정
 
+pi/                           → Raspberry Pi WOL 릴레이 (LAN에서 매직패킷 전송)
+  wol-server.js               → HTTP 서버 (POST /wake → UDP 브로드캐스트)
+  setup.sh                    → systemd 서비스 등록 스크립트
+
 supabase/migrations/          → agent_kv 테이블 생성 SQL (RLS 적용)
 ```
 
@@ -71,8 +79,9 @@ cd agent && node server.js    # Agent 실행
 2. 수동 테스트: 브라우저에서 PIN 입력 → 버튼 동작 확인
 
 ## 환경변수
-- `web/.env.local`: PIN_HASH, JWT_SECRET, PC_HOST, PC_MAC, WOL_PORT, AGENT_SECRET, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, ROUTER_PASSWORD
+- `web/.env.local`: PIN_HASH, JWT_SECRET, PC_HOST, PC_MAC, WOL_PORT, PI_WOL_PORT, AGENT_SECRET, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, ROUTER_PASSWORD
 - `Vercel env (Production)`: 위 항목 + CRON_SECRET (Supabase pg_cron keep-alive 인증)
+- `pi/.env`: PORT, AGENT_SECRET, PC_MAC, BROADCAST
 - `agent/.env`: PORT, PIN_HASH, ALLOWED_ORIGIN, VERCEL_URL, AGENT_SECRET, PROJECTS_DIR, EDITOR_CMD, EDITOR_TITLE, BASH_PATH, CLAUDE_BIN, CLAUDE_MODEL, IGNORE_DIRS, GEMINI_API_KEY, ROUTER_PASSWORD, CAPTCHA_API_KEY, OPENAI_API_KEY
 - 상세 설명: 각 디렉토리의 `.env.example` 참조
 
@@ -113,13 +122,14 @@ cd agent && node server.js    # Agent 실행
 ### Quick Actions (온라인 시 표시, 활성 드롭다운은 색상 하이라이트)
 | 아이콘 | 색상 | 이름 | 동작 |
 |--------|------|------|------|
-| Snowflake | 파랑 | Hibernate | Hibernate 드롭다운 (Now/1h/2h/3h) |
+| Snowflake | 파랑 | Power Menu | Sleep + Hibernate 드롭다운 |
 | Terminal | 파랑 (badge: 세션수) | Sessions | 세션 관리 드롭다운 |
 | Folder | 앰버 | Projects | 프로젝트 열기 드롭다운. **미보호 세션 전부 kill 후 열기** |
 
-### Hibernate 드롭다운
+### Power Menu 드롭다운
 | 아이콘 | 색상 | 이름 | 동작 |
 |--------|------|------|------|
+| Moon | 보라 | Sleep Now | 즉시 Sleep (confirm) — Pi 릴레이로 Wake 가능 |
 | Snowflake | 파랑 | Hibernate Now | 즉시 `shutdown /h` (confirm) |
 | Snowflake | 파랑/60% | In 1/2/3 hours | 지연 실행 (Agent에서 setTimeout) |
 

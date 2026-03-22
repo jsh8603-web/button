@@ -174,6 +174,16 @@ function FolderIcon({ size = 20, className }: { size?: number; className?: strin
   );
 }
 
+function MoonIcon({ size = 20, className }: { size?: number; className?: string }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"
+      className={className}>
+      <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+    </svg>
+  );
+}
+
 function XIcon({ size = 14, className }: { size?: number; className?: string }) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none"
@@ -466,7 +476,7 @@ function Dashboard() {
   }[status];
 
   const offlineLabel = lastPowerAction
-    ? { hibernate: "Hibernating", shutdown: "Shut Down" }[lastPowerAction] || "PC is OFF"
+    ? { hibernate: "Hibernating", shutdown: "Shut Down", sleep: "Sleeping" }[lastPowerAction] || "PC is OFF"
     : "PC is OFF";
   const statusText = {
     online: "PC is ON",
@@ -569,6 +579,18 @@ function Dashboard() {
         `}
       >
         <div className="bg-white/5 border border-white/10 rounded-xl overflow-hidden">
+          <button
+            onClick={() => {
+              if (!window.confirm("Sleep now?")) return;
+              handlePowerAction("sleep", "Sleep Now");
+            }}
+            className="w-full px-4 py-3 text-left text-sm text-white/70
+              hover:bg-white/10 hover:text-white transition-colors flex items-center gap-3
+              border-b border-white/5"
+          >
+            <MoonIcon size={18} className="text-purple-400" />
+            <span>Sleep Now</span>
+          </button>
           {[
             { label: "Hibernate Now", delay: "0" },
             { label: "In 1 hour", delay: "3600" },
@@ -738,6 +760,10 @@ function Dashboard() {
 
               <div className="border-t border-white/10 pt-2 text-white/40 text-[10px]">Quick Actions (online only)</div>
 
+              <div className="flex items-start gap-2">
+                <MoonIcon size={14} className="text-purple-400 shrink-0 mt-0.5" />
+                <div><span className="text-white/70">Sleep</span> — Low-power sleep (instant wake)</div>
+              </div>
               <div className="flex items-start gap-2">
                 <SnowflakeIcon size={14} className="text-blue-400 shrink-0 mt-0.5" />
                 <div><span className="text-white/70">Hibernate</span> — Now or scheduled (1-3h)</div>

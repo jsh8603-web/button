@@ -1,0 +1,9 @@
+{
+  "name": "button-wol-relay",
+  "version": "1.0.0",
+  "description": "WOL magic packet relay on Raspberry Pi",
+  "main": "wol-server.js",
+  "scripts": {
+    "start": "node wol-server.js"
+  }
+}
