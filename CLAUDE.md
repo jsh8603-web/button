@@ -73,7 +73,7 @@ cd agent && node server.js    # Agent 실행
 ## 환경변수
 - `web/.env.local`: PIN_HASH, JWT_SECRET, PC_HOST, PC_MAC, WOL_PORT, AGENT_SECRET, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, ROUTER_PASSWORD
 - `Vercel env (Production)`: 위 항목 + CRON_SECRET (Supabase pg_cron keep-alive 인증)
-- `agent/.env`: PORT, PIN_HASH, ALLOWED_ORIGIN, VERCEL_URL, AGENT_SECRET, PROJECTS_DIR, EDITOR_CMD, EDITOR_TITLE, BASH_PATH, CLAUDE_BIN, CLAUDE_MODEL, IGNORE_DIRS, ANTHROPIC_API_KEY, ROUTER_PASSWORD, CAPTCHA_API_KEY, OPENAI_API_KEY
+- `agent/.env`: PORT, PIN_HASH, ALLOWED_ORIGIN, VERCEL_URL, AGENT_SECRET, PROJECTS_DIR, EDITOR_CMD, EDITOR_TITLE, BASH_PATH, CLAUDE_BIN, CLAUDE_MODEL, IGNORE_DIRS, GEMINI_API_KEY, ROUTER_PASSWORD, CAPTCHA_API_KEY, OPENAI_API_KEY
 - 상세 설명: 각 디렉토리의 `.env.example` 참조
 
 ## Supabase
@@ -84,7 +84,7 @@ cd agent && node server.js    # Agent 실행
 - 관리: `npx supabase db query --linked "SELECT * FROM cron.job;"`
 
 ## CAPTCHA 시스템
-- 핵심 코드: `agent/router-wol.js` (3-solver: CapSolver ~69% + Claude Opus + GPT-4o-mini)
+- 핵심 코드: `agent/router-wol.js` (3-solver: CapSolver ~69% + Gemini Flash + GPT-4o-mini)
 - 학습 데이터: `agent/.captcha-learned.json`
 - keepAlive 엔드포인트: `/web/main.html` (inner_data.html은 port 80에서 빈 응답)
 - **CAPTCHA는 1회용**: 첫 오답 후 무효화됨 → 같은 CAPTCHA로 재시도 불가 → POST는 최고 점수 1회만 시도

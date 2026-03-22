@@ -15,7 +15,7 @@
 - 하위 scoring/variant 시스템은 자동 적응 (length voting 유지)
 
 ## 3-solver 아키텍처
-GPT-4o-mini (2 reads) + Claude Opus (3 reads) + CapSolver (1) — 병렬 실행
+GPT-4o-mini (2 reads) + Gemini Flash (3 reads) + CapSolver (1) — 병렬 실행
 - 모든 솔버 출력은 `cleanCaptchaRead()` → `isValidCaptcha()` 통과 필수
 - 동적 가중치: Bayesian smoothed accuracy (prior_weight=10)
 - Cross-solver variants: 같은 길이 후보 간 문자 조합

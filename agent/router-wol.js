@@ -284,46 +284,48 @@ async function solveCaptchaGPT(imageBuffer) {
   return candidates;
 }
 
-// --- Claude Vision CAPTCHA solver (alternative to GPT) ---
+// --- Gemini Vision CAPTCHA solver (alternative to GPT) ---
 
-async function solveCaptchaClaude(imageBuffer) {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) throw new Error('ANTHROPIC_API_KEY not set');
-
-  const Anthropic = require('@anthropic-ai/sdk');
-  const client = new Anthropic({ apiKey });
+async function solveCaptchaGemini(imageBuffer) {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) throw new Error('GEMINI_API_KEY not set');
 
   const processedImage = await preprocessImage(imageBuffer);
   const base64Image = processedImage.toString('base64');
 
   // 3 parallel reads: 2x low temp (precision) + 1x grounding prompt
   const readConfigs = [
-    { temp: 0.2, system: CAPTCHA_SYSTEM_PROMPT, user: CAPTCHA_USER_PROMPT },
-    { temp: 0.3, system: CAPTCHA_SYSTEM_PROMPT, user: CAPTCHA_USER_PROMPT },
+    { temp: 0.2, system: CAPTCHA_SYSTEM_PROMPT, user: CAPTCHA_USER_PROMPT, maxTokens: 50 },
+    { temp: 0.3, system: CAPTCHA_SYSTEM_PROMPT, user: CAPTCHA_USER_PROMPT, maxTokens: 50 },
     { temp: 0.2, system: CAPTCHA_SYSTEM_PROMPT, user: CAPTCHA_GROUNDING_PROMPT, maxTokens: 200 },
   ];
 
-  const responses = await Promise.all(readConfigs.map(cfg =>
-    client.messages.create({
-      model: 'claude-opus-4-6',
-      max_tokens: cfg.maxTokens || 50,
-      temperature: cfg.temp,
-      system: cfg.system,
-      messages: [{
-        role: 'user',
-        content: [
-          { type: 'image', source: { type: 'base64', media_type: 'image/png', data: base64Image } },
-          { type: 'text', text: cfg.user },
-        ],
-      }],
-    }).then(r => {
-      const text = r.content[0]?.text || '';
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`;
+
+  const responses = await Promise.all(readConfigs.map(cfg => {
+    const body = {
+      systemInstruction: { parts: [{ text: cfg.system }] },
+      contents: [{ parts: [
+        { inlineData: { mimeType: 'image/png', data: base64Image } },
+        { text: cfg.user },
+      ] }],
+      generationConfig: { temperature: cfg.temp, maxOutputTokens: cfg.maxTokens },
+    };
+    return fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+    .then(r => r.json())
+    .then(data => {
+      const text = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
       const lines = (cfg.maxTokens > 50 ? text.split('\n').slice(-3) : text.split('\n'))
         .map(l => cleanCaptchaRead(l))
         .filter(l => isValidCaptcha(l));
       return lines;
-    }).catch(e => { console.log(`[router] Claude error: ${e.message}`); return []; })
-  ));
+    })
+    .catch(e => { console.log(`[router] Gemini error: ${e.message}`); return []; });
+  }));
 
   const allReads = new Set();
   for (const lines of responses) {
@@ -339,9 +341,9 @@ async function solveCaptchaClaude(imageBuffer) {
   if (votedAll) allReads.add(votedAll);
 
   const candidates = [...allReads];
-  if (candidates.length === 0) throw new Error('All Claude CAPTCHA reads invalid');
+  if (candidates.length === 0) throw new Error('All Gemini CAPTCHA reads invalid');
 
-  console.log(`[router] Claude candidates (${candidates.length}): ${candidates.join(', ')}`);
+  console.log(`[router] Gemini candidates (${candidates.length}): ${candidates.join(', ')}`);
   return candidates;
 }
 
@@ -800,7 +802,7 @@ function saveLearned(learned) {
 
 /**
  * Dynamic solver weights based on cumulative accuracy.
- * 3-solver architecture: GPT-4o-mini (2 reads) + Claude Opus (3 reads) + CapSolver (1)
+ * 3-solver architecture: GPT-4o-mini (2 reads) + Gemini Flash (3 reads) + CapSolver (1)
  * ALL weights adapt to observed solver performance — no static values.
  */
 function getDynamicWeights(learned) {
@@ -1005,7 +1007,7 @@ async function login(host, port) {
       console.log(`[router] GPT CAPTCHA failed: ${err.message}`);
       return [];
     }),
-    solveCaptchaClaude(imgRes.data).catch(err => {
+    solveCaptchaGemini(imgRes.data).catch(err => {
       console.log(`[router] Opus CAPTCHA failed: ${err.message}`);
       return [];
     }),
@@ -1331,7 +1333,7 @@ async function fetchManualCaptcha() {
           manualCaptchaCandidates.solverAnswers.gptTop = r[0];
         }
       }),
-      solveCaptchaClaude(imgRes.data).then(r => {
+      solveCaptchaGemini(imgRes.data).then(r => {
         if (r && r.length > 0) {
           manualCaptchaCandidates.gptCandidates.push(...r);
           manualCaptchaCandidates.solverAnswers.opusTop = r[0];

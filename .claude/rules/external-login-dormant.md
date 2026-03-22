@@ -70,7 +70,7 @@ routerCookie: getExternalCookie() || routerCookie,
 ## 3-Solver CAPTCHA 아키텍처 (보존)
 
 코드 전부 `router-wol.js`에 보존됨:
-- GPT-4o-mini (2 reads) + Claude Opus (3 reads) + CapSolver (1) — 병렬
+- GPT-4o-mini (2 reads) + Gemini Flash (3 reads) + CapSolver (1) — 병렬
 - 동적 가중치: Bayesian smoothed accuracy
 - Cross-solver variants + Beam search (top 10)
 - 학습 데이터: `.captcha-learned.json`
