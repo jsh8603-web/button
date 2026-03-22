@@ -772,10 +772,11 @@ async function sendHeartbeat() {
     }));
 
     // Keep router session alive and get current cookie (skip during boot login)
+    // Pi relay handles WOL now — suppress CAPTCHA status messages to UI
     let routerCookie = null;
     if (routerBootDone) {
       try {
-        routerCookie = await heartbeatKeepAlive((msg) => setCaptchaStatus(msg));
+        routerCookie = await heartbeatKeepAlive((msg) => console.log('[router]', msg));
       } catch (err) {
         console.error('[heartbeat] Router keep-alive error:', err.message);
       }
@@ -890,9 +891,10 @@ app.listen(PORT, async () => {
   // Initialize router session — local port 80 only
   // External login (port 88) disabled: router WAN doesn't issue cookies, so
   // Vercel can't maintain session. Code preserved in router-wol.js for future use.
-  const bootProgress = (msg) => setCaptchaStatus(msg);
+  // Pi relay handles WOL — suppress CAPTCHA status to UI, log only
+  const bootProgress = (msg) => console.log('[router-boot]', msg);
   initRouterSession(storedRouterCookie, bootProgress).then(cookie => {
-    if (cookie) setCaptchaStatus('');
+    if (cookie) console.log('[router-boot] Session ready');
   }).catch(err => {
     console.error('[boot] Router login failed:', err.message);
   }).finally(() => {

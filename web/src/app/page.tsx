@@ -237,13 +237,7 @@ function Dashboard() {
         setSessions(data.sessions || []);
       }
       setLastPowerAction(isOnline ? null : data.lastAction || null);
-      // Show CAPTCHA progress from agent
-      const af = actionFeedbackRef.current;
-      if (data.captchaStatus) {
-        setActionFeedback(data.captchaStatus);
-      } else if (af?.startsWith("CAPTCHA") || af?.startsWith("Solving") || af?.startsWith("Fetching") || af?.startsWith("Verifying") || af?.startsWith("Wrong") || af?.startsWith("Failed")) {
-        setActionFeedback("");
-      }
+      // CAPTCHA status display removed — Pi relay handles WOL now
       setStatus((prev) => {
         if (prev === "waking") return isOnline ? "online" : prev;
         if (prev === "shutting-down") return !isOnline ? "offline" : prev;
