@@ -1,6 +1,8 @@
 const http = require('http');
 const dgram = require('dgram');
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 
 const PORT = parseInt(process.env.PORT || '7777', 10);
 const SECRET = process.env.AGENT_SECRET;
@@ -167,7 +169,7 @@ function getCookie(req, name) {
 }
 
 function corsHeaders(req) {
-  // Allow the requesting origin (static site on Vercel or local dev)
+  // CORS for local dev (production is same-origin, no CORS needed)
   const origin = req.headers.origin || '*';
   return {
     'Access-Control-Allow-Origin': origin,
@@ -200,6 +202,41 @@ function requireAuth(req) {
   return verifyJwt(token, JWT_SECRET) !== null;
 }
 
+// --- Static file serving ---
+
+const STATIC_DIR = path.join(__dirname, 'public');
+const MIME_TYPES = {
+  '.html': 'text/html', '.js': 'application/javascript', '.css': 'text/css',
+  '.json': 'application/json', '.png': 'image/png', '.jpg': 'image/jpeg',
+  '.svg': 'image/svg+xml', '.ico': 'image/x-icon', '.woff2': 'font/woff2',
+  '.woff': 'font/woff', '.txt': 'text/plain',
+};
+
+function serveStatic(req, res, pathname) {
+  let filePath = path.join(STATIC_DIR, pathname);
+  // Directory → index.html
+  if (pathname === '/' || !path.extname(pathname)) {
+    const indexPath = path.join(filePath, 'index.html');
+    if (fs.existsSync(indexPath)) filePath = indexPath;
+    else if (!path.extname(pathname)) filePath += '.html';
+  }
+  // Security: prevent path traversal
+  if (!filePath.startsWith(STATIC_DIR)) {
+    res.writeHead(403); return res.end();
+  }
+  try {
+    const data = fs.readFileSync(filePath);
+    const ext = path.extname(filePath);
+    const mime = MIME_TYPES[ext] || 'application/octet-stream';
+    const cacheControl = pathname.startsWith('/_next/static/') ? 'public, max-age=31536000, immutable' : 'no-cache';
+    res.writeHead(200, { 'Content-Type': mime, 'Cache-Control': cacheControl });
+    res.end(data);
+  } catch {
+    return null; // File not found — let caller handle
+  }
+  return true;
+}
+
 // --- Server ---
 
 const server = http.createServer(async (req, res) => {
@@ -217,6 +254,11 @@ const server = http.createServer(async (req, res) => {
   // --- Health (no auth) ---
   if (req.method === 'GET' && pathname === '/health') {
     return sendJson(res, 200, { ok: true, uptime: process.uptime() });
+  }
+
+  // --- Static files (before auth, non-API GET requests) ---
+  if (req.method === 'GET' && !pathname.startsWith('/api/')) {
+    if (serveStatic(req, res, pathname)) return;
   }
 
   // --- Auth: PIN → JWT cookie ---

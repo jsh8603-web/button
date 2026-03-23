@@ -3,45 +3,40 @@
 ## Summary
 
 모바일에서 집 PC를 원버튼으로 켜고 끄는 웹앱.
-Vercel에 정적 호스팅된 Next.js 앱 → Raspberry Pi가 API 게이트웨이 → PC Agent가 명령 실행.
-Pi가 LAN에서 WOL 매직패킷을 직접 브로드캐스트하고, Agent의 상태/세션/프로젝트를 중개한다.
+Raspberry Pi가 웹 UI + API를 모두 서빙하고, LAN에서 WOL + Agent 명령을 중개한다.
+외부 의존성 없음 (Vercel, Supabase 등 미사용).
 
 ```
-[모바일 브라우저] → [Vercel 정적 사이트]
-         ↓ (API 호출, Bearer JWT)
-   [Raspberry Pi :7777] ← API 게이트웨이 (인증 + WOL + Agent 중개)
-         ↓ (Bearer AGENT_SECRET)
-   [PC Agent :9876] ← 명령 실행 (즉시 응답, ~500ms)
+[모바일 브라우저] → [Raspberry Pi :7777] ← 웹 UI + API + WOL
+                         ↓ (Bearer AGENT_SECRET)
+                   [PC Agent :9876] ← 명령 실행 (즉시 응답, ~500ms)
 ```
 
-## 아키텍처 (Pi Relay Model)
+## 아키텍처 (Pi All-in-One)
 
-- **Vercel = 정적 호스팅만**: API 라우트 없음, `output: 'export'`
-- **Pi = API 게이트웨이**: PIN 인증(JWT 발급), WOL 브로드캐스트, Agent 상태/명령 중개
+- **Pi = 웹 서버 + API 게이트웨이**: 정적 파일 서빙 + PIN 인증(JWT) + WOL + Agent 중개
 - **Agent = 명령 실행기**: Express 서버, Pi로부터 HTTP 요청 받아 즉시 실행
-- **인증**: PIN → Pi가 Agent `/verify-pin`으로 검증 → JWT 토큰 발급 → 브라우저 localStorage
-- **WOL**: Pi가 LAN에서 UDP 매직패킷 직접 전송 (Sleep/Hibernate/Shutdown 모두 대응)
-- **반응 속도**: 명령 즉시 실행 (~500ms), 상태 조회도 직접 HTTP (heartbeat 폴링 없음)
+- **인증**: PIN → Pi가 Agent `/verify-pin`으로 검증 → JWT 발급 → 브라우저 localStorage
+- **WOL**: Pi가 LAN에서 UDP 매직패킷 직접 전송
+- **반응 속도**: ~500ms (직접 HTTP, heartbeat 폴링 없음)
 
 ## 구조
 ```
-web/                          → Next.js 정적 웹앱 (Vercel 배포, API 없음)
+web/                          → Next.js 소스 (빌드 후 Pi에 배포)
   src/app/
     layout.tsx                → 루트 레이아웃 (viewport, theme-color)
-    page.tsx                  → 메인 페이지 (PinEntry → Dashboard, SVG 아이콘, Pi API 호출)
+    page.tsx                  → 메인 페이지 (PinEntry → Dashboard, SVG 아이콘)
     globals.css               → Tailwind v4 + glow 애니메이션 키프레임
 
-pi/                           → Raspberry Pi API 게이트웨이
-  wol-server.js               → HTTP 서버 (인증 + WOL + Agent 중개)
+pi/                           → Raspberry Pi (웹 + API + WOL)
+  wol-server.js               → HTTP 서버 (정적 파일 + 인증 + WOL + Agent 중개)
+  public/                     → 빌드된 정적 파일 (web/out/ 복사본)
   setup.sh                    → systemd 서비스 등록 스크립트
 
 agent/                        → PC Agent (Express, Windows 서비스)
   server.js                   → Express 서버 (상태/명령 엔드포인트)
-  router-wol.js               → [dormant] CAPTCHA solver + 공유기 로그인 (보존)
-  CAPTCHA-SYSTEM.md           → [dormant] CAPTCHA 아키텍처 문서 (보존)
-  .captcha-learned.json       → [dormant] CAPTCHA 학습 데이터 (보존)
-  router-js/                  → [dormant] 공유기 RSA 라이브러리 (보존)
   .protected-sessions         → 보호된 세션 목록 (JSON, 재시작 시에도 유지)
+  .hibernate-schedule         → 예약 hibernate 영속 파일 (재부팅 시 복원)
   close-window.ps1            → 윈도우 창 닫기
   maximize-window.ps1         → 윈도우 창 최대화
   kill-sessions.sh            → btn-* tmux 세션 정리
@@ -50,12 +45,22 @@ agent/                        → PC Agent (Express, Windows 서비스)
   enable-autologin.bat        → Windows 자동 로그인 레지스트리 설정
 ```
 
+CAPTCHA 관련 파일 → §CAPTCHA 시스템 참조 (dormant, 삭제 금지)
+
 ## 명령어
 ```bash
-cd web && npm install && npm run build  # 정적 빌드 (out/ 생성)
-cd web && npm run dev                    # 로컬 개발
+cd web && npm run build              # 정적 빌드 (out/ 생성)
+cd web && npm run dev                # 로컬 개발
 cd agent && npm install && node server.js  # Agent 실행
-cd pi && node wol-server.js              # Pi relay 실행
+ssh pi@192.168.219.125               # Pi 접속 (SSH 키 등록됨)
+```
+
+## 배포 (Pi에 빌드 결과 전송)
+```bash
+cd web && NEXT_PUBLIC_API_URL="" npx next build   # 빈 API_URL로 빌드 (same-origin)
+tar czf /tmp/public.tar.gz -C out .
+scp /tmp/public.tar.gz pi@192.168.219.125:~/wol-relay/
+ssh pi@192.168.219.125 "cd ~/wol-relay && tar xzf public.tar.gz -C public && rm public.tar.gz && sudo systemctl restart wol-relay"
 ```
 
 ## wf 빌드/테스트
@@ -63,15 +68,16 @@ cd pi && node wol-server.js              # Pi relay 실행
 2. 수동 테스트: 브라우저에서 PIN 입력 → 버튼 동작 확인
 
 ## 환경변수
-- `web/.env.local`: NEXT_PUBLIC_API_URL (Pi relay URL, e.g. http://your-ip:7777)
 - `pi/.env`: PORT, AGENT_SECRET, PC_MAC, BROADCAST, AGENT_HOST, AGENT_PORT, PIN_HASH, JWT_SECRET
 - `agent/.env`: PORT, PIN_HASH, ALLOWED_ORIGIN, AGENT_SECRET, PROJECTS_DIR, EDITOR_CMD, EDITOR_TITLE, BASH_PATH, CLAUDE_BIN, CLAUDE_MODEL, IGNORE_DIRS
 - 상세 설명: 각 디렉토리의 `.env.example` 참조
 
-## Pi API 엔드포인트
+## Pi 엔드포인트
 
 | Method | Path | Auth | 동작 |
 |--------|------|------|------|
+| GET | / | - | 웹 UI (정적 파일) |
+| GET | /health | - | 헬스체크 |
 | POST | /api/auth | - | PIN → JWT 토큰 발급 |
 | GET | /api/status | JWT | Agent 상태 (online/offline, sessions, projects) |
 | POST | /api/wake | JWT | WOL 매직패킷 (LAN 브로드캐스트) |
@@ -85,7 +91,7 @@ cd pi && node wol-server.js              # Pi relay 실행
 |--------|------|------|------|
 | GET | /health | - | 상태 확인 (online, uptime) |
 | GET | /status | Bearer | 세션+프로젝트+uptime 전체 상태 |
-| POST | /verify-pin | - | PIN bcrypt 검증 (Pi relay용) |
+| POST | /verify-pin | - | PIN bcrypt 검증 (Pi용) |
 | POST | /shutdown | Bearer | 10초 후 shutdown |
 | POST | /run | Bearer | 명령 실행 (proj, sleep, hibernate 등) |
 | GET | /projects | Bearer | 프로젝트 목록 |
@@ -100,8 +106,8 @@ cd pi && node wol-server.js              # Pi relay 실행
 ## Critical Rules
 - Agent Bearer 토큰 = `AGENT_SECRET` (Pi↔Agent 인증)
 - `.env` 파일 커밋 금지
-- 세션 보호 optimistic UI: action 후 35초간 서버 sessions 폴링 무시 (깜빡임 방지)
-- CAPTCHA 코드(`router-wol.js`, `router-js/`, `.captcha-learned.json`, `CAPTCHA-SYSTEM.md`) 삭제 금지 — dormant 보존
+- 세션 보호 optimistic UI: action 후 35초간 서버 sessions 폴링 무시
+- CAPTCHA 코드 삭제 금지 — dormant 보존
 
 ## UI 아이콘 인덱스 (모두 SVG)
 

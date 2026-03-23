@@ -2,6 +2,11 @@ node_modules/
 .env
 .env.local
 .next/
+out/
+
+# Pi 빌드 결과물
+pi/public/
+pi/*.tar.gz
 
 # Agent 런타임 파일
 agent/.last-project
@@ -16,8 +21,8 @@ agent/agent.log
 # 개인 설계문서
 plan.md
 
-# Supabase CLI 임시 파일
-supabase/.temp/
+# Supabase (removed, kept for safety)
+supabase/
 
 # debug files
 captcha*.gif

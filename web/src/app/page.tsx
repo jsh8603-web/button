@@ -212,6 +212,30 @@ function MoonIcon({ size = 20, className }: { size?: number; className?: string 
   );
 }
 
+function MonitorOffIcon({ size = 20, className }: { size?: number; className?: string }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"
+      className={className}>
+      <rect x="2" y="3" width="20" height="14" rx="2" ry="2" />
+      <line x1="8" y1="21" x2="16" y2="21" />
+      <line x1="12" y1="17" x2="12" y2="21" />
+      <line x1="7" y1="7" x2="17" y2="13" />
+    </svg>
+  );
+}
+
+function ClockIcon({ size = 20, className }: { size?: number; className?: string }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"
+      className={className}>
+      <circle cx="12" cy="12" r="10" />
+      <polyline points="12 6 12 12 16 14" />
+    </svg>
+  );
+}
+
 function XIcon({ size = 14, className }: { size?: number; className?: string }) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none"
@@ -243,7 +267,7 @@ function Dashboard() {
   const [showPowerMenu, setShowPowerMenu] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
   const [lastPowerAction, setLastPowerAction] = useState<string | null>(null);
-  const [hibernateScheduled, setHibernateScheduled] = useState<string | null>(null);
+  const [scheduledAction, setScheduledAction] = useState<{ type: string; label: string } | null>(null);
   const newProjInputRef = useRef<HTMLInputElement>(null);
   const sessionActionTime = useRef(0);
   const actionFeedbackRef = useRef(actionFeedback);
@@ -370,10 +394,11 @@ function Dashboard() {
       });
       if (delay > 0) {
         const hours = Math.round(delay / 3600);
-        setHibernateScheduled(`${hours}h`);
-        setActionFeedback(`Hibernate in ${hours}h scheduled`);
+        const typeLabel = action === "sleep" ? "Sleep" : "Hibernate";
+        setScheduledAction({ type: action, label: `${typeLabel} ${hours}h` });
+        setActionFeedback(`${typeLabel} in ${hours}h scheduled`);
       } else {
-        setHibernateScheduled(null);
+        setScheduledAction(null);
         setActionFeedback(`${label} signal sent`);
       }
     } catch {
@@ -382,16 +407,16 @@ function Dashboard() {
     setTimeout(() => setActionFeedback(""), 5000);
   };
 
-  const handleCancelHibernate = async () => {
+  const handleCancelScheduled = async () => {
     setShowPowerMenu(false);
-    setHibernateScheduled(null);
+    setScheduledAction(null);
     try {
       await api("/api/run", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action: "hibernate-cancel" }),
       });
-      setActionFeedback("Hibernate cancelled");
+      setActionFeedback("Schedule cancelled");
     } catch {
       setActionFeedback("Failed to reach PC");
     }
@@ -589,52 +614,92 @@ function Dashboard() {
       {/* Power Menu Dropdown */}
       <div
         className={`
-          mt-4 w-52 transition-all duration-300 overflow-hidden
-          ${status === "online" && showPowerMenu ? "max-h-80 opacity-100" : "max-h-0 opacity-0"}
+          mt-4 w-56 transition-all duration-300 overflow-hidden
+          ${status === "online" && showPowerMenu ? "max-h-[500px] opacity-100" : "max-h-0 opacity-0"}
         `}
       >
         <div className="bg-white/5 border border-white/10 rounded-xl overflow-hidden">
+          {/* Monitor Off */}
+          <button
+            onClick={() => handlePowerAction("display_off", "Monitor Off")}
+            className="w-full px-4 py-3 text-left text-sm text-white/70
+              hover:bg-white/10 hover:text-white transition-colors flex items-center gap-3
+              border-b border-white/5"
+          >
+            <MonitorOffIcon size={18} className="text-slate-400" />
+            <span>Monitor Off</span>
+          </button>
+
+          {/* Sleep section */}
+          <div className="border-b border-white/10">
+            <button
+              onClick={() => {
+                if (!window.confirm("Sleep now?")) return;
+                handlePowerAction("sleep", "Sleep");
+              }}
+              className="w-full px-4 py-3 text-left text-sm text-white/70
+                hover:bg-white/10 hover:text-white transition-colors flex items-center gap-3
+                border-b border-white/5"
+            >
+              <MoonIcon size={18} className="text-purple-400" />
+              <span>Sleep</span>
+            </button>
+            {[
+              { label: "Sleep 1h", delay: "3600" },
+              { label: "Sleep 2h", delay: "7200" },
+            ].map((opt) => (
+              <button
+                key={`sleep-${opt.delay}`}
+                onClick={() => handlePowerAction("sleep", opt.label, { delay: opt.delay })}
+                className="w-full px-4 py-3 text-left text-sm text-white/70
+                  hover:bg-white/10 hover:text-white transition-colors flex items-center gap-3
+                  border-b border-white/5 last:border-b-0"
+              >
+                <ClockIcon size={16} className="text-purple-400/60" />
+                <span>{opt.label}</span>
+              </button>
+            ))}
+          </div>
+
+          {/* Hibernate section */}
           <button
             onClick={() => {
-              if (!window.confirm("Sleep now?")) return;
-              handlePowerAction("sleep", "Sleep Now");
+              if (!window.confirm("Hibernate now?")) return;
+              handlePowerAction("hibernate", "Hibernate");
             }}
             className="w-full px-4 py-3 text-left text-sm text-white/70
               hover:bg-white/10 hover:text-white transition-colors flex items-center gap-3
               border-b border-white/5"
           >
-            <MoonIcon size={18} className="text-purple-400" />
-            <span>Sleep Now</span>
+            <SnowflakeIcon size={18} className="text-blue-400" />
+            <span>Hibernate</span>
           </button>
           {[
-            { label: "Hibernate Now", delay: "0" },
-            { label: "In 1 hour", delay: "3600" },
-            { label: "In 2 hours", delay: "7200" },
-            { label: "In 3 hours", delay: "10800" },
+            { label: "Hibernate 1h", delay: "3600" },
+            { label: "Hibernate 2h", delay: "7200" },
           ].map((opt) => (
             <button
-              key={opt.delay}
-              onClick={() => {
-                if (opt.delay === "0" && !window.confirm("Hibernate now?")) return;
-                handlePowerAction("hibernate", opt.label, { delay: opt.delay });
-              }}
+              key={`hib-${opt.delay}`}
+              onClick={() => handlePowerAction("hibernate", opt.label, { delay: opt.delay })}
               className="w-full px-4 py-3 text-left text-sm text-white/70
                 hover:bg-white/10 hover:text-white transition-colors flex items-center gap-3
                 border-b border-white/5 last:border-b-0"
             >
-              <SnowflakeIcon size={18} className={opt.delay === "0" ? "text-blue-400" : "text-blue-400/60"} />
+              <ClockIcon size={16} className="text-blue-400/60" />
               <span>{opt.label}</span>
             </button>
           ))}
-          {hibernateScheduled && (
+
+          {/* Cancel scheduled action */}
+          {scheduledAction && (
             <button
-              onClick={handleCancelHibernate}
+              onClick={handleCancelScheduled}
               className="w-full px-4 py-3 text-left text-sm text-red-400/80
                 hover:bg-red-500/10 hover:text-red-400 transition-colors flex items-center gap-3
                 border-t border-white/10"
             >
               <XIcon size={14} className="text-red-400" />
-              <span>Cancel ({hibernateScheduled})</span>
+              <span>Cancel ({scheduledAction.label})</span>
             </button>
           )}
         </div>
@@ -776,12 +841,16 @@ function Dashboard() {
               <div className="border-t border-white/10 pt-2 text-white/40 text-[10px]">Quick Actions (online only)</div>
 
               <div className="flex items-start gap-2">
+                <MonitorOffIcon size={14} className="text-slate-400 shrink-0 mt-0.5" />
+                <div><span className="text-white/70">Monitor Off</span> — Turn off display</div>
+              </div>
+              <div className="flex items-start gap-2">
                 <MoonIcon size={14} className="text-purple-400 shrink-0 mt-0.5" />
-                <div><span className="text-white/70">Sleep</span> — Low-power sleep (instant wake)</div>
+                <div><span className="text-white/70">Sleep</span> — Now or scheduled (1-2h)</div>
               </div>
               <div className="flex items-start gap-2">
                 <SnowflakeIcon size={14} className="text-blue-400 shrink-0 mt-0.5" />
-                <div><span className="text-white/70">Hibernate</span> — Now or scheduled (1-3h)</div>
+                <div><span className="text-white/70">Hibernate</span> — Now or scheduled (1-2h)</div>
               </div>
               <div className="flex items-start gap-2">
                 <TerminalIcon size={14} className="text-blue-400 shrink-0 mt-0.5" />
