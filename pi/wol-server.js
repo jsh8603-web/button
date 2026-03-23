@@ -188,7 +188,7 @@ function sendWol() {
 
 // --- Agent proxy helper ---
 
-function agentRequest(method, path, body) {
+function agentRequest(method, path, body, timeoutMs = 10000) {
   return new Promise((resolve, reject) => {
     const options = {
       hostname: AGENT_HOST,
@@ -199,7 +199,7 @@ function agentRequest(method, path, body) {
         'Authorization': `Bearer ${SECRET}`,
         'Content-Type': 'application/json',
       },
-      timeout: 10000,
+      timeout: timeoutMs,
     };
 
     const req = http.request(options, (res) => {
@@ -392,7 +392,7 @@ const server = http.createServer(async (req, res) => {
   // --- Status: check if Agent is online, get sessions/projects ---
   if (req.method === 'GET' && pathname === '/api/status') {
     try {
-      const result = await agentRequest('GET', '/status');
+      const result = await agentRequest('GET', '/status', null, 2000);
       if (result.data?.metrics) checkAlerts(result.data.metrics);
       return sendJson(res, 200, { ...result.data, alerts });
     } catch {
