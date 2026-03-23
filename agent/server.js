@@ -297,7 +297,8 @@ function scheduleEditorClose(task, editorPid) {
         if (Date.now() - startTime >= IDLE_TIMEOUT) {
           clearInterval(interval);
           try { process.kill(editorPid); } catch {}
-          console.log(`[ai-task] 10min idle, closed editor (PID ${editorPid})`);
+          exec(`"${BASH_PATH}" -lc "tmux kill-session -t ${session} 2>/dev/null"`, () => {});
+          console.log(`[ai-task] 10min idle, closed editor (PID ${editorPid}) and killed session ${session}`);
         }
       });
     });
