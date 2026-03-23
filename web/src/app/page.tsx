@@ -5,11 +5,38 @@ import { useState, useEffect, useRef, useCallback } from "react";
 type PcStatus = "online" | "offline" | "waking" | "shutting-down";
 
 const POLL_INTERVAL = 10; // seconds
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
 
 function nextRefresh(date: Date): string {
   const elapsed = Math.floor((Date.now() - date.getTime()) / 1000);
   const remaining = Math.max(0, POLL_INTERVAL - elapsed);
   return `${remaining}s`;
+}
+
+function getToken(): string | null {
+  try { return localStorage.getItem("auth-token"); } catch { return null; }
+}
+
+function setToken(token: string) {
+  try { localStorage.setItem("auth-token", token); } catch {}
+}
+
+function clearToken() {
+  try { localStorage.removeItem("auth-token"); } catch {}
+}
+
+function api(path: string, options?: RequestInit) {
+  const token = getToken();
+  const headers: Record<string, string> = {
+    ...(options?.headers as Record<string, string> || {}),
+  };
+  if (token) {
+    headers["Authorization"] = `Bearer ${token}`;
+  }
+  return fetch(`${API_BASE}${path}`, {
+    ...options,
+    headers,
+  });
 }
 
 // ─── PIN Entry ───────────────────────────────────────────────
@@ -29,12 +56,14 @@ function PinEntry({ onAuth }: { onAuth: () => void }) {
       setLoading(true);
       setError(false);
       try {
-        const res = await fetch("/api/auth", {
+        const res = await api("/api/auth", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ pin }),
         });
         if (res.ok) {
+          const data = await res.json();
+          if (data.token) setToken(data.token);
           onAuth();
         } else {
           setError(true);
@@ -63,7 +92,6 @@ function PinEntry({ onAuth }: { onAuth: () => void }) {
       inputRefs.current[index + 1]?.focus();
     }
 
-    // Auto-submit on 4th digit
     if (value && index === 3) {
       const pin = newDigits.join("");
       if (pin.length === 4) {
@@ -217,27 +245,24 @@ function Dashboard() {
   const [lastPowerAction, setLastPowerAction] = useState<string | null>(null);
   const [hibernateScheduled, setHibernateScheduled] = useState<string | null>(null);
   const newProjInputRef = useRef<HTMLInputElement>(null);
-  // Prevent server poll from overwriting optimistic session updates
   const sessionActionTime = useRef(0);
   const actionFeedbackRef = useRef(actionFeedback);
   actionFeedbackRef.current = actionFeedback;
 
-  // Load last project from localStorage
   useEffect(() => {
     try { setLastProject(localStorage.getItem("last-project") || ""); } catch {}
   }, []);
 
   const checkStatus = useCallback(async () => {
     try {
-      const res = await fetch("/api/status");
+      const res = await api("/api/status");
+      if (res.status === 401) return; // not authenticated
       const data = await res.json();
       const isOnline = data.status === "online";
-      // Only update sessions from server if no recent optimistic action (35s grace)
       if (isOnline && Date.now() - sessionActionTime.current > 35_000) {
         setSessions(data.sessions || []);
       }
       setLastPowerAction(isOnline ? null : data.lastAction || null);
-      // CAPTCHA status display removed — Pi relay handles WOL now
       setStatus((prev) => {
         if (prev === "waking") return isOnline ? "online" : prev;
         if (prev === "shutting-down") return !isOnline ? "offline" : prev;
@@ -253,14 +278,12 @@ function Dashboard() {
     }
   }, []);
 
-  // Initial check + polling
   useEffect(() => {
     checkStatus();
     const interval = setInterval(checkStatus, POLL_INTERVAL * 1000);
     return () => clearInterval(interval);
   }, [checkStatus]);
 
-  // Update "time ago" text every second
   useEffect(() => {
     const interval = setInterval(() => {
       setLastCheckedText(nextRefresh(lastChecked));
@@ -268,7 +291,6 @@ function Dashboard() {
     return () => clearInterval(interval);
   }, [lastChecked]);
 
-  // Safety timeout: force re-check after 60s if still transitioning
   useEffect(() => {
     if (status === "waking" || status === "shutting-down") {
       const fallback = status === "waking" ? "offline" : "online";
@@ -279,7 +301,6 @@ function Dashboard() {
     }
   }, [status]);
 
-  // Check more frequently during transitions
   useEffect(() => {
     if (status === "waking" || status === "shutting-down") {
       const interval = setInterval(checkStatus, 3000);
@@ -304,7 +325,7 @@ function Dashboard() {
     if (status === "offline") {
       setStatus("waking");
       try {
-        const res = await fetch("/api/wake", { method: "POST" });
+        const res = await api("/api/wake", { method: "POST" });
         const data = await res.json();
         saveWakeLog({ status: res.status, ...data });
         if (res.ok) {
@@ -325,7 +346,7 @@ function Dashboard() {
       if (window.confirm("Shut down PC?")) {
         setStatus("shutting-down");
         try {
-          await fetch("/api/shutdown", { method: "POST" });
+          await api("/api/shutdown", { method: "POST" });
           setActionFeedback("Shutdown signal sent");
           setTimeout(() => setActionFeedback(""), 3000);
         } catch {
@@ -342,7 +363,7 @@ function Dashboard() {
     const delay = params?.delay ? parseInt(params.delay, 10) : 0;
     try {
       setActionFeedback(`${label}...`);
-      await fetch("/api/run", {
+      await api("/api/run", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action, ...(params ? { params } : {}) }),
@@ -365,7 +386,7 @@ function Dashboard() {
     setShowPowerMenu(false);
     setHibernateScheduled(null);
     try {
-      await fetch("/api/run", {
+      await api("/api/run", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action: "hibernate-cancel" }),
@@ -379,7 +400,7 @@ function Dashboard() {
 
   const fetchProjects = useCallback(async () => {
     try {
-      const res = await fetch("/api/projects");
+      const res = await api("/api/projects");
       const data = await res.json();
       if (data.projects) setProjects(data.projects);
     } catch { /* ignore */ }
@@ -388,7 +409,7 @@ function Dashboard() {
   const handleQuickAction = async (action: string, name?: string) => {
     try {
       setActionFeedback(`Starting ${action}...`);
-      const res = await fetch("/api/run", {
+      const res = await api("/api/run", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action, ...(name ? { name } : {}) }),
@@ -424,7 +445,7 @@ function Dashboard() {
       setSessions(prev => prev.filter(s => s.name !== name));
     }
     try {
-      await fetch("/api/run", {
+      await api("/api/run", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action, name }),
@@ -812,7 +833,7 @@ function Dashboard() {
                   </div>
                   {log.step ? <div>step: {String(log.step)}</div> : null}
                   {log.udp ? <div>udp: {String(log.udp)}</div> : null}
-                  {log.routerWol ? <div>router: {typeof log.routerWol === "object" ? JSON.stringify(log.routerWol) : String(log.routerWol)}</div> : null}
+                  {log.piWol ? <div>pi: {typeof log.piWol === "object" ? JSON.stringify(log.piWol) : String(log.piWol)}</div> : null}
                   {log.errorName ? <div>type: {String(log.errorName)}</div> : null}
                 </div>
               ))}
@@ -832,13 +853,18 @@ export default function Home() {
 
   useEffect(() => {
     async function checkAuth() {
+      const token = getToken();
+      if (!token) { setChecking(false); return; }
       try {
-        const res = await fetch("/api/status");
-        if (res.status !== 401) {
+        const res = await api("/api/status");
+        if (res.status === 401) {
+          clearToken();
+        } else {
           setAuthenticated(true);
         }
       } catch {
-        // Not authenticated
+        // Network error — keep token, assume offline Pi
+        setAuthenticated(true);
       } finally {
         setChecking(false);
       }

@@ -5,10 +5,8 @@ const { exec } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 require('dotenv').config({ path: path.join(__dirname, '.env') });
-const { initRouterSession, heartbeatKeepAlive, getCookie, getExternalCookie, refreshBeforeSleep, loginExternal, fetchManualCaptcha, submitManualCaptcha, setManualCaptchaMode } = require('./router-wol');
 
 const app = express();
-let routerBootDone = false;
 const PORT = process.env.PORT || 9876;
 const PIN_HASH = process.env.PIN_HASH;
 const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN;
@@ -19,6 +17,7 @@ const CLAUDE_BIN = process.env.CLAUDE_BIN || 'claude';
 const IGNORE_DIRS_ENV = process.env.IGNORE_DIRS || 'node_modules,screenshots';
 const EDITOR_TITLE = process.env.EDITOR_TITLE || '';
 const CLAUDE_MODEL = process.env.CLAUDE_MODEL || 'opus';
+const AGENT_SECRET = process.env.AGENT_SECRET;
 
 // Warn if path-sensitive env vars use short command names (may fail without PATH)
 for (const [name, val] of [['EDITOR_CMD', EDITOR_CMD], ['CLAUDE_BIN', CLAUDE_BIN]]) {
@@ -32,6 +31,16 @@ for (const [name, val] of [['EDITOR_CMD', EDITOR_CMD], ['CLAUDE_BIN', CLAUDE_BIN
 app.use(express.json());
 app.use(cors({ origin: ALLOWED_ORIGIN }));
 
+// --- Auth: Bearer token (AGENT_SECRET) ---
+
+function verifySecret(req, res, next) {
+  const auth = req.headers['authorization'];
+  if (!auth || auth !== `Bearer ${AGENT_SECRET}`) {
+    return res.status(401).json({ ok: false, message: 'Unauthorized' });
+  }
+  next();
+}
+
 // --- Rate limiting (in-memory) ---
 
 const authAttempts = [];
@@ -44,7 +53,6 @@ let lockoutUntil = 0;
 function recordFailedAttempt() {
   const now = Date.now();
   authAttempts.push(now);
-  // Prune old entries
   while (authAttempts.length > 0 && authAttempts[0] < now - AUTH_WINDOW_MS) {
     authAttempts.shift();
   }
@@ -75,7 +83,7 @@ function recordShutdownAttempt() {
   shutdownAttempts.push(Date.now());
 }
 
-// --- PIN verification middleware ---
+// --- PIN verification (for direct access from Pi relay) ---
 
 async function verifyPin(req, res, next) {
   if (isLockedOut()) {
@@ -103,11 +111,62 @@ async function verifyPin(req, res, next) {
 
 // --- Routes ---
 
+// PIN verification endpoint (Pi relay uses this to validate user PINs)
+app.post('/verify-pin', async (req, res) => {
+  if (isLockedOut()) {
+    return res.status(429).json({ ok: false, message: 'Too many failed attempts' });
+  }
+  const { pin } = req.body;
+  if (!pin || !PIN_HASH) {
+    recordFailedAttempt();
+    return res.status(401).json({ ok: false });
+  }
+  try {
+    const match = await bcrypt.compare(pin, PIN_HASH);
+    if (!match) {
+      recordFailedAttempt();
+      return res.status(401).json({ ok: false });
+    }
+    return res.json({ ok: true });
+  } catch {
+    recordFailedAttempt();
+    return res.status(401).json({ ok: false });
+  }
+});
+
+// Health check (no auth — used by Pi to detect online/offline)
 app.get('/health', (req, res) => {
   res.json({ status: 'online', uptime: process.uptime() });
 });
 
-app.post('/shutdown', verifyPin, (req, res) => {
+// Full status: sessions, projects, uptime (Pi relay calls this)
+app.get('/status', verifySecret, async (req, res) => {
+  const activeSessions = await getActiveSessions();
+  let protectedList = getProtectedSessions();
+
+  // Clean stale protected entries
+  if (activeSessions.length > 0) {
+    const cleaned = protectedList.filter(s => activeSessions.includes(s));
+    if (cleaned.length !== protectedList.length) {
+      protectedList = cleaned;
+      setProtectedSessions(protectedList);
+    }
+  }
+
+  const sessions = activeSessions.map(name => ({
+    name,
+    protected: protectedList.includes(name),
+  }));
+
+  res.json({
+    status: 'online',
+    uptime: process.uptime(),
+    sessions,
+    projects: getProjectList(),
+  });
+});
+
+app.post('/shutdown', verifySecret, (req, res) => {
   if (!canShutdown()) {
     return res.status(429).json({ ok: false, message: 'Rate limit: max 3 shutdown attempts per minute' });
   }
@@ -135,8 +194,6 @@ const SESSION_PREFIX = 'btn-';
 
 function buildTasksJson(name) {
   const session = `${SESSION_PREFIX}${name}`;
-  // Task only attaches to existing session (agent creates it independently)
-  // Wait loop handles race: session may not exist yet when VS Code task starts
   const attachCmd = `timeout=30; while [ $timeout -gt 0 ] && ! tmux has-session -t ${session} 2>/dev/null; do sleep 0.5; timeout=$((timeout-1)); done; tmux attach-session -t ${session}`;
   return {
     version: "2.0.0",
@@ -205,11 +262,8 @@ function killUnprotectedSessions() {
 }
 
 function openProjectInEditor(name) {
-  // Kill all unprotected btn-* sessions before opening new project
   killUnprotectedSessions();
 
-  // Also close any existing window for the project we're about to open
-  // (prevents VS Code from reusing an already-open window where folderOpen won't re-trigger)
   const closeScript = path.join(__dirname, 'close-window.ps1');
   if (EDITOR_TITLE) {
     const titleQuery = `${name} - ${EDITOR_TITLE}`;
@@ -222,29 +276,22 @@ function openProjectInEditor(name) {
   const vscodeDir = path.join(projDir, '.vscode');
   const tasksFile = path.join(vscodeDir, 'tasks.json');
 
-  // Ensure project and .vscode dirs exist
   fs.mkdirSync(vscodeDir, { recursive: true });
-
-  // Write tasks.json (attach-only, agent creates session independently)
   fs.writeFileSync(tasksFile, JSON.stringify(buildTasksJson(name), null, 2));
 
-  // Enable auto-run tasks without prompt
   const settingsFile = path.join(vscodeDir, 'settings.json');
   let settings = {};
   try { settings = JSON.parse(fs.readFileSync(settingsFile, 'utf8')); } catch {}
   settings['task.allowAutomaticTasks'] = 'on';
-  // Prevent PowerShell Extension from stealing focus from claude-tmux task terminal
   settings['powershell.integratedConsole.startInBackground'] = true;
   fs.writeFileSync(settingsFile, JSON.stringify(settings, null, 2));
 
-  // Wait for kill-sessions.sh to finish (~3s) before creating new session
   setTimeout(() => {
     const session = `${SESSION_PREFIX}${name}`;
     const projMsys = toMsys(PROJECTS_DIR);
     const claudeBinMsys = toMsys(CLAUDE_BIN);
 
-    // Create tmux session + start Claude (--continue reuses last session to prevent accumulation)
-    const createCmd = `tmux kill-session -t ${session} 2>/dev/null; tmux new-session -d -s ${session} -c ${projMsys}/${name}; tmux send-keys -t ${session} '${claudeBinMsys} --dangerously-skip-permissions --model ${CLAUDE_MODEL} --continue --name ${name}' Enter`;
+    const createCmd = `tmux kill-session -t ${session} 2>/dev/null; tmux new-session -d -s ${session} -c ${projMsys}/${name}; tmux send-keys -t ${session} '${claudeBinMsys} --dangerously-skip-permissions --model ${CLAUDE_MODEL} --name ${name}' Enter`;
     exec(`"${BASH_PATH}" -lc "${createCmd}"`, (err) => {
       if (err) {
         console.error('[proj] tmux session create error:', err.message);
@@ -252,15 +299,13 @@ function openProjectInEditor(name) {
       }
       console.log(`[proj] Created tmux session: ${session}`);
 
-      // Poll tmux pane until Claude prompt is stable, then send /remote-control
       const MAX_WAIT = 60000;
       const POLL_INTERVAL = 2000;
-      const STABLE_INTERVAL = 1500; // shorter re-check to confirm stability
+      const STABLE_INTERVAL = 1500;
       const startTime = Date.now();
       let lastReadyOutput = null;
 
       function capturePaneTail(cb) {
-        // Strip blank lines before tail — Claude's TUI leaves many empty lines at bottom of pane
         exec(`"${BASH_PATH}" -lc "tmux capture-pane -t ${session} -p | sed '/^[[:space:]]*$/d' | tail -10"`, { encoding: 'utf8' }, cb);
       }
 
@@ -269,8 +314,6 @@ function openProjectInEditor(name) {
       }
 
       function hasClaudePrompt(output) {
-        // Claude shows ">" prompt, "╭" welcome box, or "human" turn indicator when ready
-        // Exclude trust prompt which also contains ">"
         if (hasTrustPrompt(output)) return false;
         return output.includes('>') || output.includes('\u256D') || output.includes('human');
       }
@@ -284,7 +327,6 @@ function openProjectInEditor(name) {
           if (err) console.error('[proj] /remote-control send error:', err.message);
           else console.log(`[proj] Sent /remote-control to ${session}`);
 
-          // Health check: verify Claude processed /remote-control
           setTimeout(() => {
             capturePaneTail((err, stdout) => {
               if (err) {
@@ -317,7 +359,7 @@ function openProjectInEditor(name) {
           }
           const output = (stdout || '').trim();
           const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-          // Auto-accept workspace trust prompt
+
           if (!trustHandled && hasTrustPrompt(output)) {
             trustHandled = true;
             console.log(`[proj] Trust prompt detected at ${elapsed}s, sending Enter to accept`);
@@ -332,33 +374,28 @@ function openProjectInEditor(name) {
 
           if (isReady) {
             if (lastReadyOutput === null) {
-              // First ready detection — re-check after short delay to confirm stable
               lastReadyOutput = output;
               console.log(`[proj] Prompt detected at ${elapsed}s, confirming stability...`);
               setTimeout(waitForClaude, STABLE_INTERVAL);
             } else {
-              // Second consecutive ready — Claude is stable, send command
               sendRemoteControl();
             }
           } else {
-            lastReadyOutput = null; // reset if output changed back to non-ready
+            lastReadyOutput = null;
             setTimeout(waitForClaude, POLL_INTERVAL);
           }
         });
       }
 
-      // Start polling after initial delay for Claude binary to load
       setTimeout(waitForClaude, 2000);
     });
 
-    // Open editor
     console.log(`[proj] Opening editor: "${EDITOR_CMD}" "${projDir}"`);
     const child = exec(`"${EDITOR_CMD}" "${projDir}"`, (err) => {
       if (err) console.error('[proj] Editor launch error:', err.message);
     });
     child.unref();
 
-    // Maximize the editor window once it appears
     const maxScript = path.join(__dirname, 'maximize-window.ps1');
     exec(`powershell.exe -ExecutionPolicy Bypass -File "${maxScript}" -TitlePrefix "${name}"`, (err) => {
       if (err) console.error('[proj] Maximize error:', err.message);
@@ -366,8 +403,20 @@ function openProjectInEditor(name) {
   }, 5000);
 }
 
+function getProjectList() {
+  try {
+    const entries = fs.readdirSync(PROJECTS_DIR, { withFileTypes: true });
+    return entries
+      .filter(e => e.isDirectory() && !e.name.startsWith('.') && !e.name.startsWith('_') && !IGNORE_DIRS.has(e.name))
+      .map(e => e.name)
+      .sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
+  } catch {
+    return [];
+  }
+}
+
 // List project directories
-app.get('/projects', verifyPin, (req, res) => {
+app.get('/projects', verifySecret, (req, res) => {
   try {
     res.json({ projects: getProjectList() });
   } catch (err) {
@@ -375,8 +424,8 @@ app.get('/projects', verifyPin, (req, res) => {
   }
 });
 
-// Run actions
-app.post('/run', verifyPin, (req, res) => {
+// Run actions (Pi relay forwards commands here)
+app.post('/run', verifySecret, (req, res) => {
   const { action, name } = req.body;
 
   if (action === 'proj') {
@@ -445,8 +494,8 @@ app.post('/run', verifyPin, (req, res) => {
     if (pendingHibernateTimer) {
       clearTimeout(pendingHibernateTimer);
       pendingHibernateTimer = null;
+      clearHibernateSchedule();
       showToast('Hibernate cancelled');
-      setCaptchaStatus('');
       console.log('[hibernate] Cancelled by user');
     }
     return res.json({ ok: true, action });
@@ -455,12 +504,8 @@ app.post('/run', verifyPin, (req, res) => {
   return res.status(400).json({ ok: false, message: `Unknown action: ${action}` });
 });
 
-// --- Heartbeat (push status to Vercel via Redis) ---
+// --- Helpers ---
 
-const VERCEL_URL = process.env.VERCEL_URL;
-const AGENT_SECRET = process.env.AGENT_SECRET;
-
-// Helper: show Windows toast notification via msg command (works from SYSTEM session)
 function showToast(message, seconds = 3) {
   const safe = message.replace(/"/g, "'");
   exec(`msg * /TIME:${seconds} "${safe}"`, (err) => {
@@ -468,46 +513,63 @@ function showToast(message, seconds = 3) {
   });
 }
 
-// Helper: update CAPTCHA status in KV (for web UI display)
-async function setCaptchaStatus(msg) {
-  if (!VERCEL_URL || !AGENT_SECRET) return;
-  try {
-    await fetch(`${VERCEL_URL}/api/heartbeat`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${AGENT_SECRET}` },
-      body: JSON.stringify({ uptime: process.uptime(), captchaStatus: msg }),
-      signal: AbortSignal.timeout(5_000),
-    });
-  } catch {}
+let pendingHibernateTimer = null;
+const HIBERNATE_SCHEDULE_FILE = path.join(__dirname, '.hibernate-schedule');
+
+function saveHibernateSchedule(action, executeAt) {
+  fs.writeFileSync(HIBERNATE_SCHEDULE_FILE, JSON.stringify({ action, executeAt }));
 }
 
-// Helper: execute sleep/hibernate
-let pendingHibernateTimer = null;
+function clearHibernateSchedule() {
+  try { fs.unlinkSync(HIBERNATE_SCHEDULE_FILE); } catch {}
+}
+
+function restoreHibernateSchedule() {
+  try {
+    const data = JSON.parse(fs.readFileSync(HIBERNATE_SCHEDULE_FILE, 'utf8'));
+    const remaining = data.executeAt - Date.now();
+    if (remaining <= 0) {
+      console.log('[hibernate] Restoring expired schedule — executing now');
+      clearHibernateSchedule();
+      executeSleepAction(data.action, 0);
+    } else {
+      const mins = Math.round(remaining / 60000);
+      console.log(`[hibernate] Restoring schedule — ${mins}min remaining`);
+      showToast(`Hibernate in ${mins}min (restored)`);
+      pendingHibernateTimer = setTimeout(() => {
+        pendingHibernateTimer = null;
+        clearHibernateSchedule();
+        executeSleepAction(data.action, 0);
+      }, remaining);
+    }
+  } catch {
+    // No schedule file — nothing to restore
+  }
+}
 
 async function executeSleepAction(action, delaySec = 0) {
-  // Cancel any pending scheduled hibernate
   if (pendingHibernateTimer) {
     clearTimeout(pendingHibernateTimer);
     pendingHibernateTimer = null;
+    clearHibernateSchedule();
     console.log('[hibernate] Cancelled pending scheduled hibernate');
   }
 
-  // Delayed execution: schedule and return
   if (delaySec > 0) {
     const hours = Math.round(delaySec / 3600);
+    const executeAt = Date.now() + delaySec * 1000;
     console.log(`[hibernate] Scheduled in ${delaySec}s (${hours}h)`);
-    setCaptchaStatus(`Hibernate scheduled in ${hours}h`);
     showToast(`Hibernate in ${hours}h scheduled`);
+    saveHibernateSchedule(action, executeAt);
     pendingHibernateTimer = setTimeout(() => {
       pendingHibernateTimer = null;
-      setCaptchaStatus('');
+      clearHibernateSchedule();
       executeSleepAction(action, 0);
     }, delaySec * 1000);
     return;
   }
 
   if (action === 'hibernate') {
-    // Direct hibernate — toast 3s then shutdown /h
     showToast('Hibernating now...');
     setTimeout(() => {
       exec('shutdown /h', (err) => {
@@ -518,7 +580,7 @@ async function executeSleepAction(action, delaySec = 0) {
     return;
   }
 
-  // Sleep — Pi relay handles WOL wake, no CAPTCHA needed
+  // Sleep
   showToast('Entering sleep...');
   setTimeout(() => {
     exec('rundll32.exe powrprof.dll,SetSuspendState 0,1,0', (err) => {
@@ -526,312 +588,6 @@ async function executeSleepAction(action, delaySec = 0) {
       else console.log('[sleep] Entering sleep mode');
     });
   }, 3000);
-
-  // --- Legacy CAPTCHA-based sleep flow (preserved for router-only wake) ---
-  // To re-enable: remove the block above and uncomment below.
-  /*
-  const onProgress = (msg) => setCaptchaStatus(msg);
-  try {
-    const freshCookie = await refreshBeforeSleep(onProgress);
-    if (!freshCookie) {
-      console.log(`[${action}] CAPTCHA failed — ${action} cancelled`);
-      setCaptchaStatus(`CAPTCHA failed — ${action} cancelled`);
-      return;
-    }
-    if (VERCEL_URL && AGENT_SECRET) {
-      await fetch(`${VERCEL_URL}/api/heartbeat`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${AGENT_SECRET}` },
-        body: JSON.stringify({ uptime: process.uptime(), routerCookie: freshCookie, routerCookieTTL: 86400 }),
-        signal: AbortSignal.timeout(10_000),
-      });
-      console.log(`[${action}] Router cookie refreshed and stored with 24h TTL`);
-    }
-  } catch (err) {
-    console.error(`[${action}] Pre-sleep cookie refresh error:`, err.message);
-    setCaptchaStatus(`CAPTCHA 실패 — ${action} 취소됨`);
-    return;
-  }
-  setCaptchaStatus('');
-  exec('rundll32.exe powrprof.dll,SetSuspendState 0,1,0', (err) => {
-    if (err) console.error(`[${action}] Error:`, err.message);
-    else console.log(`[${action}] Entering ${action} mode`);
-  });
-  */
-}
-const HEARTBEAT_INTERVAL = 30_000;
-const FAST_POLL_INTERVAL = 5_000;
-let fastPollTimer = null;
-let captchaFetchInProgress = false;
-
-function startFastPoll() {
-  if (fastPollTimer) return;
-  console.log('[heartbeat] Fast poll ON (5s) for manual CAPTCHA');
-  fastPollTimer = setInterval(sendHeartbeat, FAST_POLL_INTERVAL);
-}
-function stopFastPoll() {
-  if (!fastPollTimer) return;
-  clearInterval(fastPollTimer);
-  fastPollTimer = null;
-  console.log('[heartbeat] Fast poll OFF');
-}
-
-function getProjectList() {
-  try {
-    const entries = fs.readdirSync(PROJECTS_DIR, { withFileTypes: true });
-    return entries
-      .filter(e => e.isDirectory() && !e.name.startsWith('.') && !e.name.startsWith('_') && !IGNORE_DIRS.has(e.name))
-      .map(e => e.name)
-      .sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
-  } catch {
-    return [];
-  }
-}
-
-function executeCommand(command) {
-  console.log(`[heartbeat] Received command: ${command.action}`);
-
-  if (command.action === 'shutdown') {
-    if (!canShutdown()) {
-      console.log('[heartbeat] Shutdown rate limited');
-      return;
-    }
-    recordShutdownAttempt();
-    showToast('Shutting down in 10s...', 10);
-    exec('shutdown /s /t 10', (err) => {
-      if (err) console.error('[heartbeat] Shutdown error:', err.message);
-      else console.log('[heartbeat] Shutting down in 10s');
-    });
-  } else if (command.action === 'proj') {
-    if (command.name && SAFE_NAME_RE.test(command.name)) {
-      openProjectInEditor(command.name);
-      console.log(`[heartbeat] Opened project: ${command.name}`);
-    } else {
-      console.error(`[heartbeat] Invalid project name: ${command.name}`);
-    }
-  } else if (command.action === 'editor') {
-    const child = exec(`"${EDITOR_CMD}"`);
-    child.unref();
-    console.log('[heartbeat] Launched editor');
-  } else if (command.action === 'protect-session') {
-    const list = getProtectedSessions();
-    if (command.name && !list.includes(command.name)) {
-      list.push(command.name);
-      setProtectedSessions(list);
-      console.log(`[session] Protected: ${command.name}`);
-    }
-  } else if (command.action === 'unprotect-session') {
-    if (command.name) {
-      setProtectedSessions(getProtectedSessions().filter(s => s !== command.name));
-      console.log(`[session] Unprotected: ${command.name}`);
-    }
-  } else if (command.action === 'kill-session') {
-    if (command.name && SAFE_NAME_RE.test(command.name)) {
-      setProtectedSessions(getProtectedSessions().filter(s => s !== command.name));
-      const scriptPath = path.join(__dirname, 'kill-sessions.sh').replace(/\\/g, '/');
-      const closeScript = path.join(__dirname, 'close-window.ps1');
-      exec(`"${BASH_PATH}" -l "${scriptPath}" "${SESSION_PREFIX}${command.name}"`, (err) => {
-        if (err) console.error(`[kill-session] Error:`, err.message);
-        const titleQuery = EDITOR_TITLE ? `${command.name} - ${EDITOR_TITLE}` : command.name;
-        exec(`powershell.exe -ExecutionPolicy Bypass -File "${closeScript}" -TitlePrefix "${titleQuery}"`, (err) => {
-          if (err) console.error(`[close-window] Error:`, err.message);
-        });
-      });
-      console.log(`[session] Killed: ${command.name}`);
-    }
-  } else if (command.action === 'sleep' || command.action === 'hibernate') {
-    const delaySec = command.params?.delay ? parseInt(command.params.delay, 10) : 0;
-    executeSleepAction(command.action, delaySec);
-  } else if (command.action === 'captcha-fetch') {
-    // User requested manual CAPTCHA — fetch image and store in KV
-    if (captchaFetchInProgress) { console.log('[captcha] Skipping duplicate captcha-fetch'); return; }
-    captchaFetchInProgress = true;
-    startFastPoll();
-    (async () => {
-      try {
-        setCaptchaStatus('Fetching CAPTCHA...');
-        const captcha = await fetchManualCaptcha();
-        if (captcha && captcha.imageBase64) {
-          // Store image + params in KV via heartbeat
-          await fetch(`${VERCEL_URL}/api/heartbeat`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${AGENT_SECRET}` },
-            body: JSON.stringify({
-              uptime: process.uptime(),
-              captchaManual: { image: captcha.imageBase64, params: captcha.params },
-              captchaStatus: 'Solve CAPTCHA below',
-            }),
-            signal: AbortSignal.timeout(10_000),
-          });
-          console.log('[captcha] Manual CAPTCHA image sent to KV');
-        } else {
-          setCaptchaStatus('Failed to fetch CAPTCHA');
-          stopFastPoll();
-        }
-      } catch (err) {
-        console.error('[captcha] Fetch error:', err.message);
-        setCaptchaStatus('Failed to fetch CAPTCHA');
-        stopFastPoll();
-      } finally {
-        captchaFetchInProgress = false;
-      }
-    })();
-  } else if (command.action === 'captcha-answer') {
-    // User submitted manual CAPTCHA answer
-    (async () => {
-      try {
-        setCaptchaStatus('Verifying...');
-        const cookie = await submitManualCaptcha(command.answer, command.params);
-        if (cookie) {
-          stopFastPoll();
-          // Store cookie in KV
-          await fetch(`${VERCEL_URL}/api/heartbeat`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${AGENT_SECRET}` },
-            body: JSON.stringify({
-              uptime: process.uptime(),
-              routerCookie: cookie,
-              routerCookieTTL: 3600,
-              captchaStatus: 'CAPTCHA solved!',
-              captchaManualClear: true,
-            }),
-            signal: AbortSignal.timeout(10_000),
-          });
-          // Clear success message after 5s
-          setTimeout(() => setCaptchaStatus(''), 5000);
-        } else {
-          // Wrong answer — auto-fetch new CAPTCHA (old one is invalidated)
-          setCaptchaStatus('Wrong — fetching new CAPTCHA...');
-          captchaFetchInProgress = true;
-          try {
-            const newCaptcha = await fetchManualCaptcha();
-            if (newCaptcha && newCaptcha.imageBase64) {
-              await fetch(`${VERCEL_URL}/api/heartbeat`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${AGENT_SECRET}` },
-                body: JSON.stringify({
-                  uptime: process.uptime(),
-                  captchaManual: { image: newCaptcha.imageBase64, params: newCaptcha.params },
-                  captchaStatus: 'Wrong — try again',
-                }),
-                signal: AbortSignal.timeout(10_000),
-              });
-            }
-          } catch (e) {
-            console.error('[captcha] Auto-refetch error:', e.message);
-          } finally {
-            captchaFetchInProgress = false;
-          }
-        }
-      } catch (err) {
-        console.error('[captcha] Submit error:', err.message);
-        setCaptchaStatus('Verification error');
-        stopFastPoll();
-      }
-    })();
-  } else if (command.action === 'captcha-close') {
-    // User closed manual CAPTCHA modal — resume auto-login
-    setManualCaptchaMode(false);
-    stopFastPoll();
-    console.log('[captcha] Manual CAPTCHA closed by user');
-  } else if (command.action === 'hibernate-cancel') {
-    if (pendingHibernateTimer) {
-      clearTimeout(pendingHibernateTimer);
-      pendingHibernateTimer = null;
-      showToast('Hibernate cancelled');
-      setCaptchaStatus('');
-      console.log('[hibernate] Cancelled by user');
-    }
-  } else if (command.action === 'display_off') {
-    exec('powershell.exe -Command "(Add-Type -MemberDefinition \'[DllImport(\\"user32.dll\\")]public static extern int SendMessage(int hWnd,int Msg,int wParam,int lParam);\' -Name a -Passthru)::SendMessage(-1,0x0112,0xF170,2)"', (err) => {
-      if (err) console.error('[display_off] Error:', err.message);
-      else console.log('[heartbeat] Display turned off');
-    });
-  }
-}
-
-async function sendHeartbeat() {
-  if (!VERCEL_URL || !AGENT_SECRET) return;
-
-  try {
-    // Collect active sessions and clean up stale protected entries
-    // Only clean if tmux responded (non-empty list) to avoid wiping on exec errors
-    const activeSessions = await getActiveSessions();
-    let protectedList = getProtectedSessions();
-    if (activeSessions.length > 0) {
-      const cleanedProtected = protectedList.filter(s => activeSessions.includes(s));
-      if (cleanedProtected.length !== protectedList.length) {
-        protectedList = cleanedProtected;
-        setProtectedSessions(protectedList);
-      }
-    }
-
-    const sessions = activeSessions.map(name => ({
-      name,
-      protected: protectedList.includes(name),
-    }));
-
-    // Keep router session alive and get current cookie (skip during boot login)
-    // Pi relay handles WOL now — suppress CAPTCHA status messages to UI
-    let routerCookie = null;
-    if (routerBootDone) {
-      try {
-        routerCookie = await heartbeatKeepAlive((msg) => console.log('[router]', msg));
-      } catch (err) {
-        console.error('[heartbeat] Router keep-alive error:', err.message);
-      }
-    }
-
-    const res = await fetch(`${VERCEL_URL}/api/heartbeat`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${AGENT_SECRET}`,
-      },
-      body: JSON.stringify({
-        uptime: process.uptime(),
-        projects: getProjectList(),
-        sessions,
-        routerCookie: getExternalCookie() || routerCookie,
-        routerLoggedIn: !!getCookie(),
-      }),
-      signal: AbortSignal.timeout(10_000),
-    });
-
-    if (res.ok) {
-      const data = await res.json();
-
-      // Sync protection state from KV (authoritative source)
-      if (Array.isArray(data.protectedSessions)) {
-        const current = getProtectedSessions();
-        const incoming = data.protectedSessions;
-        if (JSON.stringify(current.sort()) !== JSON.stringify([...incoming].sort())) {
-          setProtectedSessions(incoming);
-          console.log(`[session] Synced protected from KV: ${incoming.join(', ') || 'none'}`);
-        }
-      }
-
-      // Process command queue
-      if (data.commands && Array.isArray(data.commands)) {
-        // If queue has captcha-answer, skip captcha-fetch (answer uses its own params)
-        const hasCaptchaAnswer = data.commands.some(c => c.action === 'captcha-answer');
-        for (const command of data.commands) {
-          // protect/unprotect already handled via KV state sync above
-          if (command.action === 'protect-session' || command.action === 'unprotect-session') continue;
-          if (hasCaptchaAnswer && command.action === 'captcha-fetch') continue;
-          executeCommand(command);
-        }
-      }
-      // Backward compat: single command
-      if (data.command) {
-        executeCommand(data.command);
-      }
-    } else {
-      console.error(`[heartbeat] HTTP ${res.status}`);
-    }
-  } catch (err) {
-    console.error('[heartbeat] Error:', err.message);
-  }
 }
 
 // --- Boot readiness: wait for tmux before accepting commands ---
@@ -855,7 +611,6 @@ async function waitForTmux(maxWaitMs = 60_000) {
     }
     await new Promise((r) => setTimeout(r, interval));
   }
-  // Proceed anyway after timeout — tmux may still work by the time user opens a project
   tmuxReady = true;
   console.warn(`[boot] tmux not detected after ${maxWaitMs / 1000}s, proceeding anyway`);
 }
@@ -864,49 +619,7 @@ async function waitForTmux(maxWaitMs = 60_000) {
 
 app.listen(PORT, async () => {
   console.log(`Button Agent listening on port ${PORT}`);
-
-  // Wait for tmux/MSYS2 to be ready before starting heartbeat
   await waitForTmux();
-
-  // Fetch stored router cookie from KV, then initialize router session
-  let storedRouterCookie = null;
-  if (VERCEL_URL && AGENT_SECRET) {
-    try {
-      const res = await fetch(`${VERCEL_URL}/api/heartbeat`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${AGENT_SECRET}` },
-        body: JSON.stringify({ uptime: process.uptime(), sessions: [], needRouterCookie: true }),
-        signal: AbortSignal.timeout(10_000),
-      });
-      if (res.ok) {
-        const data = await res.json();
-        storedRouterCookie = data.storedRouterCookie || null;
-        if (storedRouterCookie) console.log('[boot] Retrieved router cookie from KV');
-      }
-    } catch (err) {
-      console.error('[boot] Failed to fetch stored cookie:', err.message);
-    }
-  }
-
-  // Initialize router session — local port 80 only
-  // External login (port 88) disabled: router WAN doesn't issue cookies, so
-  // Vercel can't maintain session. Code preserved in router-wol.js for future use.
-  // Pi relay handles WOL — suppress CAPTCHA status to UI, log only
-  const bootProgress = (msg) => console.log('[router-boot]', msg);
-  initRouterSession(storedRouterCookie, bootProgress).then(cookie => {
-    if (cookie) console.log('[router-boot] Session ready');
-  }).catch(err => {
-    console.error('[boot] Router login failed:', err.message);
-  }).finally(() => {
-    routerBootDone = true;
-  });
-
-  // Start heartbeat loop
-  if (VERCEL_URL && AGENT_SECRET) {
-    console.log(`[heartbeat] Pushing to ${VERCEL_URL} every ${HEARTBEAT_INTERVAL / 1000}s`);
-    sendHeartbeat();
-    setInterval(sendHeartbeat, HEARTBEAT_INTERVAL);
-  } else {
-    console.log('[heartbeat] VERCEL_URL or AGENT_SECRET not set, heartbeat disabled');
-  }
+  restoreHibernateSchedule();
+  console.log('[agent] Ready — waiting for commands from Pi relay');
 });
