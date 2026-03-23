@@ -310,7 +310,9 @@ function scheduleEditorClose(task, editorPid) {
 function executeAiTask(task) {
   runningAiTasks.set(task.id, { task, editorPid: null, editorCloseTimer: null });
   const shortId = task.id.slice(0, 8);
-  const session = `${AI_TASK_PREFIX}${shortId}`;
+  // Session name: schedule-{taskName} (sanitized) or schedule-{shortId} as fallback
+  const safeName = task.name ? task.name.replace(/[^a-zA-Z0-9_-]/g, '-').replace(/-+/g, '-').slice(0, 40) : shortId;
+  const session = `${AI_TASK_PREFIX}${safeName}`;
   const project = task.project || 'D:/projects/common-task';
   const projMsys = toMsys(project);
   const claudeBinMsys = toMsys(CLAUDE_BIN);
@@ -328,7 +330,7 @@ function executeAiTask(task) {
   fs.writeFileSync(promptFile, prompt);
   const promptFileMsys = toMsys(promptFile);
 
-  const createCmd = `tmux kill-session -t ${session} 2>/dev/null; tmux new-session -d -s ${session} -c ${projMsys}; tmux send-keys -t ${session} '${claudeBinMsys} --dangerously-skip-permissions --model ${CLAUDE_MODEL}' Enter`;
+  const createCmd = `tmux source-file ~/.tmux.conf 2>/dev/null; tmux kill-session -t ${session} 2>/dev/null; tmux new-session -d -s ${session} -c ${projMsys}; tmux send-keys -t ${session} '${claudeBinMsys} --dangerously-skip-permissions --model ${CLAUDE_MODEL}' Enter`;
 
   console.log(`[ai-task] Creating tmux session: ${session} in ${project}`);
   exec(`"${BASH_PATH}" -lc "${createCmd}"`, (err) => {
@@ -849,7 +851,7 @@ function openProjectInEditor(name) {
     const projMsys = toMsys(PROJECTS_DIR);
     const claudeBinMsys = toMsys(CLAUDE_BIN);
 
-    const createCmd = `tmux kill-session -t ${session} 2>/dev/null; tmux new-session -d -s ${session} -c ${projMsys}/${name}; tmux send-keys -t ${session} '${claudeBinMsys} --dangerously-skip-permissions --model ${CLAUDE_MODEL} --name ${name}' Enter`;
+    const createCmd = `tmux source-file ~/.tmux.conf 2>/dev/null; tmux kill-session -t ${session} 2>/dev/null; tmux new-session -d -s ${session} -c ${projMsys}/${name}; tmux send-keys -t ${session} '${claudeBinMsys} --dangerously-skip-permissions --model ${CLAUDE_MODEL} --name ${name}' Enter`;
     exec(`"${BASH_PATH}" -lc "${createCmd}"`, (err) => {
       if (err) {
         console.error('[proj] tmux session create error:', err.message);
