@@ -66,12 +66,30 @@ cd agent && npm install && node server.js  # Agent 실행
 ssh pi@192.168.219.125               # Pi 접속 (SSH 키 등록됨)
 ```
 
-## 배포 (Pi에 빌드 결과 전송)
+## 배포 (커밋 후 변경 대상에 따라 자동 실행)
+
+커밋/푸시 완료 후, 변경된 디렉토리 기준으로 아래를 실행한다.
+복수 대상 변경 시 모두 수행. **배포/재실행까지 완료해야 커밋 완료.**
+
+### web/ 변경 시 (빌드 + Pi 배포)
 ```bash
-cd web && NEXT_PUBLIC_API_URL="" npx next build   # 빈 API_URL로 빌드 (same-origin)
+cd web && NEXT_PUBLIC_API_URL="" npx next build
 tar czf /tmp/public.tar.gz -C out .
 scp /tmp/public.tar.gz pi@192.168.219.125:~/wol-relay/
 ssh pi@192.168.219.125 "cd ~/wol-relay && tar xzf public.tar.gz -C public && rm public.tar.gz && sudo systemctl restart wol-relay"
+```
+
+### pi/ 변경 시 (Pi 배포)
+```bash
+scp pi/wol-server.js pi@192.168.219.125:~/wol-relay/wol-server.js
+ssh pi@192.168.219.125 "sudo systemctl restart wol-relay"
+```
+
+### agent/ 변경 시 (Agent 재실행)
+```bash
+# 포트 9876 프로세스 kill → 재실행
+powershell -Command "Stop-Process -Id (Get-NetTCPConnection -LocalPort 9876).OwningProcess -Force"
+cd agent && node server.js &
 ```
 
 ## wf 빌드/테스트
