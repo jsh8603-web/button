@@ -5,6 +5,7 @@ const { exec, spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const http = require('http');
 require('dotenv').config({ path: path.join(__dirname, '.env') });
 
 const app = express();
@@ -19,6 +20,8 @@ const IGNORE_DIRS_ENV = process.env.IGNORE_DIRS || 'node_modules,screenshots';
 const EDITOR_TITLE = process.env.EDITOR_TITLE || '';
 const CLAUDE_MODEL = process.env.CLAUDE_MODEL || 'opus';
 const AGENT_SECRET = process.env.AGENT_SECRET;
+const PI_HOST = process.env.PI_HOST || '192.168.219.125';
+const PI_PORT = parseInt(process.env.PI_PORT || '7777', 10);
 
 // Windows path → MSYS path (e.g. D:\projects → /d/projects)
 const toMsys = (p) => p.replace(/\\/g, '/').replace(/^([A-Z]):/i, (_, d) => `/${d.toLowerCase()}`);
@@ -610,7 +613,7 @@ function nextCronRun(cronExpr) {
 }
 
 function startTaskRunner() {
-  setInterval(() => {
+  function runCycle() {
     const tasks = readTaskQueue();
     const now = new Date();
     let changed = false;
@@ -670,7 +673,9 @@ function startTaskRunner() {
     }
 
     if (changed) writeTaskQueue(tasks);
-  }, 30_000);
+    setTimeout(runCycle, 30_000);
+  }
+  setTimeout(runCycle, 5_000); // first check 5s after boot
 }
 
 // --- Routes ---
@@ -1152,6 +1157,27 @@ app.post('/run', verifySecret, (req, res) => {
     tasks.push(task);
     writeTaskQueue(tasks);
     console.log(`[task] Added ${taskType} task "${task.id}" (${task.name || task.command || 'AI'}) at ${scheduledAt}`);
+
+    // Auto-register wake-at on Pi (2 min before scheduledAt) so PC wakes up in time
+    const schedTime = new Date(scheduledAt).getTime();
+    const wakeAtTime = schedTime - 2 * 60_000;
+    if (wakeAtTime > Date.now()) {
+      const wakeAtISO = new Date(wakeAtTime).toISOString();
+      const postData = JSON.stringify({ at: wakeAtISO });
+      const wakeReq = http.request({
+        hostname: PI_HOST, port: PI_PORT, path: '/api/wake-at',
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, timeout: 3000,
+      }, (wakeRes) => {
+        let d = '';
+        wakeRes.on('data', c => d += c);
+        wakeRes.on('end', () => console.log(`[task] Registered wake-at on Pi: ${wakeAtISO}`, d));
+      });
+      wakeReq.on('error', (e) => console.error(`[task] Failed to register wake-at:`, e.message));
+      wakeReq.on('timeout', () => { wakeReq.destroy(); console.error('[task] wake-at request timed out'); });
+      wakeReq.write(postData);
+      wakeReq.end();
+    }
+
     return res.json({ ok: true, task });
   }
 

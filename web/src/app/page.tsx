@@ -494,6 +494,16 @@ function ScheduleTab() {
 
   const fetchTasks = useCallback(async () => {
     try {
+      // Try status first (fast: returns cached tasks when offline)
+      const statusRes = await api("/api/status");
+      if (statusRes.ok) {
+        const statusData = await statusRes.json();
+        if (statusData.tasks) {
+          setTasks([...statusData.tasks].reverse());
+          return;
+        }
+      }
+      // Online: fetch full task list from Agent
       const res = await api("/api/run", {
         method: "POST",
         headers: { "Content-Type": "application/json" },

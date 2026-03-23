@@ -381,8 +381,11 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
-  // --- All routes below require auth ---
-  if (!requireAuth(req)) {
+  // --- All routes below require auth (localhost + Agent IP bypass) ---
+  const clientIp = getClientIp(req);
+  const isLocalhost = clientIp === '127.0.0.1' || clientIp === '::1' || clientIp === '::ffff:127.0.0.1';
+  const isAgent = clientIp === AGENT_HOST || clientIp === `::ffff:${AGENT_HOST}`;
+  if (!isLocalhost && !isAgent && !requireAuth(req)) {
     return sendJson(res, 401, { error: 'unauthorized' });
   }
 
@@ -393,7 +396,12 @@ const server = http.createServer(async (req, res) => {
       if (result.data?.metrics) checkAlerts(result.data.metrics);
       return sendJson(res, 200, { ...result.data, alerts });
     } catch {
-      return sendJson(res, 200, { status: 'offline', alerts });
+      const cache = loadTaskCache();
+      return sendJson(res, 200, {
+        status: 'offline',
+        alerts,
+        ...(cache?.tasks ? { tasks: cache.tasks, tasksCached: true, tasksCachedAt: cache.cachedAt } : {}),
+      });
     }
   }
 
@@ -649,5 +657,6 @@ server.listen(PORT, () => {
   console.log(`Button Pi relay listening on port ${PORT}`);
   console.log(`Agent: ${AGENT_HOST}:${AGENT_PORT}`);
   console.log(`WOL target: ${PC_MAC} via ${BROADCAST}`);
-  setInterval(runScheduler, 60_000);
+  function scheduleLoop() { runScheduler(); setTimeout(scheduleLoop, 60_000); }
+  setTimeout(scheduleLoop, 5_000); // first run 5s after boot
 });
