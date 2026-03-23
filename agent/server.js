@@ -246,8 +246,22 @@ function cleanupLingeringScheduleSessions() {
     const sessions = stdout.trim().split('\n').filter(s => s.startsWith(AI_TASK_PREFIX));
     if (sessions.length === 0) return;
     console.log(`[ai-task] Cleaning up ${sessions.length} lingering schedule session(s): ${sessions.join(', ')}`);
+    const closeScript = path.join(__dirname, 'close-window.ps1');
     for (const s of sessions) {
       exec(`"${BASH_PATH}" -lc "tmux kill-session -t ${s} 2>/dev/null"`, () => {});
+      // Close editor window for the task's project
+      if (EDITOR_TITLE) {
+        const safeName = s.slice(AI_TASK_PREFIX.length);
+        const taskProject = readTaskQueue().find(t => {
+          const n = t.name ? t.name.replace(/[^a-zA-Z0-9_-]/g, '-').replace(/-+/g, '-').slice(0, 40) : t.id.slice(0, 8);
+          return n === safeName;
+        })?.project;
+        const editorName = taskProject ? path.basename(taskProject) : safeName;
+        const titleQuery = `${editorName} - ${EDITOR_TITLE}`;
+        exec(`powershell.exe -ExecutionPolicy Bypass -File "${closeScript}" -TitlePrefix "${titleQuery}"`, (err) => {
+          if (err) console.error(`[cleanup] close-window error for ${s}:`, err.message);
+        });
+      }
     }
     // Remove from protected list
     const protectedList = getProtectedSessions();
@@ -1041,9 +1055,35 @@ app.post('/run', verifySecret, (req, res) => {
     setProtectedSessions(getProtectedSessions().filter(s => s !== name));
     const scriptPath = path.join(__dirname, 'kill-sessions.sh').replace(/\\/g, '/');
     const closeScript = path.join(__dirname, 'close-window.ps1');
-    exec(`"${BASH_PATH}" -l "${scriptPath}" "${SESSION_PREFIX}${name}"`, (err) => {
+    // schedule- sessions already have full name from getActiveSessions(); btn- sessions need prefix
+    const tmuxSession = name.startsWith(AI_TASK_PREFIX) ? name : `${SESSION_PREFIX}${name}`;
+
+    // For schedule- sessions, also kill editor process and cancel idle timer
+    let editorName;
+    if (name.startsWith(AI_TASK_PREFIX)) {
+      const safeName = name.slice(AI_TASK_PREFIX.length);
+      const running = [...runningAiTasks.values()].find(e => {
+        const n = e.task.name ? e.task.name.replace(/[^a-zA-Z0-9_-]/g, '-').replace(/-+/g, '-').slice(0, 40) : e.task.id.slice(0, 8);
+        return n === safeName;
+      });
+      if (running) {
+        if (running.editorPid) try { process.kill(running.editorPid); } catch {}
+        if (running.editorCloseTimer) clearInterval(running.editorCloseTimer);
+        runningAiTasks.delete(running.task.id);
+      }
+      const taskProject = running?.task?.project
+        || readTaskQueue().find(t => {
+          const n = t.name ? t.name.replace(/[^a-zA-Z0-9_-]/g, '-').replace(/-+/g, '-').slice(0, 40) : t.id.slice(0, 8);
+          return n === safeName;
+        })?.project;
+      editorName = taskProject ? path.basename(taskProject) : safeName;
+    } else {
+      editorName = name;
+    }
+
+    exec(`"${BASH_PATH}" -l "${scriptPath}" "${tmuxSession}"`, (err) => {
       if (err) console.error(`[kill-session] Error:`, err.message);
-      const titleQuery = EDITOR_TITLE ? `${name} - ${EDITOR_TITLE}` : name;
+      const titleQuery = EDITOR_TITLE ? `${editorName} - ${EDITOR_TITLE}` : editorName;
       exec(`powershell.exe -ExecutionPolicy Bypass -File "${closeScript}" -TitlePrefix "${titleQuery}"`, (err) => {
         if (err) console.error(`[close-window] Error:`, err.message);
       });
@@ -1155,6 +1195,27 @@ app.post('/run', verifySecret, (req, res) => {
   if (action === 'task-cancel') {
     const { taskId } = req.body.params || req.body;
     if (!taskId) return res.status(400).json({ ok: false, message: 'taskId is required' });
+
+    // If running, kill tmux session + editor
+    const running = runningAiTasks.get(taskId);
+    if (running) {
+      const safeName = running.task.name ? running.task.name.replace(/[^a-zA-Z0-9_-]/g, '-').replace(/-+/g, '-').slice(0, 40) : taskId.slice(0, 8);
+      const session = `${AI_TASK_PREFIX}${safeName}`;
+      if (running.editorPid) try { process.kill(running.editorPid); } catch {}
+      if (running.editorCloseTimer) clearInterval(running.editorCloseTimer);
+      runningAiTasks.delete(taskId);
+      exec(`"${BASH_PATH}" -lc "tmux kill-session -t ${session} 2>/dev/null"`, () => {});
+      setProtectedSessions(getProtectedSessions().filter(s => s !== session));
+      if (EDITOR_TITLE) {
+        const projName = running.task.project ? path.basename(running.task.project) : safeName;
+        const titleQuery = `${projName} - ${EDITOR_TITLE}`;
+        const closeScript = path.join(__dirname, 'close-window.ps1');
+        exec(`powershell.exe -ExecutionPolicy Bypass -File "${closeScript}" -TitlePrefix "${titleQuery}"`, (err) => {
+          if (err) console.error(`[task-cancel] close-window error:`, err.message);
+        });
+      }
+    }
+
     const tasks = readTaskQueue().filter(t => t.id !== taskId);
     writeTaskQueue(tasks);
     console.log(`[task] Cancelled task "${taskId}"`);
