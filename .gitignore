@@ -15,8 +15,9 @@ agent/agent.log
 # IDE (agent가 tasks.json 자동 생성)
 .vscode/
 
-# Claude Code (rules는 공유, memory는 개인)
+# Claude Code (rules는 공유, memory/settings.local는 개인)
 .claude/memory/
+.claude/settings.local.json
 
 # 개인 설계문서
 plan.md

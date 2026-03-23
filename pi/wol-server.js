@@ -86,6 +86,17 @@ function loadDeferred() { try { return JSON.parse(fs.readFileSync(DEFERRED_FILE,
 function saveDeferred(list) { fs.writeFileSync(DEFERRED_FILE, JSON.stringify(list, null, 2)); }
 const DEFERRED_EXPIRY_MS = 10 * 60 * 1000; // 10 min expiry
 
+// --- Wake-at: one-time delayed WOL ---
+const WAKE_AT_FILE = path.join(__dirname, '.wake-at.json');
+function loadWakeAt() { try { return JSON.parse(fs.readFileSync(WAKE_AT_FILE, 'utf8')); } catch { return null; } }
+function saveWakeAt(data) { fs.writeFileSync(WAKE_AT_FILE, JSON.stringify(data, null, 2)); }
+function clearWakeAt() { try { fs.unlinkSync(WAKE_AT_FILE); } catch {} }
+
+// --- Task cache (visible when PC is offline) ---
+const TASK_CACHE_FILE = path.join(__dirname, '.task-cache.json');
+function loadTaskCache() { try { return JSON.parse(fs.readFileSync(TASK_CACHE_FILE, 'utf8')); } catch { return null; } }
+function saveTaskCache(data) { fs.writeFileSync(TASK_CACHE_FILE, JSON.stringify(data)); }
+
 // --- Cron expression matcher (no dependencies) ---
 // Format: "min hour dayOfMonth month dayOfWeek"
 // Supports: *, numbers, ranges (1-5), lists (1,3,5), */N
@@ -239,7 +250,7 @@ function corsHeaders(req) {
   const origin = req.headers.origin || '*';
   return {
     'Access-Control-Allow-Origin': origin,
-    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    'Access-Control-Allow-Methods': 'GET, POST, DELETE, PATCH, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type, Authorization',
     'Access-Control-Allow-Credentials': 'true',
   };
@@ -408,22 +419,75 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
-  // --- Run: forward action to Agent (with deferred fallback for task-add) ---
+  // --- Wake-at: one-time delayed WOL ---
+  if (pathname === '/api/wake-at') {
+    if (req.method === 'GET') {
+      const timer = loadWakeAt();
+      return sendJson(res, 200, timer || { active: false });
+    }
+    if (req.method === 'POST') {
+      try {
+        const body = await parseBody(req);
+        let wakeAt;
+        if (body.at) {
+          wakeAt = new Date(body.at).toISOString();
+        } else if (body.delayMinutes) {
+          wakeAt = new Date(Date.now() + body.delayMinutes * 60_000).toISOString();
+        } else {
+          return sendJson(res, 400, { error: 'at (ISO8601) or delayMinutes required' });
+        }
+        const timer = { active: true, wakeAt, createdAt: new Date().toISOString() };
+        saveWakeAt(timer);
+        console.log(`[wake-at] Scheduled WOL at ${wakeAt}`);
+        return sendJson(res, 201, timer);
+      } catch {
+        return sendJson(res, 400, { error: 'invalid' });
+      }
+    }
+    if (req.method === 'DELETE') {
+      clearWakeAt();
+      console.log('[wake-at] Cancelled');
+      return sendJson(res, 200, { ok: true });
+    }
+  }
+
+  // --- Run: forward action to Agent (with deferred fallback for task-add, cache for task-list) ---
   if (req.method === 'POST' && pathname === '/api/run') {
     try {
       const body = await parseBody(req);
+
+      // Scheduled delivery: task-add with deliverAt → always defer
+      if (body.action === 'task-add' && body.deliverAt) {
+        const deferred = loadDeferred();
+        deferred.push({ body, createdAt: new Date().toISOString(), deliverAt: body.deliverAt, wolSent: false });
+        saveDeferred(deferred);
+        console.log(`[deferred] Scheduled task-add for delivery at ${body.deliverAt}`);
+        return sendJson(res, 202, { ok: true, deferred: true, deliverAt: body.deliverAt, message: 'Task scheduled for delivery' });
+      }
+
       try {
         const result = await agentRequest('POST', '/run', body);
+        // Cache task-list responses
+        if (body.action === 'task-list' && result.data?.tasks) {
+          saveTaskCache({ tasks: result.data.tasks, cachedAt: new Date().toISOString() });
+        }
         return sendJson(res, result.status, result.data);
       } catch {
         // Agent unreachable — if task-add, defer + WOL
         if (body.action === 'task-add') {
           const deferred = loadDeferred();
-          deferred.push({ body, createdAt: new Date().toISOString() });
+          deferred.push({ body, createdAt: new Date().toISOString(), deliverAt: null, wolSent: false });
           saveDeferred(deferred);
           console.log(`[deferred] Saved task-add (PC offline), sending WOL`);
           sendWol().catch(err => console.error('[deferred] WOL error:', err.message));
           return sendJson(res, 202, { ok: true, deferred: true, message: 'PC offline — WOL sent, task queued for delivery' });
+        }
+        // Return cached tasks when offline
+        if (body.action === 'task-list') {
+          const cache = loadTaskCache();
+          if (cache?.tasks) {
+            return sendJson(res, 200, { ok: true, tasks: cache.tasks, cached: true, cachedAt: cache.cachedAt });
+          }
         }
         return sendJson(res, 502, { ok: false, error: 'Agent unreachable' });
       }
@@ -508,24 +572,32 @@ function runScheduler() {
   // --- Deferred task delivery (runs every cycle, not just once per minute) ---
   const deferred = loadDeferred();
   if (deferred.length > 0) {
-    // Expire old tasks
-    const valid = deferred.filter(d => (now - new Date(d.createdAt)) < DEFERRED_EXPIRY_MS);
+    // Expire old tasks (only those without deliverAt or past deliverAt)
+    const valid = deferred.filter(d => {
+      if (d.deliverAt) return (now - new Date(d.deliverAt)) < DEFERRED_EXPIRY_MS;
+      return (now - new Date(d.createdAt)) < DEFERRED_EXPIRY_MS;
+    });
     if (valid.length !== deferred.length) {
       const expired = deferred.length - valid.length;
       console.log(`[deferred] Expired ${expired} task(s)`);
       saveDeferred(valid);
     }
-    if (valid.length > 0) {
-      // Try Agent health check
+
+    // Split: ready (deliverAt <= now or no deliverAt) vs waiting
+    const ready = valid.filter(d => !d.deliverAt || new Date(d.deliverAt) <= now);
+    if (ready.length > 0) {
       agentRequest('GET', '/health').then(() => {
-        console.log(`[deferred] Agent online — delivering ${valid.length} deferred task(s)`);
+        console.log(`[deferred] Agent online — delivering ${ready.length} task(s)`);
         const remaining = [...valid];
         let changed = false;
         const deliver = (i) => {
           if (i >= remaining.length) { if (changed) saveDeferred(remaining.filter(Boolean)); return; }
+          // Skip tasks not yet ready
+          if (remaining[i]?.deliverAt && new Date(remaining[i].deliverAt) > now) { deliver(i + 1); return; }
+          if (!remaining[i]) { deliver(i + 1); return; }
           agentRequest('POST', '/run', remaining[i].body).then(result => {
             console.log(`[deferred] Delivered task ${i + 1}/${remaining.length}: ${result.data?.ok ? 'OK' : 'FAIL'}`);
-            remaining[i] = null; // mark for removal
+            remaining[i] = null;
             changed = true;
             deliver(i + 1);
           }).catch(err => {
@@ -535,9 +607,27 @@ function runScheduler() {
         };
         deliver(0);
       }).catch(() => {
-        // Agent still offline — do nothing, will retry next cycle
+        // Agent offline — send WOL for ready tasks that haven't had WOL sent yet
+        let wolNeeded = false;
+        for (const d of ready) {
+          if (!d.wolSent) { d.wolSent = true; wolNeeded = true; }
+        }
+        if (wolNeeded) {
+          saveDeferred(valid);
+          console.log(`[deferred] Agent offline at delivery time — sending WOL`);
+          sendWol().catch(err => console.error('[deferred] WOL error:', err.message));
+        }
       });
     }
+  }
+
+  // --- Wake-at: one-time WOL timer check ---
+  const wakeTimer = loadWakeAt();
+  if (wakeTimer?.active && new Date(wakeTimer.wakeAt) <= now) {
+    console.log(`[wake-at] Firing WOL (scheduled: ${wakeTimer.wakeAt})`);
+    sendWol().then(count => console.log(`[wake-at] Sent ${count} magic packets`))
+      .catch(err => console.error('[wake-at] WOL error:', err.message));
+    clearWakeAt();
   }
 
   // --- Cron schedules (once per minute) ---
