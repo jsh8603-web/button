@@ -1,9 +1,10 @@
 const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcrypt');
-const { exec } = require('child_process');
+const { exec, spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 require('dotenv').config({ path: path.join(__dirname, '.env') });
 
 const app = express();
@@ -18,6 +19,9 @@ const IGNORE_DIRS_ENV = process.env.IGNORE_DIRS || 'node_modules,screenshots';
 const EDITOR_TITLE = process.env.EDITOR_TITLE || '';
 const CLAUDE_MODEL = process.env.CLAUDE_MODEL || 'opus';
 const AGENT_SECRET = process.env.AGENT_SECRET;
+
+// Windows path → MSYS path (e.g. D:\projects → /d/projects)
+const toMsys = (p) => p.replace(/\\/g, '/').replace(/^([A-Z]):/i, (_, d) => `/${d.toLowerCase()}`);
 
 // Warn if path-sensitive env vars use short command names (may fail without PATH)
 for (const [name, val] of [['EDITOR_CMD', EDITOR_CMD], ['CLAUDE_BIN', CLAUDE_BIN]]) {
@@ -109,6 +113,572 @@ async function verifyPin(req, res, next) {
   }
 }
 
+// --- System Metrics ---
+
+let metricsCache = null;
+let metricsCacheTime = 0;
+const METRICS_TTL_MS = 10_000;
+
+function execPromise(cmd) {
+  return new Promise((resolve) => {
+    exec(cmd, { encoding: 'utf8' }, (err, stdout) => resolve(err ? '' : stdout));
+  });
+}
+
+async function collectMetrics() {
+  const now = Date.now();
+  if (metricsCache && now - metricsCacheTime < METRICS_TTL_MS) return metricsCache;
+
+  const [cpuOut, memOut, diskOut, gpuOut] = await Promise.all([
+    execPromise('wmic cpu get loadpercentage /value'),
+    execPromise('wmic OS get FreePhysicalMemory,TotalVisibleMemorySize /value'),
+    execPromise('wmic logicaldisk where "DriveType=3" get Caption,FreeSpace,Size /format:csv'),
+    execPromise('nvidia-smi --query-gpu=temperature.gpu --format=csv,noheader'),
+  ]);
+
+  // CPU
+  const cpuMatch = cpuOut.match(/LoadPercentage=(\d+)/i);
+  const cpu = cpuMatch ? parseInt(cpuMatch[1], 10) : null;
+
+  // Memory (KB → GB)
+  const freeKBMatch = memOut.match(/FreePhysicalMemory=(\d+)/i);
+  const totalKBMatch = memOut.match(/TotalVisibleMemorySize=(\d+)/i);
+  const memTotal = totalKBMatch ? Math.round(parseInt(totalKBMatch[1], 10) / 1024 / 1024 * 10) / 10 : null;
+  const memFree = freeKBMatch ? parseInt(freeKBMatch[1], 10) / 1024 / 1024 : null;
+  const memUsed = (memTotal !== null && memFree !== null)
+    ? Math.round((memTotal - memFree) * 10) / 10
+    : null;
+
+  // Disks (CSV: Node,Caption,FreeSpace,Size — bytes)
+  const disks = [];
+  const diskLines = diskOut.trim().split('\n').filter(l => l.trim() && !l.startsWith('Node'));
+  for (const line of diskLines) {
+    const parts = line.trim().split(',');
+    if (parts.length < 4) continue;
+    const caption = parts[1].trim();
+    const freeBytes = parseInt(parts[2].trim(), 10);
+    const totalBytes = parseInt(parts[3].trim(), 10);
+    if (!caption || isNaN(freeBytes) || isNaN(totalBytes) || totalBytes === 0) continue;
+    disks.push({
+      drive: caption,
+      freeGB: Math.round(freeBytes / 1024 / 1024 / 1024),
+      totalGB: Math.round(totalBytes / 1024 / 1024 / 1024),
+    });
+  }
+
+  // GPU temp (nvidia-smi, optional)
+  const gpuTempMatch = gpuOut.trim().match(/^(\d+)/);
+  const gpuTemp = gpuTempMatch ? parseInt(gpuTempMatch[1], 10) : null;
+
+  metricsCache = { cpu, memUsed, memTotal, disks, gpuTemp, uptime: Math.floor(process.uptime()) };
+  metricsCacheTime = now;
+  return metricsCache;
+}
+
+// --- Task Runner ---
+
+const TASK_QUEUE_FILE = path.join(__dirname, '.task-queue.json');
+
+const BUILTIN_TASKS = {
+  'windows-update': 'powershell -Command "Install-Module PSWindowsUpdate -Force -ErrorAction SilentlyContinue; Get-WindowsUpdate -Install -AcceptAll -AutoReboot:$false"',
+  'disk-cleanup': 'cleanmgr /sagerun:1',
+  'defrag': 'defrag C: /O',
+  'restart': 'shutdown /r /t 60',
+};
+
+function readTaskQueue() {
+  try { return JSON.parse(fs.readFileSync(TASK_QUEUE_FILE, 'utf8')); } catch { return []; }
+}
+
+function writeTaskQueue(tasks) {
+  fs.writeFileSync(TASK_QUEUE_FILE, JSON.stringify(tasks, null, 2));
+}
+
+// --- AI Task Learning ---
+
+const LEARNED_FILE = path.join(__dirname, '.task-learned.json');
+const AI_TASK_TIMEOUT = 1_800_000; // 30 minutes
+
+function readLearned() {
+  try { return JSON.parse(fs.readFileSync(LEARNED_FILE, 'utf8')); } catch { return {}; }
+}
+
+function writeLearned(data) {
+  fs.writeFileSync(LEARNED_FILE, JSON.stringify(data, null, 2));
+}
+
+function findLearnedApproach(taskName) {
+  if (!taskName) return null;
+  const learned = readLearned();
+  const words = taskName.toLowerCase().split(/\s+/);
+  let bestMatch = null, bestOverlap = 0;
+  for (const [key, val] of Object.entries(learned)) {
+    const keyWords = key.toLowerCase().split(/\s+/);
+    const overlap = words.filter(w => keyWords.includes(w)).length;
+    if (overlap >= 2 && overlap > bestOverlap) {
+      bestOverlap = overlap;
+      bestMatch = val;
+    }
+  }
+  return bestMatch;
+}
+
+function saveLearned(taskName, approach) {
+  if (!taskName || !approach) return;
+  const learned = readLearned();
+  learned[taskName] = {
+    approach,
+    lastUsed: new Date().toISOString(),
+    successCount: (learned[taskName]?.successCount || 0) + 1,
+  };
+  writeLearned(learned);
+  console.log(`[ai-task] Saved learned approach for "${taskName}"`);
+}
+
+// --- AI Task Execution ---
+
+let aiTaskRunning = false;
+let currentAiTask = null;
+let aiTaskEditorPid = null;
+let editorCloseTimer = null;
+
+function preemptAiTask() {
+  if (!currentAiTask) return;
+  const task = currentAiTask;
+  const shortId = task.id.slice(0, 8);
+  const session = `${AI_TASK_PREFIX}${shortId}`;
+  console.log(`[ai-task] Preempting task "${task.id}" (session: ${session})`);
+
+  // Kill tmux session
+  exec(`"${BASH_PATH}" -lc "tmux kill-session -t ${session} 2>/dev/null"`, (err) => {
+    if (err) console.error(`[ai-task] Preempt kill-session error:`, err.message);
+  });
+
+  // Kill editor
+  if (aiTaskEditorPid) {
+    try { process.kill(aiTaskEditorPid); } catch {}
+    const closeScript = path.join(__dirname, 'close-window.ps1');
+    const projName = path.basename(task.project || 'D:/projects/button');
+    const titleQuery = EDITOR_TITLE ? `${projName} - ${EDITOR_TITLE}` : projName;
+    exec(`powershell.exe -ExecutionPolicy Bypass -File "${closeScript}" -TitlePrefix "${titleQuery}"`, () => {});
+    aiTaskEditorPid = null;
+  }
+
+  // Cancel editor close timer
+  if (editorCloseTimer) { clearTimeout(editorCloseTimer); editorCloseTimer = null; }
+
+  // Clean up prompt file
+  const promptFile = path.join(__dirname, `.ai-task-prompt-${shortId}.txt`);
+  try { fs.unlinkSync(promptFile); } catch {}
+
+  // Mark task as preempted
+  finishAiTask(task, 'preempted', 'Preempted by new task');
+}
+
+function scheduleEditorClose(task, editorPid) {
+  if (editorCloseTimer) clearTimeout(editorCloseTimer);
+  if (!editorPid) return;
+
+  const session = `${AI_TASK_PREFIX}${task.id.slice(0, 8)}`;
+  let snapshot = null;
+
+  // Capture current pane output as baseline
+  exec(`"${BASH_PATH}" -lc "tmux capture-pane -t ${session} -p 2>/dev/null | tail -20"`, { encoding: 'utf8' }, (err, out) => {
+    snapshot = err ? null : out;
+  });
+
+  const IDLE_TIMEOUT = 10 * 60 * 1000; // 10 minutes
+  const CHECK_INTERVAL = 60 * 1000;    // check every 1 min
+  const startTime = Date.now();
+
+  const interval = setInterval(() => {
+    // Check if session still exists
+    exec(`"${BASH_PATH}" -lc "tmux has-session -t ${session} 2>/dev/null"`, (err) => {
+      if (err) {
+        // Session gone — close editor
+        clearInterval(interval);
+        try { process.kill(editorPid); } catch {}
+        console.log(`[ai-task] Session gone, closed editor (PID ${editorPid})`);
+        return;
+      }
+
+      // Capture current output and compare with snapshot
+      exec(`"${BASH_PATH}" -lc "tmux capture-pane -t ${session} -p 2>/dev/null | tail -20"`, { encoding: 'utf8' }, (err2, current) => {
+        if (err2) return;
+        if (snapshot && current !== snapshot) {
+          // User interacted — cancel scheduled close
+          clearInterval(interval);
+          if (editorCloseTimer) { clearTimeout(editorCloseTimer); editorCloseTimer = null; }
+          console.log(`[ai-task] User activity detected in ${session}, keeping editor open`);
+          return;
+        }
+
+        // No activity — check if idle timeout reached
+        if (Date.now() - startTime >= IDLE_TIMEOUT) {
+          clearInterval(interval);
+          try { process.kill(editorPid); } catch {}
+          console.log(`[ai-task] 10min idle, closed editor (PID ${editorPid})`);
+        }
+      });
+    });
+  }, CHECK_INTERVAL);
+
+  editorCloseTimer = setTimeout(() => { clearInterval(interval); }, IDLE_TIMEOUT + CHECK_INTERVAL);
+}
+
+function executeAiTask(task) {
+  aiTaskRunning = true;
+  currentAiTask = task;
+  const shortId = task.id.slice(0, 8);
+  const session = `${AI_TASK_PREFIX}${shortId}`;
+  const project = task.project || 'D:/projects/button';
+  const projMsys = toMsys(project);
+  const claudeBinMsys = toMsys(CLAUDE_BIN);
+
+  // Build prompt and save to temp file (multi-line prompts break tmux send-keys)
+  const learned = findLearnedApproach(task.name);
+  let prompt = `You are executing a scheduled task. Work autonomously as much as possible.\n\nTask: ${task.name || 'Unnamed task'}\n\nInstructions:\n${task.instructions}\n`;
+  if (learned) {
+    prompt += `\nPreviously successful approach for similar task:\n${learned.approach}\n`;
+  }
+  prompt += `\nAvailable Tools & Logs:\nRead the tool inventory first: ~/.claude/rules/pc-tools.md\nIt has a quick-select table mapping task types to skill files. Read the relevant skill file for detailed usage.\nKey tools: NirCmd (system control), AutoHotkey v2 (GUI), PyAutoGUI (screenshot/image recognition), Playwright (browser), yt-dlp+ffmpeg (media), aria2 (downloads).\n\nPast task logs (check before starting — may have useful approaches or known failures):\n- Learned approaches: D:/projects/button/agent/.task-learned.json\n- Task history (completed/failed): D:/projects/button/agent/.task-queue.json\nRead these files first if your task is similar to a previous one.\n`;
+  prompt += `\nRules:\n- Execute the task using Bash commands, file operations, etc.\n- If the primary approach fails, research and try alternatives\n- Install any missing tools yourself (choco, winget, npm, etc.) — never fail because something is not installed\n- Before using a PC tool, Read the relevant skill file from ~/.claude/rules/ for correct syntax and paths\n- If you need user credentials, login info, or a decision you cannot make, clearly state what you need and WAIT for the user to respond. The user will check this session via remote.\n- At the end, output exactly: SUCCESS: <summary> or FAILURE: <reason>`;
+
+  const promptFile = path.join(__dirname, `.ai-task-prompt-${shortId}.txt`);
+  fs.writeFileSync(promptFile, prompt);
+  const promptFileMsys = toMsys(promptFile);
+
+  const createCmd = `tmux kill-session -t ${session} 2>/dev/null; tmux new-session -d -s ${session} -c ${projMsys}; tmux send-keys -t ${session} '${claudeBinMsys} --dangerously-skip-permissions --model ${CLAUDE_MODEL}' Enter`;
+
+  console.log(`[ai-task] Creating tmux session: ${session} in ${project}`);
+  exec(`"${BASH_PATH}" -lc "${createCmd}"`, (err) => {
+    if (err) {
+      console.error(`[ai-task] Session create error:`, err.message);
+      finishAiTask(task, 'failed', `Session create error: ${err.message}`);
+      return;
+    }
+
+    // Auto-protect AI task session (like proj sessions)
+    const protectedList = getProtectedSessions();
+    if (!protectedList.includes(session)) {
+      protectedList.push(session);
+      setProtectedSessions(protectedList);
+      console.log(`[ai-task] Protected session: ${session}`);
+    }
+
+    // Write tasks.json to auto-attach AI task tmux session on editor open
+    const projDir = project.replace(/\//g, '\\');
+    const projName = path.basename(project);
+    const vscodeDir = path.join(projDir, '.vscode');
+    fs.mkdirSync(vscodeDir, { recursive: true });
+    const tasksFile = path.join(vscodeDir, 'tasks.json');
+    fs.writeFileSync(tasksFile, JSON.stringify(buildTasksJson(session), null, 2));
+
+    // Set allowAutomaticTasks so folderOpen task runs on editor open
+    const settingsFile = path.join(vscodeDir, 'settings.json');
+    let settings = {};
+    try { settings = JSON.parse(fs.readFileSync(settingsFile, 'utf8')); } catch {}
+    settings['task.allowAutomaticTasks'] = 'on';
+    settings['powershell.integratedConsole.startInBackground'] = true;
+    fs.writeFileSync(settingsFile, JSON.stringify(settings, null, 2));
+
+    // Close existing editor window for this project, then open fresh (same as proj action)
+    const closeScript = path.join(__dirname, 'close-window.ps1');
+    if (EDITOR_TITLE) {
+      const titleQuery = `${projName} - ${EDITOR_TITLE}`;
+      exec(`powershell.exe -ExecutionPolicy Bypass -File "${closeScript}" -TitlePrefix "${titleQuery}"`, (err) => {
+        if (err) console.error('[ai-task] close-window error:', err.message);
+      });
+    }
+
+    setTimeout(() => {
+      console.log(`[ai-task] Opening editor: "${EDITOR_CMD}" "${projDir}"`);
+      const editorChild = exec(`"${EDITOR_CMD}" "${projDir}"`, (err) => {
+        if (err) console.error('[ai-task] Editor launch error:', err.message);
+      });
+      aiTaskEditorPid = editorChild.pid;
+      editorChild.unref();
+
+      const maxScript = path.join(__dirname, 'maximize-window.ps1');
+      exec(`powershell.exe -ExecutionPolicy Bypass -File "${maxScript}" -TitlePrefix "${projName}"`, (err) => {
+        if (err) console.error('[ai-task] Maximize error:', err.message);
+      });
+    }, 3000);
+
+    const startTime = Date.now();
+    const PROMPT_DETECT_TIMEOUT = 120000; // 2 min to detect Claude prompt
+    let trustHandled = false;
+    let instructionsSent = false;
+
+    function capture(cb) {
+      exec(`"${BASH_PATH}" -lc "tmux capture-pane -t ${session} -p -S - | sed '/^[[:space:]]*$/d' | tail -15"`, { encoding: 'utf8' }, cb);
+    }
+
+    function hasTrustPrompt(output) {
+      return output.includes('trust this folder') || output.includes('I trust');
+    }
+
+    function hasClaudePrompt(output) {
+      if (hasTrustPrompt(output)) return false;
+      return output.includes('>') || output.includes('\u256D') || output.includes('human');
+    }
+
+    function poll() {
+      if (Date.now() - startTime > AI_TASK_TIMEOUT) {
+        console.error(`[ai-task] Timeout for "${task.id}" — session ${session} kept alive`);
+        finishAiTask(task, 'failed', 'Timeout: exceeded 30 minutes');
+        return;
+      }
+
+      capture((err, stdout) => {
+        if (err) { setTimeout(poll, 3000); return; }
+        const output = (stdout || '').trim();
+
+        // Phase 1: Wait for Claude to start, handle trust prompt
+        if (!instructionsSent) {
+          if (!trustHandled && hasTrustPrompt(output)) {
+            trustHandled = true;
+            console.log(`[ai-task] Trust prompt detected, accepting...`);
+            exec(`"${BASH_PATH}" -lc "tmux send-keys -t ${session} Enter"`, () => {});
+            setTimeout(poll, 3000);
+            return;
+          }
+
+          const promptDetected = hasClaudePrompt(output);
+          const promptTimedOut = Date.now() - startTime > PROMPT_DETECT_TIMEOUT;
+
+          if (promptDetected || promptTimedOut) {
+            instructionsSent = true;
+            if (promptTimedOut && !promptDetected) {
+              console.warn(`[ai-task] Prompt not detected within ${PROMPT_DETECT_TIMEOUT / 1000}s, sending anyway (output: "${output.slice(-100)}")`);
+            } else {
+              console.log(`[ai-task] Claude ready, sending /remote-control then instructions for "${task.id}"`);
+            }
+            // Send /remote-control first (like proj sessions), then instructions
+            exec(`"${BASH_PATH}" -lc "tmux send-keys -t ${session} '/remote-control' Enter"`, (err) => {
+              if (err) console.error(`[ai-task] /remote-control send error:`, err.message);
+              else console.log(`[ai-task] Sent /remote-control to ${session}`);
+              // Wait for /remote-control to be processed, then send instructions
+              setTimeout(() => {
+                exec(`"${BASH_PATH}" -lc "tmux load-buffer ${promptFileMsys} && tmux paste-buffer -t ${session} && sleep 1 && tmux send-keys -t ${session} Enter && sleep 1 && tmux send-keys -t ${session} Enter"`, (err) => {
+                  if (err) console.error(`[ai-task] Send error:`, err.message);
+                  try { fs.unlinkSync(promptFile); } catch {}
+                });
+              }, 3000);
+            });
+            // Wait for Claude to start working before checking completion
+            setTimeout(poll, 20000);
+            return;
+          }
+
+          const waitElapsed = ((Date.now() - startTime) / 1000).toFixed(0);
+          if (Number(waitElapsed) % 15 === 0) {
+            console.log(`[ai-task] Waiting for Claude prompt... (${waitElapsed}s, output length: ${output.length})`);
+          }
+          setTimeout(poll, 3000);
+          return;
+        }
+
+        // Phase 2: Check full buffer for SUCCESS/FAILURE markers (after prompt text)
+        exec(`"${BASH_PATH}" -lc "tmux capture-pane -t ${session} -p -S -"`, { encoding: 'utf8', maxBuffer: 1024 * 1024 }, (err, fullOutput) => {
+          const buffer = (fullOutput || '').trim();
+          // Skip the prompt portion to avoid matching "SUCCESS: <summary>" from instructions
+          const markerCutoff = buffer.lastIndexOf('At the end, output exactly');
+          const searchArea = markerCutoff >= 0 ? buffer.slice(markerCutoff + 80) : buffer;
+          const successMatch = searchArea.match(/SUCCESS:\s*(.+)/);
+          const failureMatch = searchArea.match(/FAILURE:\s*(.+)/);
+
+          if (successMatch) {
+            console.log(`[ai-task] Claude finished for "${task.id}", collecting results`);
+            saveLearned(task.name, successMatch[1].trim());
+            finishAiTask(task, 'completed', successMatch[1].trim());
+            return;
+          }
+          if (failureMatch) {
+            console.log(`[ai-task] Claude finished for "${task.id}", collecting results`);
+            finishAiTask(task, 'failed', failureMatch[1].trim());
+            return;
+          }
+
+          // No markers yet — if Claude prompt re-appeared, it may be waiting for user input
+          if (hasClaudePrompt(output)) {
+            setTaskWaitingForInput(task, true);
+          } else {
+            setTaskWaitingForInput(task, false);
+          }
+
+          setTimeout(poll, 10000);
+        });
+      });
+    }
+
+    setTimeout(poll, 5000);
+  });
+}
+
+function setTaskWaitingForInput(task, waiting) {
+  const tasks = readTaskQueue();
+  const t = tasks.find(x => x.id === task.id);
+  if (!t) return;
+  if (t.waitingForInput === waiting) return; // no change
+  t.waitingForInput = waiting;
+  writeTaskQueue(tasks);
+  if (waiting) console.log(`[ai-task] Task "${task.id}" is waiting for user input`);
+}
+
+function finishAiTask(task, status, result) {
+  aiTaskRunning = false;
+  currentAiTask = null;
+  const tasks = readTaskQueue();
+  const t = tasks.find(x => x.id === task.id);
+  if (!t) return;
+
+  t.status = status;
+  t.result = result;
+  t.waitingForInput = false;
+  t.completedAt = new Date().toISOString();
+  t.log = result;
+
+  if (t.repeat) {
+    const next = nextCronRun(t.repeat);
+    t.scheduledAt = next ? next.toISOString() : null;
+    t.status = t.scheduledAt ? 'pending' : t.status;
+    t.result = null;
+    t.completedAt = null;
+    t.log = null;
+  }
+
+  writeTaskQueue(tasks);
+  console.log(`[ai-task] Finished "${t.id}" — status: ${status}, result: ${(result || '').slice(0, 100)}`);
+
+  // Schedule editor close after 10 min idle (cancel if user interacts)
+  scheduleEditorClose(task, aiTaskEditorPid);
+  aiTaskEditorPid = null;
+
+  // Remove AI task session from protected list (allows cleanup on next proj call)
+  const session = `${AI_TASK_PREFIX}${task.id.slice(0, 8)}`;
+  const updatedProtected = getProtectedSessions().filter(s => s !== session);
+  setProtectedSessions(updatedProtected);
+  console.log(`[ai-task] Unprotected completed session: ${session}`);
+
+  // Restore tasks.json to original project session
+  const project = task.project || 'D:/projects/button';
+  const projName = path.basename(project);
+  const projDir = project.replace(/\//g, '\\');
+  const vscodeDir = path.join(projDir, '.vscode');
+  const tasksFile = path.join(vscodeDir, 'tasks.json');
+  try {
+    fs.writeFileSync(tasksFile, JSON.stringify(buildTasksJson(projName), null, 2));
+    console.log(`[ai-task] Restored tasks.json to ${projName} session`);
+  } catch (e) {
+    console.error(`[ai-task] Failed to restore tasks.json:`, e.message);
+  }
+
+  if (t.onComplete && status === 'completed') {
+    console.log(`[ai-task] onComplete action: ${t.onComplete}`);
+    executeSleepAction(t.onComplete, 0);
+  }
+}
+
+// Parse simple cron "M H * * *" or "M H * * D" → next Date from now
+function nextCronRun(cronExpr) {
+  const parts = cronExpr.trim().split(/\s+/);
+  if (parts.length < 5) return null;
+  const [m, h, , , dow] = parts;
+  const minute = parseInt(m, 10);
+  const hour = parseInt(h, 10);
+  if (isNaN(minute) || isNaN(hour)) return null;
+
+  const now = new Date();
+  const candidate = new Date(now);
+  candidate.setSeconds(0, 0);
+  candidate.setMinutes(minute);
+  candidate.setHours(hour);
+
+  // Advance to tomorrow if time already passed today
+  if (candidate <= now) candidate.setDate(candidate.getDate() + 1);
+
+  // If day-of-week is specified (0=Sun … 6=Sat)
+  if (dow !== '*') {
+    const targetDow = parseInt(dow, 10);
+    if (!isNaN(targetDow)) {
+      while (candidate.getDay() !== targetDow) {
+        candidate.setDate(candidate.getDate() + 1);
+      }
+    }
+  }
+
+  return candidate;
+}
+
+function startTaskRunner() {
+  setInterval(() => {
+    const tasks = readTaskQueue();
+    const now = new Date();
+    let changed = false;
+
+    for (const task of tasks) {
+      if (task.status !== 'pending') continue;
+      if (!task.scheduledAt || new Date(task.scheduledAt) > now) continue;
+
+      // AI task branch
+      if (task.type === 'ai') {
+        if (aiTaskRunning && currentAiTask) {
+          console.log(`[ai-task] New AI task "${task.id}" — preempting current task "${currentAiTask.id}"`);
+          preemptAiTask();
+        }
+        task.status = 'running';
+        changed = true;
+        writeTaskQueue(tasks);
+        executeAiTask(task);
+        continue;
+      }
+
+      const command = task.command || BUILTIN_TASKS[task.name] || null;
+      if (!command) {
+        task.status = 'completed';
+        task.log = `No command found for task "${task.name}"`;
+        task.completedAt = new Date().toISOString();
+        changed = true;
+        continue;
+      }
+
+      console.log(`[task] Running "${task.id}" (${task.name || task.command})`);
+      task.status = 'running';
+      changed = true;
+      writeTaskQueue(tasks);
+
+      exec(command, { encoding: 'utf8', timeout: 600_000 }, (err, stdout, stderr) => {
+        const allTasks = readTaskQueue();
+        const t = allTasks.find(x => x.id === task.id);
+        if (!t) return;
+
+        t.log = (stdout + stderr).trim() || (err ? err.message : '(no output)');
+        t.completedAt = new Date().toISOString();
+
+        if (t.repeat) {
+          const next = nextCronRun(t.repeat);
+          t.scheduledAt = next ? next.toISOString() : null;
+          t.status = t.scheduledAt ? 'pending' : 'completed';
+          console.log(`[task] Repeat task "${t.id}" next run: ${t.scheduledAt || 'none'}`);
+        } else {
+          t.status = 'completed';
+        }
+
+        writeTaskQueue(allTasks);
+        console.log(`[task] Completed "${t.id}" — status: ${t.status}`);
+
+        if (t.onComplete) {
+          console.log(`[task] onComplete action: ${t.onComplete}`);
+          executeSleepAction(t.onComplete, 0);
+        }
+      });
+    }
+
+    if (changed) writeTaskQueue(tasks);
+  }, 30_000);
+}
+
 // --- Routes ---
 
 // PIN verification endpoint (Pi relay uses this to validate user PINs)
@@ -163,6 +733,7 @@ app.get('/status', verifySecret, async (req, res) => {
     uptime: process.uptime(),
     sessions,
     projects: getProjectList(),
+    metrics: await collectMetrics(),
   });
 });
 
@@ -186,14 +757,13 @@ app.post('/shutdown', verifySecret, (req, res) => {
 const SAFE_NAME_RE = /^[a-zA-Z0-9_-]+$/;
 const IGNORE_DIRS = new Set(IGNORE_DIRS_ENV.split(',').map(s => s.trim()).filter(Boolean));
 
-// Windows path → MSYS path (e.g. D:\projects → /d/projects)
-const toMsys = (p) => p.replace(/\\/g, '/').replace(/^([A-Z]):/i, (_, d) => `/${d.toLowerCase()}`);
-
 // tasks.json: open tmux session with claude on folder open
 const SESSION_PREFIX = 'btn-';
+const AI_TASK_PREFIX = 'schedule-';
 
-function buildTasksJson(name) {
-  const session = `${SESSION_PREFIX}${name}`;
+function buildTasksJson(sessionOrName) {
+  // If already a full session name (schedule- or btn-), use as-is; otherwise prepend SESSION_PREFIX
+  const session = sessionOrName.startsWith(AI_TASK_PREFIX) ? sessionOrName : `${SESSION_PREFIX}${sessionOrName}`;
   const attachCmd = `timeout=30; while [ $timeout -gt 0 ] && ! tmux has-session -t ${session} 2>/dev/null; do sleep 0.5; timeout=$((timeout-1)); done; tmux attach-session -t ${session}`;
   return {
     version: "2.0.0",
@@ -230,20 +800,30 @@ async function getActiveSessions() {
   return new Promise((resolve) => {
     exec(`"${BASH_PATH}" -lc "tmux list-sessions -F '#S' 2>/dev/null"`, (err, stdout) => {
       if (err) return resolve([]);
-      resolve(stdout.trim().split('\n')
-        .filter(s => s.startsWith(SESSION_PREFIX))
-        .map(s => s.slice(SESSION_PREFIX.length)));
+      const all = stdout.trim().split('\n').filter(Boolean);
+      const sessions = [];
+      for (const s of all) {
+        if (s.startsWith(SESSION_PREFIX)) sessions.push(s.slice(SESSION_PREFIX.length));
+        else if (s.startsWith(AI_TASK_PREFIX)) sessions.push(s); // schedule- sessions: use full name
+      }
+      resolve(sessions);
     });
   });
 }
 
 function killUnprotectedSessions() {
+  if (aiTaskRunning) {
+    console.log('[kill] Skipping killUnprotectedSessions — AI task is running');
+    return;
+  }
   const scriptPath = path.join(__dirname, 'kill-sessions.sh').replace(/\\/g, '/');
   const closeScript = path.join(__dirname, 'close-window.ps1');
 
   getActiveSessions().then(activeSessions => {
     const protectedList = getProtectedSessions();
-    const toKill = activeSessions.filter(s => !protectedList.includes(s));
+    // Only kill btn- sessions, never schedule- sessions
+    const btnSessions = activeSessions.filter(s => !s.startsWith(AI_TASK_PREFIX));
+    const toKill = btnSessions.filter(s => !protectedList.includes(s));
 
     if (toKill.length === 0) return;
 
@@ -299,14 +879,22 @@ function openProjectInEditor(name) {
       }
       console.log(`[proj] Created tmux session: ${session}`);
 
-      const MAX_WAIT = 60000;
+      // Protect proj session so killUnprotectedSessions doesn't kill it
+      const protectedList = getProtectedSessions();
+      if (!protectedList.includes(name)) {
+        protectedList.push(name);
+        setProtectedSessions(protectedList);
+        console.log(`[proj] Protected session: ${session}`);
+      }
+
+      const MAX_WAIT = 120000;
       const POLL_INTERVAL = 2000;
       const STABLE_INTERVAL = 1500;
       const startTime = Date.now();
       let lastReadyOutput = null;
 
       function capturePaneTail(cb) {
-        exec(`"${BASH_PATH}" -lc "tmux capture-pane -t ${session} -p | sed '/^[[:space:]]*$/d' | tail -10"`, { encoding: 'utf8' }, cb);
+        exec(`"${BASH_PATH}" -lc "tmux capture-pane -t ${session} -p -S - | sed '/^[[:space:]]*$/d' | tail -15"`, { encoding: 'utf8' }, cb);
       }
 
       function hasTrustPrompt(output) {
@@ -347,6 +935,12 @@ function openProjectInEditor(name) {
           capturePaneTail((err, stdout) => {
             console.error(`[proj] Claude did not start within ${MAX_WAIT / 1000}s in ${session}`);
             console.error(`[proj] Pane content at timeout:\n${(stdout || '(empty)').trim()}`);
+            // Send /remote-control anyway — Claude may start later
+            console.log(`[proj] Sending /remote-control despite timeout`);
+            exec(`"${BASH_PATH}" -lc "tmux send-keys -t ${session} '/remote-control' Enter"`, (err) => {
+              if (err) console.error('[proj] /remote-control send error:', err.message);
+              else console.log(`[proj] Sent /remote-control to ${session} (timeout fallback)`);
+            });
           });
           return;
         }
@@ -501,6 +1095,100 @@ app.post('/run', verifySecret, (req, res) => {
     return res.json({ ok: true, action });
   }
 
+  if (action === 'task-add') {
+    const { name: taskName, command, instructions, type, project, scheduledAt, repeat, onComplete, inputNeeded } = req.body.params || req.body;
+    if (!scheduledAt) {
+      return res.status(400).json({ ok: false, message: 'scheduledAt is required' });
+    }
+    const taskType = type || (instructions ? 'ai' : 'command');
+    if (taskType === 'ai') {
+      if (!instructions) {
+        return res.status(400).json({ ok: false, message: 'instructions is required for AI tasks' });
+      }
+    } else {
+      const resolvedCommand = command || BUILTIN_TASKS[taskName] || null;
+      if (!resolvedCommand && !taskName) {
+        return res.status(400).json({ ok: false, message: 'name or command is required' });
+      }
+    }
+    const task = {
+      id: crypto.randomUUID(),
+      type: taskType,
+      name: taskName || null,
+      command: taskType === 'ai' ? null : (command || BUILTIN_TASKS[taskName] || null),
+      instructions: taskType === 'ai' ? instructions : null,
+      project: taskType === 'ai' ? (project || null) : null,
+      scheduledAt,
+      repeat: repeat || null,
+      onComplete: onComplete || null,
+      status: 'pending',
+      inputNeeded: inputNeeded || null,
+      waitingForInput: false,
+      result: null,
+      log: null,
+      completedAt: null,
+    };
+    const tasks = readTaskQueue();
+    tasks.push(task);
+    writeTaskQueue(tasks);
+    console.log(`[task] Added ${taskType} task "${task.id}" (${task.name || task.command || 'AI'}) at ${scheduledAt}`);
+    return res.json({ ok: true, task });
+  }
+
+  if (action === 'task-list') {
+    return res.json({ ok: true, tasks: readTaskQueue() });
+  }
+
+  if (action === 'task-update') {
+    const { taskId, instructions, inputNeeded, name, scheduledAt, onComplete } = req.body.params || req.body;
+    if (!taskId) return res.status(400).json({ ok: false, message: 'taskId is required' });
+    const tasks = readTaskQueue();
+    const t = tasks.find(x => x.id === taskId);
+    if (!t) return res.status(404).json({ ok: false, message: 'Task not found' });
+    // Running tasks: only allow clearing inputNeeded (display flag)
+    if (t.status === 'running') {
+      if (inputNeeded !== undefined) {
+        t.inputNeeded = inputNeeded || null;
+        writeTaskQueue(tasks);
+        console.log(`[task] Updated running task "${taskId}" — inputNeeded=${inputNeeded || 'null'}`);
+        return res.json({ ok: true, task: t });
+      }
+      return res.status(400).json({ ok: false, message: 'Running tasks can only update inputNeeded' });
+    }
+    if (t.status !== 'pending') return res.status(400).json({ ok: false, message: 'Only pending/running tasks can be updated' });
+    if (instructions !== undefined) t.instructions = instructions;
+    if (inputNeeded !== undefined) t.inputNeeded = inputNeeded || null;
+    if (name !== undefined) t.name = name;
+    if (scheduledAt !== undefined) t.scheduledAt = scheduledAt;
+    if (onComplete !== undefined) t.onComplete = onComplete || null;
+    writeTaskQueue(tasks);
+    const changes = [];
+    if (instructions !== undefined) changes.push('instructions');
+    if (inputNeeded !== undefined) changes.push(`inputNeeded=${inputNeeded || 'null'}`);
+    if (name !== undefined) changes.push(`name=${name}`);
+    if (scheduledAt !== undefined) changes.push(`scheduledAt=${scheduledAt}`);
+    if (onComplete !== undefined) changes.push(`onComplete=${onComplete || 'null'}`);
+    console.log(`[task] Updated task "${taskId}" — ${changes.join(', ')}`);
+    return res.json({ ok: true, task: t });
+  }
+
+  if (action === 'task-cancel') {
+    const { taskId } = req.body.params || req.body;
+    if (!taskId) return res.status(400).json({ ok: false, message: 'taskId is required' });
+    const tasks = readTaskQueue().filter(t => t.id !== taskId);
+    writeTaskQueue(tasks);
+    console.log(`[task] Cancelled task "${taskId}"`);
+    return res.json({ ok: true, action });
+  }
+
+  if (action === 'task-log') {
+    const { taskId } = req.body.params || req.body;
+    if (!taskId) return res.status(400).json({ ok: false, message: 'taskId is required' });
+    const task = readTaskQueue().find(t => t.id === taskId);
+    if (!task) return res.status(404).json({ ok: false, message: 'Task not found' });
+    return res.json({ ok: true, task });
+  }
+
   return res.status(400).json({ ok: false, message: `Unknown action: ${action}` });
 });
 
@@ -621,5 +1309,6 @@ app.listen(PORT, async () => {
   console.log(`Button Agent listening on port ${PORT}`);
   await waitForTmux();
   restoreHibernateSchedule();
+  startTaskRunner();
   console.log('[agent] Ready — waiting for commands from Pi relay');
 });

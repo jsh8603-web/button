@@ -74,6 +74,72 @@ function recordFailure(ip) {
   failureMap.set(ip, entry);
 }
 
+// --- Schedule persistence ---
+
+const SCHEDULES_FILE = path.join(__dirname, 'schedules.json');
+function loadSchedules() { try { return JSON.parse(fs.readFileSync(SCHEDULES_FILE, 'utf8')); } catch { return []; } }
+function saveSchedules(list) { fs.writeFileSync(SCHEDULES_FILE, JSON.stringify(list, null, 2)); }
+
+// --- Deferred task queue (for when PC is offline) ---
+const DEFERRED_FILE = path.join(__dirname, 'deferred-tasks.json');
+function loadDeferred() { try { return JSON.parse(fs.readFileSync(DEFERRED_FILE, 'utf8')); } catch { return []; } }
+function saveDeferred(list) { fs.writeFileSync(DEFERRED_FILE, JSON.stringify(list, null, 2)); }
+const DEFERRED_EXPIRY_MS = 10 * 60 * 1000; // 10 min expiry
+
+// --- Cron expression matcher (no dependencies) ---
+// Format: "min hour dayOfMonth month dayOfWeek"
+// Supports: *, numbers, ranges (1-5), lists (1,3,5), */N
+
+function matchField(field, value) {
+  if (field === '*') return true;
+  if (field.includes('/')) { const [, step] = field.split('/'); return value % parseInt(step) === 0; }
+  return field.split(',').some(part => {
+    if (part.includes('-')) { const [a, b] = part.split('-').map(Number); return value >= a && value <= b; }
+    return parseInt(part) === value;
+  });
+}
+
+function matchesCron(cronExpr, date) {
+  const [minF, hourF, domF, monF, dowF] = cronExpr.split(/\s+/);
+  const min = date.getMinutes(), hour = date.getHours();
+  const dom = date.getDate(), mon = date.getMonth() + 1, dow = date.getDay();
+  return matchField(minF, min) && matchField(hourF, hour) && matchField(domF, dom) && matchField(monF, mon) && matchField(dowF, dow);
+}
+
+// --- Alert thresholds ---
+
+let alerts = [];
+const ALERT_THRESHOLDS = { diskPercent: 90, cpuPercent: 95, gpuTemp: 85 };
+
+function checkAlerts(metrics) {
+  if (!metrics) return;
+  const next = [];
+
+  // Disk alerts
+  if (Array.isArray(metrics.disks)) {
+    for (const disk of metrics.disks) {
+      const pct = disk.usedPercent ?? disk.used_percent;
+      if (pct != null && pct > ALERT_THRESHOLDS.diskPercent) {
+        next.push({ type: 'disk', message: `${disk.drive || disk.mount}: ${Math.round(pct)}% full`, since: alerts.find(a => a.type === 'disk' && a.message.startsWith(disk.drive || disk.mount))?.since || new Date().toISOString() });
+      }
+    }
+  }
+
+  // CPU alert
+  const cpu = metrics.cpu ?? metrics.cpuPercent ?? metrics.cpu_percent;
+  if (cpu != null && cpu > ALERT_THRESHOLDS.cpuPercent) {
+    next.push({ type: 'cpu', message: `CPU ${Math.round(cpu)}%`, since: alerts.find(a => a.type === 'cpu')?.since || new Date().toISOString() });
+  }
+
+  // GPU temp alert
+  const gpuTemp = metrics.gpuTemp ?? metrics.gpu_temp;
+  if (gpuTemp != null && gpuTemp > ALERT_THRESHOLDS.gpuTemp) {
+    next.push({ type: 'gpu_temp', message: `GPU ${Math.round(gpuTemp)}°C`, since: alerts.find(a => a.type === 'gpu_temp')?.since || new Date().toISOString() });
+  }
+
+  alerts = next;
+}
+
 // --- WOL ---
 
 function createMagicPacket(mac) {
@@ -313,9 +379,10 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'GET' && pathname === '/api/status') {
     try {
       const result = await agentRequest('GET', '/status');
-      return sendJson(res, 200, result.data);
+      if (result.data?.metrics) checkAlerts(result.data.metrics);
+      return sendJson(res, 200, { ...result.data, alerts });
     } catch {
-      return sendJson(res, 200, { status: 'offline' });
+      return sendJson(res, 200, { status: 'offline', alerts });
     }
   }
 
@@ -341,14 +408,27 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
-  // --- Run: forward action to Agent ---
+  // --- Run: forward action to Agent (with deferred fallback for task-add) ---
   if (req.method === 'POST' && pathname === '/api/run') {
     try {
       const body = await parseBody(req);
-      const result = await agentRequest('POST', '/run', body);
-      return sendJson(res, result.status, result.data);
+      try {
+        const result = await agentRequest('POST', '/run', body);
+        return sendJson(res, result.status, result.data);
+      } catch {
+        // Agent unreachable — if task-add, defer + WOL
+        if (body.action === 'task-add') {
+          const deferred = loadDeferred();
+          deferred.push({ body, createdAt: new Date().toISOString() });
+          saveDeferred(deferred);
+          console.log(`[deferred] Saved task-add (PC offline), sending WOL`);
+          sendWol().catch(err => console.error('[deferred] WOL error:', err.message));
+          return sendJson(res, 202, { ok: true, deferred: true, message: 'PC offline — WOL sent, task queued for delivery' });
+        }
+        return sendJson(res, 502, { ok: false, error: 'Agent unreachable' });
+      }
     } catch {
-      return sendJson(res, 502, { ok: false, error: 'Agent unreachable' });
+      return sendJson(res, 400, { ok: false, error: 'Invalid request body' });
     }
   }
 
@@ -362,11 +442,122 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
+  // --- Deferred tasks query ---
+  if (req.method === 'GET' && pathname === '/api/deferred') {
+    return sendJson(res, 200, loadDeferred());
+  }
+
+  // --- Schedules CRUD ---
+  if (pathname === '/api/schedules') {
+    if (req.method === 'GET') {
+      return sendJson(res, 200, loadSchedules());
+    }
+    if (req.method === 'POST') {
+      try {
+        const body = await parseBody(req);
+        const { action, cron, label, enabled } = body;
+        if (!action || !cron || !label) return sendJson(res, 400, { error: 'action, cron, label required' });
+        const schedule = { id: crypto.randomUUID(), type: 'power', action, cron, label, enabled: enabled !== false };
+        const list = loadSchedules();
+        list.push(schedule);
+        saveSchedules(list);
+        return sendJson(res, 201, schedule);
+      } catch {
+        return sendJson(res, 400, { error: 'invalid' });
+      }
+    }
+  }
+
+  const scheduleIdMatch = pathname.match(/^\/api\/schedules\/([^/]+)$/);
+  if (scheduleIdMatch) {
+    const id = scheduleIdMatch[1];
+    if (req.method === 'DELETE') {
+      const list = loadSchedules();
+      const next = list.filter(s => s.id !== id);
+      if (next.length === list.length) return sendJson(res, 404, { error: 'Not found' });
+      saveSchedules(next);
+      return sendJson(res, 200, { ok: true });
+    }
+    if (req.method === 'PATCH') {
+      try {
+        const body = await parseBody(req);
+        const list = loadSchedules();
+        const idx = list.findIndex(s => s.id === id);
+        if (idx === -1) return sendJson(res, 404, { error: 'Not found' });
+        const { action, cron, label, enabled } = body;
+        if (action !== undefined) list[idx].action = action;
+        if (cron !== undefined) list[idx].cron = cron;
+        if (label !== undefined) list[idx].label = label;
+        if (enabled !== undefined) list[idx].enabled = enabled;
+        saveSchedules(list);
+        return sendJson(res, 200, list[idx]);
+      } catch {
+        return sendJson(res, 400, { error: 'invalid' });
+      }
+    }
+  }
+
   sendJson(res, 404, { error: 'Not found' });
 });
+
+let lastScheduleMinute = -1;
+function runScheduler() {
+  const now = new Date();
+  const currentMinute = now.getHours() * 60 + now.getMinutes();
+
+  // --- Deferred task delivery (runs every cycle, not just once per minute) ---
+  const deferred = loadDeferred();
+  if (deferred.length > 0) {
+    // Expire old tasks
+    const valid = deferred.filter(d => (now - new Date(d.createdAt)) < DEFERRED_EXPIRY_MS);
+    if (valid.length !== deferred.length) {
+      const expired = deferred.length - valid.length;
+      console.log(`[deferred] Expired ${expired} task(s)`);
+      saveDeferred(valid);
+    }
+    if (valid.length > 0) {
+      // Try Agent health check
+      agentRequest('GET', '/health').then(() => {
+        console.log(`[deferred] Agent online — delivering ${valid.length} deferred task(s)`);
+        const remaining = [...valid];
+        let changed = false;
+        const deliver = (i) => {
+          if (i >= remaining.length) { if (changed) saveDeferred(remaining.filter(Boolean)); return; }
+          agentRequest('POST', '/run', remaining[i].body).then(result => {
+            console.log(`[deferred] Delivered task ${i + 1}/${remaining.length}: ${result.data?.ok ? 'OK' : 'FAIL'}`);
+            remaining[i] = null; // mark for removal
+            changed = true;
+            deliver(i + 1);
+          }).catch(err => {
+            console.error(`[deferred] Delivery failed for task ${i + 1}:`, err.message);
+            deliver(i + 1);
+          });
+        };
+        deliver(0);
+      }).catch(() => {
+        // Agent still offline — do nothing, will retry next cycle
+      });
+    }
+  }
+
+  // --- Cron schedules (once per minute) ---
+  if (currentMinute === lastScheduleMinute) return;
+  lastScheduleMinute = currentMinute;
+
+  const schedules = loadSchedules();
+  for (const s of schedules) {
+    if (!s.enabled) continue;
+    if (matchesCron(s.cron, now)) {
+      console.log(`[scheduler] Executing: ${s.label} (${s.action})`);
+      if (s.action === 'wake') sendWol().catch(err => console.error('[scheduler] WOL error:', err.message));
+      else agentRequest('POST', '/run', { action: s.action }).catch(err => console.error('[scheduler] Agent error:', err.message));
+    }
+  }
+}
 
 server.listen(PORT, () => {
   console.log(`Button Pi relay listening on port ${PORT}`);
   console.log(`Agent: ${AGENT_HOST}:${AGENT_PORT}`);
   console.log(`WOL target: ${PC_MAC} via ${BROADCAST}`);
+  setInterval(runScheduler, 60_000);
 });
