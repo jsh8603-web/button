@@ -237,49 +237,30 @@ function saveLearned(taskName, approach) {
 
 // --- AI Task Execution ---
 
-let aiTaskRunning = false;
-let currentAiTask = null;
-let aiTaskEditorPid = null;
-let editorCloseTimer = null;
+// Track multiple concurrent AI tasks: taskId → { task, editorPid, editorCloseTimer }
+const runningAiTasks = new Map();
 
-function preemptAiTask() {
-  if (!currentAiTask) return;
-  const task = currentAiTask;
-  const shortId = task.id.slice(0, 8);
-  const session = `${AI_TASK_PREFIX}${shortId}`;
-  console.log(`[ai-task] Preempting task "${task.id}" (session: ${session})`);
-
-  // Kill tmux session
-  exec(`"${BASH_PATH}" -lc "tmux kill-session -t ${session} 2>/dev/null"`, (err) => {
-    if (err) console.error(`[ai-task] Preempt kill-session error:`, err.message);
+function cleanupLingeringScheduleSessions() {
+  exec(`"${BASH_PATH}" -lc "tmux list-sessions -F '#S' 2>/dev/null"`, (err, stdout) => {
+    if (err || !stdout) return;
+    const sessions = stdout.trim().split('\n').filter(s => s.startsWith(AI_TASK_PREFIX));
+    if (sessions.length === 0) return;
+    console.log(`[ai-task] Cleaning up ${sessions.length} lingering schedule session(s): ${sessions.join(', ')}`);
+    for (const s of sessions) {
+      exec(`"${BASH_PATH}" -lc "tmux kill-session -t ${s} 2>/dev/null"`, () => {});
+    }
+    // Remove from protected list
+    const protectedList = getProtectedSessions();
+    const cleaned = protectedList.filter(p => !sessions.includes(p));
+    if (cleaned.length !== protectedList.length) setProtectedSessions(cleaned);
   });
-
-  // Kill editor
-  if (aiTaskEditorPid) {
-    try { process.kill(aiTaskEditorPid); } catch {}
-    const closeScript = path.join(__dirname, 'close-window.ps1');
-    const projName = path.basename(task.project || 'D:/projects/button');
-    const titleQuery = EDITOR_TITLE ? `${projName} - ${EDITOR_TITLE}` : projName;
-    exec(`powershell.exe -ExecutionPolicy Bypass -File "${closeScript}" -TitlePrefix "${titleQuery}"`, () => {});
-    aiTaskEditorPid = null;
-  }
-
-  // Cancel editor close timer
-  if (editorCloseTimer) { clearTimeout(editorCloseTimer); editorCloseTimer = null; }
-
-  // Clean up prompt file
-  const promptFile = path.join(__dirname, `.ai-task-prompt-${shortId}.txt`);
-  try { fs.unlinkSync(promptFile); } catch {}
-
-  // Mark task as preempted
-  finishAiTask(task, 'preempted', 'Preempted by new task');
 }
 
 function scheduleEditorClose(task, editorPid) {
-  if (editorCloseTimer) clearTimeout(editorCloseTimer);
   if (!editorPid) return;
 
-  const session = `${AI_TASK_PREFIX}${task.id.slice(0, 8)}`;
+  const taskId = task.id;
+  const session = `${AI_TASK_PREFIX}${taskId.slice(0, 8)}`;
   let snapshot = null;
 
   // Capture current pane output as baseline
@@ -308,7 +289,6 @@ function scheduleEditorClose(task, editorPid) {
         if (snapshot && current !== snapshot) {
           // User interacted — cancel scheduled close
           clearInterval(interval);
-          if (editorCloseTimer) { clearTimeout(editorCloseTimer); editorCloseTimer = null; }
           console.log(`[ai-task] User activity detected in ${session}, keeping editor open`);
           return;
         }
@@ -323,15 +303,14 @@ function scheduleEditorClose(task, editorPid) {
     });
   }, CHECK_INTERVAL);
 
-  editorCloseTimer = setTimeout(() => { clearInterval(interval); }, IDLE_TIMEOUT + CHECK_INTERVAL);
+  setTimeout(() => { clearInterval(interval); }, IDLE_TIMEOUT + CHECK_INTERVAL);
 }
 
 function executeAiTask(task) {
-  aiTaskRunning = true;
-  currentAiTask = task;
+  runningAiTasks.set(task.id, { task, editorPid: null, editorCloseTimer: null });
   const shortId = task.id.slice(0, 8);
   const session = `${AI_TASK_PREFIX}${shortId}`;
-  const project = task.project || 'D:/projects/button';
+  const project = task.project || 'D:/projects/common-task';
   const projMsys = toMsys(project);
   const claudeBinMsys = toMsys(CLAUDE_BIN);
 
@@ -396,7 +375,8 @@ function executeAiTask(task) {
       const editorChild = exec(`"${EDITOR_CMD}" "${projDir}"`, (err) => {
         if (err) console.error('[ai-task] Editor launch error:', err.message);
       });
-      aiTaskEditorPid = editorChild.pid;
+      const entry = runningAiTasks.get(task.id);
+      if (entry) entry.editorPid = editorChild.pid;
       editorChild.unref();
 
       const maxScript = path.join(__dirname, 'maximize-window.ps1');
@@ -527,8 +507,10 @@ function setTaskWaitingForInput(task, waiting) {
 }
 
 function finishAiTask(task, status, result) {
-  aiTaskRunning = false;
-  currentAiTask = null;
+  const entry = runningAiTasks.get(task.id);
+  const editorPid = entry?.editorPid || null;
+  runningAiTasks.delete(task.id);
+
   const tasks = readTaskQueue();
   const t = tasks.find(x => x.id === task.id);
   if (!t) return;
@@ -552,8 +534,7 @@ function finishAiTask(task, status, result) {
   console.log(`[ai-task] Finished "${t.id}" — status: ${status}, result: ${(result || '').slice(0, 100)}`);
 
   // Schedule editor close after 10 min idle (cancel if user interacts)
-  scheduleEditorClose(task, aiTaskEditorPid);
-  aiTaskEditorPid = null;
+  scheduleEditorClose(task, editorPid);
 
   // Remove AI task session from protected list (allows cleanup on next proj call)
   const session = `${AI_TASK_PREFIX}${task.id.slice(0, 8)}`;
@@ -562,7 +543,7 @@ function finishAiTask(task, status, result) {
   console.log(`[ai-task] Unprotected completed session: ${session}`);
 
   // Restore tasks.json to original project session
-  const project = task.project || 'D:/projects/button';
+  const project = task.project || 'D:/projects/common-task';
   const projName = path.basename(project);
   const projDir = project.replace(/\//g, '\\');
   const vscodeDir = path.join(projDir, '.vscode');
@@ -623,10 +604,6 @@ function startTaskRunner() {
 
       // AI task branch
       if (task.type === 'ai') {
-        if (aiTaskRunning && currentAiTask) {
-          console.log(`[ai-task] New AI task "${task.id}" — preempting current task "${currentAiTask.id}"`);
-          preemptAiTask();
-        }
         task.status = 'running';
         changed = true;
         writeTaskQueue(tasks);
@@ -812,7 +789,7 @@ async function getActiveSessions() {
 }
 
 function killUnprotectedSessions() {
-  if (aiTaskRunning) {
+  if (runningAiTasks.size > 0) {
     console.log('[kill] Skipping killUnprotectedSessions — AI task is running');
     return;
   }
