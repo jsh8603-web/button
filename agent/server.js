@@ -530,34 +530,42 @@ STEP 3: GUI automation (last resort — screenshot, click, visual interaction)
             } else {
               console.log(`[ai-task] Claude ready, sending /remote-control then instructions for "${task.id}"`);
             }
-            // Send /remote-control first (like proj sessions), then instructions
+            // Send /remote-control, verify it took effect, THEN send instructions
             function sendRcWithRetry(attempt = 1) {
               const MAX_RC = 3;
               exec(`"${BASH_PATH}" -lc "${TMUX} send-keys -t ${session} '/remote-control' Enter"`, (err) => {
                 if (err) console.error(`[ai-task] /remote-control send error:`, err.message);
                 else console.log(`[ai-task] Sent /remote-control to ${session} (attempt ${attempt}/${MAX_RC})`);
-                if (attempt === 1) {
-                  // Send instructions after first /remote-control attempt (don't block on verify)
-                  setTimeout(() => {
-                    exec(`"${BASH_PATH}" -lc "${TMUX} load-buffer ${promptFileMsys} && ${TMUX} paste-buffer -t ${session} && sleep 1 && ${TMUX} send-keys -t ${session} Enter && sleep 1 && ${TMUX} send-keys -t ${session} Enter"`, (err) => {
-                      if (err) console.error(`[ai-task] Send error:`, err.message);
-                      try { fs.unlinkSync(promptFile); } catch {}
-                    });
-                  }, 3000);
-                }
-                // Verify /remote-control took effect, retry if needed
+                // Verify /remote-control took effect
                 setTimeout(() => {
                   exec(`"${BASH_PATH}" -lc "${TMUX} capture-pane -t ${session} -p -S - | sed '/^[[:space:]]*$/d' | tail -15"`, { encoding: 'utf8' }, (err, stdout) => {
                     if (err) return;
                     const pane = (stdout || '').trim();
                     const hasRemote = pane.includes('remote') || pane.includes('Remote');
-                    if (!hasRemote && attempt < MAX_RC) {
+                    if (hasRemote) {
+                      // /remote-control confirmed → now send instructions
+                      console.log(`[ai-task] /remote-control confirmed (attempt ${attempt}), sending instructions`);
+                      sendInstructions();
+                    } else if (attempt < MAX_RC) {
                       console.log(`[ai-task] /remote-control not detected, retrying (${attempt + 1}/${MAX_RC})`);
                       sendRcWithRetry(attempt + 1);
+                    } else {
+                      // Max retries — send instructions anyway as fallback
+                      console.warn(`[ai-task] /remote-control not confirmed after ${MAX_RC} attempts, sending instructions anyway`);
+                      sendInstructions();
                     }
                   });
                 }, 5000);
               });
+            }
+            function sendInstructions() {
+              setTimeout(() => {
+                exec(`"${BASH_PATH}" -lc "${TMUX} load-buffer ${promptFileMsys} && ${TMUX} paste-buffer -t ${session} && sleep 1 && ${TMUX} send-keys -t ${session} Enter && sleep 1 && ${TMUX} send-keys -t ${session} Enter"`, (err) => {
+                  if (err) console.error(`[ai-task] Send error:`, err.message);
+                  else console.log(`[ai-task] Instructions sent to ${session}`);
+                  try { fs.unlinkSync(promptFile); } catch {}
+                });
+              }, 2000);
             }
             sendRcWithRetry();
             // Wait for Claude to start working before checking completion
