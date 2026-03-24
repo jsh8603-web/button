@@ -241,16 +241,26 @@ function findLearnedApproach(taskName) {
   return bestMatch;
 }
 
-function saveLearned(taskName, approach) {
+function saveLearned(taskName, approach, failed = false) {
   if (!taskName || !approach) return;
   const learned = readLearned();
-  learned[taskName] = {
-    approach,
-    lastUsed: new Date().toISOString(),
-    successCount: (learned[taskName]?.successCount || 0) + 1,
-  };
+  if (failed) {
+    // Append to failedApproaches array (keep last 3)
+    const existing = learned[taskName] || {};
+    const failures = existing.failedApproaches || [];
+    failures.push({ approach, date: new Date().toISOString() });
+    if (failures.length > 3) failures.shift();
+    learned[taskName] = { ...existing, failedApproaches: failures };
+  } else {
+    learned[taskName] = {
+      approach,
+      lastUsed: new Date().toISOString(),
+      successCount: (learned[taskName]?.successCount || 0) + 1,
+      failedApproaches: learned[taskName]?.failedApproaches || undefined,
+    };
+  }
   writeLearned(learned);
-  console.log(`[ai-task] Saved learned approach for "${taskName}"`);
+  console.log(`[ai-task] Saved ${failed ? 'failed' : 'successful'} approach for "${taskName}"`);
 }
 
 // --- AI Task Execution ---
@@ -353,7 +363,13 @@ function executeAiTask(task) {
   const learned = findLearnedApproach(task.name);
   let prompt = `You are executing a scheduled task. Work autonomously as much as possible.\n\nTask: ${task.name || 'Unnamed task'}\n\nInstructions:\n${task.instructions}\n`;
   if (learned) {
-    prompt += `\nPreviously successful approach for similar task:\n${learned.approach}\n`;
+    if (learned.approach) prompt += `\nPreviously successful approach for similar task:\n${learned.approach}\n`;
+    if (learned.failedApproaches?.length) {
+      prompt += `\nPreviously FAILED approaches (DO NOT repeat these):\n`;
+      for (const f of learned.failedApproaches) {
+        prompt += `- [${f.date}] ${f.approach}\n`;
+      }
+    }
   }
   prompt += `
 === MANDATORY EXECUTION ORDER ===
@@ -564,6 +580,7 @@ STEP 3: GUI automation (last resort — screenshot, click, visual interaction)
           }
           if (failureMatch) {
             console.log(`[ai-task] Claude finished for "${task.id}", collecting results`);
+            saveLearned(task.name, failureMatch[1].trim(), true);
             finishAiTask(task, 'failed', failureMatch[1].trim());
             return;
           }
