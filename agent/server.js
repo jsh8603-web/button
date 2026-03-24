@@ -1412,9 +1412,8 @@ function restoreHibernateSchedule() {
     const data = JSON.parse(fs.readFileSync(HIBERNATE_SCHEDULE_FILE, 'utf8'));
     const remaining = data.executeAt - Date.now();
     if (remaining <= 0) {
-      console.log('[hibernate] Restoring expired schedule — executing now');
+      console.log('[hibernate] Expired schedule found — discarding (likely restored after WOL)');
       clearHibernateSchedule();
-      executeSleepAction(data.action, 0);
     } else {
       const mins = Math.round(remaining / 60000);
       console.log(`[hibernate] Restoring schedule — ${mins}min remaining`);
