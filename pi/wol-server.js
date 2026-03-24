@@ -250,9 +250,16 @@ function getCookie(req, name) {
   return match ? match[1] : null;
 }
 
+// Allowed CORS origins (production is same-origin; these cover local dev + DuckDNS)
+const CORS_ALLOWED = new Set([
+  'https://jsh-button.duckdns.org',
+  'http://192.168.219.125:7777',
+  'http://localhost:7777',
+]);
+
 function corsHeaders(req) {
-  // CORS for local dev (production is same-origin, no CORS needed)
-  const origin = req.headers.origin || '*';
+  const origin = req.headers.origin;
+  if (!origin || !CORS_ALLOWED.has(origin)) return {};
   return {
     'Access-Control-Allow-Origin': origin,
     'Access-Control-Allow-Methods': 'GET, POST, DELETE, PATCH, OPTIONS',
@@ -261,13 +268,10 @@ function corsHeaders(req) {
   };
 }
 
-// req is stored per-request so sendJson can access it
-let _currentReq = null;
-
 function sendJson(res, status, data, headers = {}) {
   res.writeHead(status, {
     'Content-Type': 'application/json',
-    ...(_currentReq ? corsHeaders(_currentReq) : {}),
+    ...(res._corsHeaders || {}),
     ...headers,
   });
   res.end(JSON.stringify(data));
@@ -322,11 +326,12 @@ function serveStatic(req, res, pathname) {
 // --- Server ---
 
 const server = http.createServer(async (req, res) => {
-  _currentReq = req;
+  // Store CORS headers on res so sendJson can use them without global state
+  res._corsHeaders = corsHeaders(req);
 
   // CORS preflight
   if (req.method === 'OPTIONS') {
-    res.writeHead(204, { ...corsHeaders(req), 'Access-Control-Max-Age': '86400' });
+    res.writeHead(204, { ...res._corsHeaders, 'Access-Control-Max-Age': '86400' });
     return res.end();
   }
 
@@ -489,6 +494,8 @@ const server = http.createServer(async (req, res) => {
             console.log(`[deferred] Task sent to Agent immediately, wake-at scheduled`);
             return sendJson(res, 200, { ok: true, task: result.data.task, wakeAt, message: 'Task registered and wake scheduled' });
           }
+          // Agent responded but task registration failed — return error (don't fall through to outer try)
+          return sendJson(res, 502, { ok: false, error: 'Agent rejected task', detail: result.data });
         } catch {
           // Agent offline — defer as before
           const deferred = loadDeferred();
@@ -559,6 +566,8 @@ const server = http.createServer(async (req, res) => {
         const body = await parseBody(req);
         const { action, cron, label, enabled } = body;
         if (!action || !cron || !label) return sendJson(res, 400, { ok: false, error: 'action, cron, label required' });
+        const ALLOWED_ACTIONS = ['wake', 'sleep', 'hibernate', 'shutdown'];
+        if (!ALLOWED_ACTIONS.includes(action)) return sendJson(res, 400, { ok: false, error: `action must be one of: ${ALLOWED_ACTIONS.join(', ')}` });
         const schedule = { id: crypto.randomUUID(), type: 'power', action, cron, label, enabled: enabled !== false };
         const list = loadSchedules();
         list.push(schedule);

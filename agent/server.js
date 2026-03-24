@@ -284,6 +284,81 @@ function hasClaudePrompt(output) {
   return output.includes('\u276F') || output.includes('>') || output.includes('\u256D') || output.includes('human');
 }
 
+// --- Remote Control Reconnecting Watchdog ---
+// Detects "Remote Control reconnecting" in btn-* sessions and auto-recovers
+
+const RC_CHECK_INTERVAL = 30_000; // check every 30s
+const RC_COOLDOWN = new Map(); // session → timestamp of last fix (prevent rapid re-trigger)
+const RC_COOLDOWN_MS = 120_000; // 2min cooldown per session
+
+function startRemoteControlWatchdog() {
+  setInterval(() => {
+    exec(`"${BASH_PATH}" -lc "${TMUX} list-sessions -F '#S' 2>/dev/null"`, (err, stdout) => {
+      if (err || !stdout) { RC_COOLDOWN.clear(); return; }
+      const sessions = new Set(stdout.trim().split('\n').filter(s => s.startsWith('btn-')));
+      // GC: remove entries for dead sessions or expired cooldowns
+      for (const [key, ts] of RC_COOLDOWN) {
+        if (!sessions.has(key) || Date.now() - ts > RC_COOLDOWN_MS) RC_COOLDOWN.delete(key);
+      }
+      for (const session of sessions) {
+        checkRemoteControlState(session);
+      }
+    });
+  }, RC_CHECK_INTERVAL);
+}
+
+function checkRemoteControlState(session) {
+  // Cooldown check
+  const lastFix = RC_COOLDOWN.get(session);
+  if (lastFix && Date.now() - lastFix < RC_COOLDOWN_MS) return;
+
+  exec(`"${BASH_PATH}" -lc "${TMUX} capture-pane -t ${session} -p 2>/dev/null"`, { encoding: 'utf8' }, (err, output) => {
+    if (err || !output) return;
+    if (!output.includes('Remote Control reconnecting')) return;
+
+    console.log(`[rc-watchdog] Detected "Remote Control reconnecting" in ${session}, fixing...`);
+    RC_COOLDOWN.set(session, Date.now());
+
+    const sk = (keys, cb) => exec(`"${BASH_PATH}" -lc "${TMUX} send-keys -t ${session} ${keys}"`, cb);
+    const cap = (cb) => exec(`"${BASH_PATH}" -lc "${TMUX} capture-pane -t ${session} -p 2>/dev/null"`, { encoding: 'utf8' }, cb);
+
+    // Step 1: Escape to clear state, then open /remote-control menu
+    sk("Escape", () => {
+      setTimeout(() => {
+        sk("'/remote-control' Enter", () => {
+          // Step 2: Wait for menu, verify it appeared, then navigate to Disconnect
+          setTimeout(() => {
+            cap((err2, menuOut) => {
+              if (!menuOut || !menuOut.includes('Disconnect this session')) {
+                console.log(`[rc-watchdog] Menu didn't appear for ${session}, will retry next cycle`);
+                RC_COOLDOWN.delete(session); // allow retry
+                return;
+              }
+              // Step 3: Up Up Enter to select Disconnect
+              sk("Up", () => {
+                setTimeout(() => {
+                  sk("Up", () => {
+                    setTimeout(() => {
+                      sk("Enter", () => {
+                        // Step 4: Wait for disconnect, then reconnect
+                        setTimeout(() => {
+                          sk("'/remote-control' Enter", () => {
+                            console.log(`[rc-watchdog] Recovery sequence sent for ${session}`);
+                          });
+                        }, 5000);
+                      });
+                    }, 500);
+                  });
+                }, 500);
+              });
+            });
+          }, 5000);
+        });
+      }, 2000);
+    });
+  });
+}
+
 // --- AI Task Execution ---
 
 // Track multiple concurrent AI tasks: taskId → { task, editorPid, editorCloseTimer }
@@ -367,10 +442,10 @@ function scheduleEditorClose(task, editorPid) {
     });
   }, CHECK_INTERVAL);
 
-  setTimeout(() => { clearInterval(interval); }, IDLE_TIMEOUT + CHECK_INTERVAL);
+  const timeout = setTimeout(() => { clearInterval(interval); }, IDLE_TIMEOUT + CHECK_INTERVAL);
 
   const entry = runningAiTasks.get(task.id);
-  if (entry) entry.editorCloseTimer = interval;
+  if (entry) entry.editorCloseTimer = { interval, timeout };
 }
 
 function executeAiTask(task) {
@@ -651,6 +726,7 @@ function setTaskWaitingForInput(task, waiting) {
 function finishAiTask(task, status, result) {
   const entry = runningAiTasks.get(task.id);
   const editorPid = entry?.editorPid || null;
+  if (entry?.editorCloseTimer) { clearInterval(entry.editorCloseTimer.interval); clearTimeout(entry.editorCloseTimer.timeout); }
   runningAiTasks.delete(task.id);
 
   const tasks = readTaskQueue();
@@ -828,7 +904,7 @@ function startTaskRunner() {
           t.status = t.scheduledAt ? 'pending' : 'completed';
           console.log(`[task] Repeat task "${t.id}" next run: ${t.scheduledAt || 'none'}`);
         } else {
-          t.status = 'completed';
+          t.status = err ? 'failed' : 'completed';
         }
 
         writeTaskQueue(allTasks);
@@ -1266,7 +1342,7 @@ app.post('/run', verifySecret, (req, res) => {
       });
       if (running) {
         if (running.editorPid) try { process.kill(running.editorPid); } catch {}
-        if (running.editorCloseTimer) clearInterval(running.editorCloseTimer);
+        if (running.editorCloseTimer) { clearInterval(running.editorCloseTimer.interval); clearTimeout(running.editorCloseTimer.timeout); }
         runningAiTasks.delete(running.task.id);
       }
       const taskProject = running?.task?.project
@@ -1421,7 +1497,7 @@ app.post('/run', verifySecret, (req, res) => {
       const safeName = running.task.name ? running.task.name.replace(/[^a-zA-Z0-9_-]/g, '-').replace(/-+/g, '-').slice(0, 40) : taskId.slice(0, 8);
       const session = `${AI_TASK_PREFIX}${safeName}`;
       if (running.editorPid) try { process.kill(running.editorPid); } catch {}
-      if (running.editorCloseTimer) clearInterval(running.editorCloseTimer);
+      if (running.editorCloseTimer) { clearInterval(running.editorCloseTimer.interval); clearTimeout(running.editorCloseTimer.timeout); }
       runningAiTasks.delete(taskId);
       exec(`"${BASH_PATH}" -lc "${TMUX} kill-session -t ${session} 2>/dev/null"`, () => {});
       setProtectedSessions(getProtectedSessions().filter(s => s !== session));
@@ -1570,5 +1646,6 @@ app.listen(PORT, async () => {
   restoreHibernateSchedule();
   cleanupOrphanedTasks();
   startTaskRunner();
+  startRemoteControlWatchdog();
   console.log('[agent] Ready — waiting for commands from Pi relay');
 });

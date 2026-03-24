@@ -879,9 +879,10 @@ function Dashboard() {
 
   useEffect(() => {
     checkStatus();
-    const interval = setInterval(checkStatus, POLL_INTERVAL * 1000);
+    const ms = (status === "waking" || status === "shutting-down") ? 3000 : POLL_INTERVAL * 1000;
+    const interval = setInterval(checkStatus, ms);
     return () => clearInterval(interval);
-  }, [checkStatus]);
+  }, [checkStatus, status]);
 
   useEffect(() => {
     const interval = setInterval(() => {
@@ -899,13 +900,6 @@ function Dashboard() {
       return () => clearTimeout(timeout);
     }
   }, [status]);
-
-  useEffect(() => {
-    if (status === "waking" || status === "shutting-down") {
-      const interval = setInterval(checkStatus, 3000);
-      return () => clearInterval(interval);
-    }
-  }, [status, checkStatus]);
 
   const saveWakeLog = (entry: Record<string, unknown>) => {
     try {
