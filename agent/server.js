@@ -404,6 +404,7 @@ STEP 3: GUI automation (last resort — screenshot, click, visual interaction)
 === RULES ===
 - USER INSTRUCTIONS ALWAYS TAKE PRIORITY over learned approaches, past logs, and previous success patterns. If the user's instructions ask for a different method or quality than what succeeded before, follow the user's instructions and research new approaches as needed.
 - Install missing tools yourself (winget, npm, choco) — never fail because something is not installed
+- If you install a new general-purpose tool (CLI, library, etc.), add it to ~/.claude/rules/pc-tools.md (tool table + path) and create a skill file in ~/.claude/docs/ if the tool needs usage notes.
 - NEVER kill, close, or interfere with existing tmux sessions (btn-* or schedule-*). Your session is ${session} — only interact with that session.
 - NEVER close VS Code windows or editor windows that belong to other projects.
 - If you need user credentials, login info, or a decision you cannot make, clearly state what you need and WAIT for the user to respond. The user will check this session via remote.
