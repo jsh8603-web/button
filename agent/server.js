@@ -711,6 +711,30 @@ function nextCronRun(cronExpr) {
   return candidate;
 }
 
+// Clean up orphaned running tasks on startup (no active tmux session = failed)
+function cleanupOrphanedTasks() {
+  exec(`"${BASH_PATH}" -lc "${TMUX} list-sessions -F '#S' 2>/dev/null"`, { encoding: 'utf8' }, (err, stdout) => {
+    const activeSessions = new Set((stdout || '').trim().split('\n').filter(Boolean));
+    const tasks = readTaskQueue();
+    let changed = false;
+
+    for (const t of tasks) {
+      if (t.status !== 'running') continue;
+      // Build expected session name (same logic as executeAiTask)
+      const safeName = t.name ? t.name.replace(/[^a-zA-Z0-9_-]/g, '-').replace(/-+/g, '-').slice(0, 40) : t.id.slice(0, 8);
+      const session = `${AI_TASK_PREFIX}${safeName}`;
+      if (!activeSessions.has(session)) {
+        t.status = 'failed';
+        t.result = t.result || 'Orphaned: no active session on agent restart';
+        t.completedAt = t.completedAt || new Date().toISOString();
+        changed = true;
+        console.log(`[ai-task] Orphaned task "${t.id.slice(0, 8)}" (${t.name}) → failed`);
+      }
+    }
+    if (changed) writeTaskQueue(tasks);
+  });
+}
+
 function startTaskRunner() {
   function runCycle() {
     const tasks = readTaskQueue();
@@ -1506,6 +1530,7 @@ app.listen(PORT, async () => {
   console.log(`Button Agent listening on port ${PORT}`);
   await waitForTmux();
   restoreHibernateSchedule();
+  cleanupOrphanedTasks();
   startTaskRunner();
   console.log('[agent] Ready — waiting for commands from Pi relay');
 });
