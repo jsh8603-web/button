@@ -27,22 +27,8 @@ const PI_PORT = parseInt(process.env.PI_PORT || '7777', 10);
 // Windows path → MSYS path (e.g. D:\projects → /d/projects)
 const toMsys = (p) => p.replace(/\\/g, '/').replace(/^([A-Z]):/i, (_, d) => `/${d.toLowerCase()}`);
 
-// Shared tmux socket — SYSTEM (Task Scheduler) and user session use same server
-// MSYS2 /tmp maps to C:\msys64\tmp — use Windows path for icacls ACL
-const TMUX_SOCK_DIR = '/tmp/button-tmux';
-const TMUX_SOCK_DIR_WIN = 'C:\\msys64\\tmp\\button-tmux';
-const TMUX_SOCKET = `${TMUX_SOCK_DIR}/default`;
-const TMUX_SOCKET_WIN = `${TMUX_SOCK_DIR_WIN}\\default`;
-const TMUX = `tmux -S ${TMUX_SOCKET}`;
-
-// Ensure socket dir is accessible by all users (SYSTEM creates, user attaches via VS Code)
-// chmod doesn't work for Windows ACLs on sockets — use icacls to grant Everyone Full Control
-exec(`"${BASH_PATH}" -lc "mkdir -p ${TMUX_SOCK_DIR}"`, (err) => {
-  if (err) console.error('[boot] Socket dir error:', err.message);
-  exec(`icacls "${TMUX_SOCK_DIR_WIN}" /grant Everyone:F /T /Q`, (err2) => {
-    if (err2) console.error('[boot] Socket ACL error:', err2.message);
-  });
-});
+// psmux — Windows native terminal multiplexer (ConPTY, no msys2 IPC dependency)
+const PSMUX_BIN = process.env.PSMUX_BIN || 'C:\\Users\\jsh86\\AppData\\Local\\Microsoft\\WinGet\\Packages\\marlocarlo.psmux_Microsoft.Winget.Source_8wekyb3d8bbwe\\psmux.exe';
 
 // Warn if path-sensitive env vars use short command names (may fail without PATH)
 for (const [name, val] of [['EDITOR_CMD', EDITOR_CMD], ['CLAUDE_BIN', CLAUDE_BIN]]) {
@@ -273,7 +259,7 @@ function saveLearned(taskName, approach, failed = false) {
   console.log(`[ai-task] Saved ${failed ? 'failed' : 'successful'} approach for "${taskName}"`);
 }
 
-// --- Tmux Output Detection ---
+// --- Psmux Output Detection ---
 
 function hasTrustPrompt(output) {
   return output.includes('trust this folder') || output.includes('I trust');
@@ -284,79 +270,119 @@ function hasClaudePrompt(output) {
   return output.includes('\u276F') || output.includes('>') || output.includes('\u256D') || output.includes('human');
 }
 
-// --- Remote Control Reconnecting Watchdog ---
-// Detects "Remote Control reconnecting" in btn-* sessions and auto-recovers
+// --- Shared Helpers ---
 
-const RC_CHECK_INTERVAL = 30_000; // check every 30s
-const RC_COOLDOWN = new Map(); // session → timestamp of last fix (prevent rapid re-trigger)
-const RC_COOLDOWN_MS = 120_000; // 2min cooldown per session
+function taskSafeName(task) {
+  return task.name ? task.name.replace(/[^a-zA-Z0-9_-]/g, '-').replace(/-+/g, '-').slice(0, 40) : (task.id || '').slice(0, 8);
+}
+
+function clearEditorTimer(entry) {
+  if (!entry?.editorCloseTimer) return;
+  clearInterval(entry.editorCloseTimer.interval);
+  clearTimeout(entry.editorCloseTimer.timeout);
+}
+
+// Execute psmux command directly (native Windows — no bash wrapper)
+function tmuxRun(cmd, opts = {}) {
+  return new Promise((resolve, reject) => {
+    exec(`"${PSMUX_BIN}" ${cmd}`, { encoding: 'utf8', ...opts }, (err, stdout) => {
+      if (err) return reject(err);
+      resolve(stdout || '');
+    });
+  });
+}
+
+// psmux doesn't support -F format — parse "name: N windows ..." output
+function parseSessionNames(output) {
+  return output.trim().split('\n').filter(Boolean).map(l => l.split(':')[0].trim()).filter(Boolean);
+}
+
+// Replace sed/tail pipe: remove blank lines, take last N
+function captureTail(output, n = 15) {
+  return output.split('\n').filter(l => l.trim() !== '').slice(-n).join('\n');
+}
+
+// Graceful session kill: Ctrl+C → /exit → kill (replaces kill-sessions.sh)
+async function gracefulKillSession(session) {
+  try {
+    await tmuxRun(`send-keys -t ${session} C-c C-c`);
+    await delay(1000);
+    await tmuxRun(`send-keys -t ${session} '/exit' Enter`);
+    await delay(2000);
+  } catch {}
+  try { await tmuxRun(`kill-session -t ${session}`); } catch {}
+}
+
+// Create psmux session with bash shell and launch claude
+function createPsmuxSession(session, workDir, claudeCmd, callback) {
+  exec(`"${PSMUX_BIN}" kill-session -t ${session}`, () => {
+    const winDir = workDir.replace(/\//g, '\\');
+    exec(`"${PSMUX_BIN}" new-session -d -s ${session} -c "${winDir}" -- "${BASH_PATH}" -l`, (err) => {
+      if (err) return callback(err);
+      setTimeout(() => {
+        exec(`"${PSMUX_BIN}" send-keys -t ${session} '${claudeCmd}' Enter`, callback);
+      }, 1500);
+    });
+  });
+}
+
+// --- Remote Control Reconnecting Watchdog ---
+
+const RC_CHECK_INTERVAL = 30_000;
+const RC_COOLDOWN = new Map();
+const RC_COOLDOWN_MS = 120_000;
 
 function startRemoteControlWatchdog() {
-  setInterval(() => {
-    exec(`"${BASH_PATH}" -lc "${TMUX} list-sessions -F '#S' 2>/dev/null"`, (err, stdout) => {
-      if (err || !stdout) { RC_COOLDOWN.clear(); return; }
-      const sessions = new Set(stdout.trim().split('\n').filter(s => s.startsWith('btn-')));
-      // GC: remove entries for dead sessions or expired cooldowns
-      for (const [key, ts] of RC_COOLDOWN) {
-        if (!sessions.has(key) || Date.now() - ts > RC_COOLDOWN_MS) RC_COOLDOWN.delete(key);
-      }
-      for (const session of sessions) {
-        checkRemoteControlState(session);
-      }
-    });
+  setInterval(async () => {
+    let stdout;
+    try { stdout = await tmuxRun("list-sessions"); } catch { return; }
+    if (!stdout) return;
+    const sessions = new Set(parseSessionNames(stdout).filter(s => s.startsWith('btn-')));
+    for (const [key, ts] of RC_COOLDOWN) {
+      if (!sessions.has(key) || Date.now() - ts > RC_COOLDOWN_MS) RC_COOLDOWN.delete(key);
+    }
+    for (const session of sessions) {
+      checkRemoteControlState(session);
+    }
   }, RC_CHECK_INTERVAL);
 }
 
-function checkRemoteControlState(session) {
-  // Cooldown check
+const delay = ms => new Promise(r => setTimeout(r, ms));
+
+async function checkRemoteControlState(session) {
   const lastFix = RC_COOLDOWN.get(session);
   if (lastFix && Date.now() - lastFix < RC_COOLDOWN_MS) return;
 
-  exec(`"${BASH_PATH}" -lc "${TMUX} capture-pane -t ${session} -p 2>/dev/null"`, { encoding: 'utf8' }, (err, output) => {
-    if (err || !output) return;
-    if (!output.includes('Remote Control reconnecting')) return;
+  let output;
+  try { output = await tmuxRun(`capture-pane -t ${session} -p`); } catch { return; }
+  if (!output || !output.includes('Remote Control reconnecting')) return;
 
-    console.log(`[rc-watchdog] Detected "Remote Control reconnecting" in ${session}, fixing...`);
-    RC_COOLDOWN.set(session, Date.now());
+  console.log(`[rc-watchdog] Detected "Remote Control reconnecting" in ${session}, fixing...`);
+  RC_COOLDOWN.set(session, Date.now());
 
-    const sk = (keys, cb) => exec(`"${BASH_PATH}" -lc "${TMUX} send-keys -t ${session} ${keys}"`, cb);
-    const cap = (cb) => exec(`"${BASH_PATH}" -lc "${TMUX} capture-pane -t ${session} -p 2>/dev/null"`, { encoding: 'utf8' }, cb);
+  const sk = keys => tmuxRun(`send-keys -t ${session} ${keys}`);
 
-    // Step 1: Escape to clear state, then open /remote-control menu
-    sk("Escape", () => {
-      setTimeout(() => {
-        sk("'/remote-control' Enter", () => {
-          // Step 2: Wait for menu, verify it appeared, then navigate to Disconnect
-          setTimeout(() => {
-            cap((err2, menuOut) => {
-              if (!menuOut || !menuOut.includes('Disconnect this session')) {
-                console.log(`[rc-watchdog] Menu didn't appear for ${session}, will retry next cycle`);
-                RC_COOLDOWN.delete(session); // allow retry
-                return;
-              }
-              // Step 3: Up Up Enter to select Disconnect
-              sk("Up", () => {
-                setTimeout(() => {
-                  sk("Up", () => {
-                    setTimeout(() => {
-                      sk("Enter", () => {
-                        // Step 4: Wait for disconnect, then reconnect
-                        setTimeout(() => {
-                          sk("'/remote-control' Enter", () => {
-                            console.log(`[rc-watchdog] Recovery sequence sent for ${session}`);
-                          });
-                        }, 5000);
-                      });
-                    }, 500);
-                  });
-                }, 500);
-              });
-            });
-          }, 5000);
-        });
-      }, 2000);
-    });
-  });
+  try {
+    await sk("Escape");
+    await delay(2000);
+    await sk("'/remote-control' Enter");
+    await delay(5000);
+
+    const menuOut = await tmuxRun(`capture-pane -t ${session} -p`);
+    if (!menuOut || !menuOut.includes('Disconnect this session')) {
+      console.log(`[rc-watchdog] Menu didn't appear for ${session}, will retry next cycle`);
+      RC_COOLDOWN.delete(session);
+      return;
+    }
+
+    await sk("Up"); await delay(500);
+    await sk("Up"); await delay(500);
+    await sk("Enter"); await delay(5000);
+    await sk("'/remote-control' Enter");
+    console.log(`[rc-watchdog] Recovery sequence sent for ${session}`);
+  } catch (err) {
+    console.log(`[rc-watchdog] Recovery failed for ${session}: ${err.message}`);
+  }
 }
 
 // --- AI Task Execution ---
@@ -365,14 +391,14 @@ function checkRemoteControlState(session) {
 const runningAiTasks = new Map();
 
 function cleanupLingeringScheduleSessions() {
-  exec(`"${BASH_PATH}" -lc "${TMUX} list-sessions -F '#S' 2>/dev/null"`, (err, stdout) => {
+  exec(`"${PSMUX_BIN}" list-sessions`, { encoding: 'utf8' }, (err, stdout) => {
     if (err || !stdout) return;
-    const sessions = stdout.trim().split('\n').filter(s => s.startsWith(AI_TASK_PREFIX));
+    const sessions = parseSessionNames(stdout).filter(s => s.startsWith(AI_TASK_PREFIX));
     if (sessions.length === 0) return;
     console.log(`[ai-task] Cleaning up ${sessions.length} lingering schedule session(s): ${sessions.join(', ')}`);
     const closeScript = path.join(__dirname, 'close-window.ps1');
     for (const s of sessions) {
-      exec(`"${BASH_PATH}" -lc "${TMUX} kill-session -t ${s} 2>/dev/null"`, () => {});
+      exec(`"${PSMUX_BIN}" kill-session -t ${s}`, () => {});
       // Close editor window for the task's project
       if (EDITOR_TITLE) {
         const safeName = s.slice(AI_TASK_PREFIX.length);
@@ -402,8 +428,8 @@ function scheduleEditorClose(task, editorPid) {
   let snapshot = null;
 
   // Capture current pane output as baseline
-  exec(`"${BASH_PATH}" -lc "${TMUX} capture-pane -t ${session} -p 2>/dev/null | tail -20"`, { encoding: 'utf8' }, (err, out) => {
-    snapshot = err ? null : out;
+  exec(`"${PSMUX_BIN}" capture-pane -t ${session} -p`, { encoding: 'utf8' }, (err, out) => {
+    snapshot = err ? null : out?.split('\n').slice(-20).join('\n');
   });
 
   const IDLE_TIMEOUT = 10 * 60 * 1000; // 10 minutes
@@ -412,7 +438,7 @@ function scheduleEditorClose(task, editorPid) {
 
   const interval = setInterval(() => {
     // Check if session still exists
-    exec(`"${BASH_PATH}" -lc "${TMUX} has-session -t ${session} 2>/dev/null"`, (err) => {
+    exec(`"${PSMUX_BIN}" has-session -t ${session}`, (err) => {
       if (err) {
         // Session gone — close editor
         clearInterval(interval);
@@ -422,7 +448,8 @@ function scheduleEditorClose(task, editorPid) {
       }
 
       // Capture current output and compare with snapshot
-      exec(`"${BASH_PATH}" -lc "${TMUX} capture-pane -t ${session} -p 2>/dev/null | tail -20"`, { encoding: 'utf8' }, (err2, current) => {
+      exec(`"${PSMUX_BIN}" capture-pane -t ${session} -p`, { encoding: 'utf8' }, (err2, raw) => {
+        const current = raw?.split('\n').slice(-20).join('\n');
         if (err2) return;
         if (snapshot && current !== snapshot) {
           // User interacted — cancel scheduled close
@@ -435,7 +462,7 @@ function scheduleEditorClose(task, editorPid) {
         if (Date.now() - startTime >= IDLE_TIMEOUT) {
           clearInterval(interval);
           try { process.kill(editorPid); } catch {}
-          exec(`"${BASH_PATH}" -lc "${TMUX} kill-session -t ${session} 2>/dev/null"`, () => {});
+          exec(`"${PSMUX_BIN}" kill-session -t ${session}`, () => {});
           console.log(`[ai-task] 10min idle, closed editor (PID ${editorPid}) and killed session ${session}`);
         }
       });
@@ -450,15 +477,13 @@ function scheduleEditorClose(task, editorPid) {
 
 function executeAiTask(task) {
   runningAiTasks.set(task.id, { task, editorPid: null, editorCloseTimer: null });
-  const shortId = task.id.slice(0, 8);
-  // Session name: schedule-{taskName} (sanitized) or schedule-{shortId} as fallback
-  const safeName = task.name ? task.name.replace(/[^a-zA-Z0-9_-]/g, '-').replace(/-+/g, '-').slice(0, 40) : shortId;
+  const safeName = taskSafeName(task);
   const session = `${AI_TASK_PREFIX}${safeName}`;
   const project = task.project || 'D:/projects/common-task';
   const projMsys = toMsys(project);
   const claudeBinMsys = toMsys(CLAUDE_BIN);
 
-  // Build prompt and save to temp file (multi-line prompts break tmux send-keys)
+  // Build prompt and save to temp file (multi-line prompts break psmux send-keys)
   const learned = findLearnedApproach(task.name);
   let prompt = `You are executing a scheduled task. Work autonomously as much as possible.\n\nTask: ${task.name || 'Unnamed task'}\n\nInstructions:\n${task.instructions}\n`;
   if (learned) {
@@ -501,24 +526,25 @@ STEP 3: GUI automation (last resort — screenshot, click, visual interaction)
   - CLI tools (exe): add to ~/.claude/rules/pc-tools.md tool table (name, path, usage)
   - npm/Python packages: add to the relevant skill file in ~/.claude/docs/ (create one if none exists). Add a pointer row in pc-tools.md linking to that skill file.
   - One-off dependencies used only inside a script you wrote: no need to record.
-- NEVER kill, close, or interfere with existing tmux sessions (btn-* or schedule-*). Your session is ${session} — only interact with that session.
+- NEVER kill, close, or interfere with existing psmux sessions (btn-* or schedule-*). Your session is ${session} — only interact with that session.
 - NEVER close VS Code windows or editor windows that belong to other projects.
 - If you need user credentials, login info, or a decision you cannot make, clearly state what you need and WAIT for the user to respond. The user will check this session via remote.
 - Progress updates and status messages: write in Korean (한국어). Code, commands, and file operations stay in English.
 - At the end, output one result marker on its own line. Use the prefix SUCCESS: or FAILURE: followed by a summary in Korean (include which step worked or failed).
+
+=== END OF INSTRUCTIONS ===
 `;
 
+  const shortId = task.id.slice(0, 8);
   const promptFile = path.join(__dirname, `.ai-task-prompt-${shortId}.txt`);
   fs.writeFileSync(promptFile, prompt);
   const promptFileMsys = toMsys(promptFile);
 
   const aiModel = task.project ? CLAUDE_MODEL : AI_TASK_MODEL; // project specified → opus, common-task → sonnet
-  const createCmd = `${TMUX} kill-session -t ${session} 2>/dev/null; ${TMUX} new-session -d -s ${session} -c ${projMsys}; ${TMUX} source-file ~/.tmux.conf 2>/dev/null; ${TMUX} send-keys -t ${session} '${claudeBinMsys} --dangerously-skip-permissions --model ${aiModel}' Enter`;
+  const claudeCmd = `${claudeBinMsys} --dangerously-skip-permissions --model ${aiModel}`;
 
-  console.log(`[ai-task] Creating tmux session: ${session} in ${project}`);
-  exec(`"${BASH_PATH}" -lc "${createCmd}"`, (err) => {
-    // Grant socket access to all users (SYSTEM→user cross-session)
-    exec(`icacls "${TMUX_SOCKET_WIN}" /grant Everyone:F /Q`, () => {});
+  console.log(`[ai-task] Creating psmux session: ${session} in ${project}`);
+  createPsmuxSession(session, project, claudeCmd, (err) => {
     if (err) {
       console.error(`[ai-task] Session create error:`, err.message);
       finishAiTask(task, 'failed', `Session create error: ${err.message}`);
@@ -533,7 +559,7 @@ STEP 3: GUI automation (last resort — screenshot, click, visual interaction)
       console.log(`[ai-task] Protected session: ${session}`);
     }
 
-    // Write tasks.json to auto-attach AI task tmux session on editor open
+    // Write tasks.json to auto-attach AI task psmux session on editor open
     const projDir = project.replace(/\//g, '\\');
     const projName = path.basename(project);
     const vscodeDir = path.join(projDir, '.vscode');
@@ -579,7 +605,9 @@ STEP 3: GUI automation (last resort — screenshot, click, visual interaction)
     let instructionsSent = false;
 
     function capture(cb) {
-      exec(`"${BASH_PATH}" -lc "${TMUX} capture-pane -t ${session} -p -S - | sed '/^[[:space:]]*$/d' | tail -15"`, { encoding: 'utf8' }, cb);
+      exec(`"${PSMUX_BIN}" capture-pane -t ${session} -p -S -`, { encoding: 'utf8' }, (err, raw) => {
+        cb(err, err ? undefined : captureTail(raw || ''));
+      });
     }
 
     let promptIdleCount = 0;
@@ -601,7 +629,7 @@ STEP 3: GUI automation (last resort — screenshot, click, visual interaction)
           if (!trustHandled && hasTrustPrompt(output)) {
             trustHandled = true;
             console.log(`[ai-task] Trust prompt detected, accepting...`);
-            exec(`"${BASH_PATH}" -lc "${TMUX} send-keys -t ${session} Enter"`, () => {});
+            exec(`"${PSMUX_BIN}" send-keys -t ${session} Enter`, () => {});
             setTimeout(poll, 3000);
             return;
           }
@@ -619,12 +647,13 @@ STEP 3: GUI automation (last resort — screenshot, click, visual interaction)
             // Send /remote-control, verify it took effect, THEN send instructions
             function sendRcWithRetry(attempt = 1) {
               const MAX_RC = 3;
-              exec(`"${BASH_PATH}" -lc "${TMUX} send-keys -t ${session} '/remote-control' Enter"`, (err) => {
+              exec(`"${PSMUX_BIN}" send-keys -t ${session} '/remote-control' Enter`, (err) => {
                 if (err) console.error(`[ai-task] /remote-control send error:`, err.message);
                 else console.log(`[ai-task] Sent /remote-control to ${session} (attempt ${attempt}/${MAX_RC})`);
                 // Verify /remote-control took effect
                 setTimeout(() => {
-                  exec(`"${BASH_PATH}" -lc "${TMUX} capture-pane -t ${session} -p -S - | sed '/^[[:space:]]*$/d' | tail -15"`, { encoding: 'utf8' }, (err, stdout) => {
+                  exec(`"${PSMUX_BIN}" capture-pane -t ${session} -p -S -`, { encoding: 'utf8' }, (err, raw) => {
+                    const stdout = err ? '' : captureTail(raw || '');
                     if (err) return;
                     const pane = (stdout || '').trim();
                     const hasRemote = pane.includes('remote') || pane.includes('Remote');
@@ -645,12 +674,19 @@ STEP 3: GUI automation (last resort — screenshot, click, visual interaction)
               });
             }
             function sendInstructions() {
-              setTimeout(() => {
-                exec(`"${BASH_PATH}" -lc "${TMUX} load-buffer ${promptFileMsys} && ${TMUX} paste-buffer -t ${session} && sleep 1 && ${TMUX} send-keys -t ${session} Enter && sleep 1 && ${TMUX} send-keys -t ${session} Enter"`, (err) => {
-                  if (err) console.error(`[ai-task] Send error:`, err.message);
-                  else console.log(`[ai-task] Instructions sent to ${session}`);
-                  try { fs.unlinkSync(promptFile); } catch {}
-                });
+              setTimeout(async () => {
+                try {
+                  await tmuxRun(`load-buffer "${promptFile}"`);
+                  await tmuxRun(`paste-buffer -t ${session}`);
+                  await delay(1000);
+                  await tmuxRun(`send-keys -t ${session} Enter`);
+                  await delay(1000);
+                  await tmuxRun(`send-keys -t ${session} Enter`);
+                  console.log(`[ai-task] Instructions sent to ${session}`);
+                } catch (err) {
+                  console.error(`[ai-task] Send error:`, err.message);
+                }
+                try { fs.unlinkSync(promptFile); } catch {}
               }, 2000);
             }
             sendRcWithRetry();
@@ -668,12 +704,12 @@ STEP 3: GUI automation (last resort — screenshot, click, visual interaction)
         }
 
         // Phase 2: Check full buffer for SUCCESS/FAILURE markers (after prompt text)
-        exec(`"${BASH_PATH}" -lc "${TMUX} capture-pane -t ${session} -p -S -"`, { encoding: 'utf8', maxBuffer: 1024 * 1024 }, (err, fullOutput) => {
+        exec(`"${PSMUX_BIN}" capture-pane -t ${session} -p -S -`, { encoding: 'utf8', maxBuffer: 1024 * 1024 }, (err, fullOutput) => {
           const buffer = (fullOutput || '').trim();
           // Skip past the instructions/rules block to avoid matching example markers
           // Use lastIndexOf to find the final (= Claude's) SUCCESS/FAILURE, not the example in instructions
-          const markerCutoff = buffer.lastIndexOf('=== RULES ===');
-          const searchArea = markerCutoff >= 0 ? buffer.slice(markerCutoff + 200) : buffer;
+          const endOfInstr = buffer.lastIndexOf('=== END OF INSTRUCTIONS ===');
+          const searchArea = endOfInstr >= 0 ? buffer.slice(endOfInstr + 30) : buffer;
           // Find LAST occurrence to skip instruction examples
           const allSuccess = [...searchArea.matchAll(/SUCCESS:\s*(.+)/g)];
           const allFailure = [...searchArea.matchAll(/FAILURE:\s*(.+)/g)];
@@ -726,7 +762,7 @@ function setTaskWaitingForInput(task, waiting) {
 function finishAiTask(task, status, result) {
   const entry = runningAiTasks.get(task.id);
   const editorPid = entry?.editorPid || null;
-  if (entry?.editorCloseTimer) { clearInterval(entry.editorCloseTimer.interval); clearTimeout(entry.editorCloseTimer.timeout); }
+  clearEditorTimer(entry);
   runningAiTasks.delete(task.id);
 
   const tasks = readTaskQueue();
@@ -766,12 +802,12 @@ function finishAiTask(task, status, result) {
     });
   }
 
-  // Kill tmux session and remove from protected list
-  const safeName = task.name ? task.name.replace(/[^a-zA-Z0-9_-]/g, '-').replace(/-+/g, '-').slice(0, 40) : task.id.slice(0, 8);
+  // Kill psmux session and remove from protected list
+  const safeName = taskSafeName(task);
   const session = `${AI_TASK_PREFIX}${safeName}`;
   const updatedProtected = getProtectedSessions().filter(s => s !== session);
   setProtectedSessions(updatedProtected);
-  exec(`"${BASH_PATH}" -lc "${TMUX} kill-session -t ${session} 2>/dev/null"`, () => {});
+  exec(`"${PSMUX_BIN}" kill-session -t ${session}`, () => {});
   console.log(`[ai-task] Killed and unprotected session: ${session}`);
 
   // Restore tasks.json to original project session
@@ -836,19 +872,19 @@ function cleanupOrphanedTasks() {
     changed = true;
     console.log(`[ai-task] Orphaned task "${t.id.slice(0, 8)}" (${t.name}) → failed`);
 
-    // Kill zombie tmux session
-    const safeName = t.name ? t.name.replace(/[^a-zA-Z0-9_-]/g, '-').replace(/-+/g, '-').slice(0, 40) : t.id.slice(0, 8);
+    // Kill zombie psmux session
+    const safeName = taskSafeName(t);
     const session = `${AI_TASK_PREFIX}${safeName}`;
-    exec(`"${BASH_PATH}" -lc "${TMUX} kill-session -t ${session} 2>/dev/null"`, () => {});
+    exec(`"${PSMUX_BIN}" kill-session -t ${session}`, () => {});
   }
   if (changed) writeTaskQueue(tasks);
 
-  // Also kill zombie tmux sessions for already completed/failed tasks
-  exec(`"${BASH_PATH}" -lc "${TMUX} list-sessions -F '#S' 2>/dev/null"`, { encoding: 'utf8' }, (err, stdout) => {
+  // Also kill zombie psmux sessions for already completed/failed tasks
+  exec(`"${PSMUX_BIN}" list-sessions`, { encoding: 'utf8' }, (err, stdout) => {
     if (err) return;
-    const sessions = (stdout || '').trim().split('\n').filter(s => s.startsWith(AI_TASK_PREFIX));
+    const sessions = parseSessionNames(stdout || '').filter(s => s.startsWith(AI_TASK_PREFIX));
     for (const s of sessions) {
-      exec(`"${BASH_PATH}" -lc "${TMUX} kill-session -t ${s} 2>/dev/null"`, () => {});
+      exec(`"${PSMUX_BIN}" kill-session -t ${s}`, () => {});
       console.log(`[ai-task] Killed zombie session: ${s}`);
     }
     // Clean protected-sessions of dead schedule-* entries
@@ -958,8 +994,8 @@ app.get('/status', verifySecret, async (req, res) => {
   const activeSessions = await getActiveSessions();
   let protectedList = getProtectedSessions();
 
-  // Clean stale protected entries — but only when tmux has active sessions
-  // (after hibernate wake, tmux may return empty list temporarily; wiping protected list would be destructive)
+  // Clean stale protected entries — but only when psmux has active sessions
+  // (after hibernate wake, psmux may return empty list temporarily; wiping protected list would be destructive)
   if (activeSessions.length > 0) {
     const cleaned = protectedList.filter(s => activeSessions.includes(s));
     if (cleaned.length !== protectedList.length) {
@@ -1003,24 +1039,25 @@ app.post('/shutdown', verifySecret, (req, res) => {
 const SAFE_NAME_RE = /^[a-zA-Z0-9_-]+$/;
 const IGNORE_DIRS = new Set(IGNORE_DIRS_ENV.split(',').map(s => s.trim()).filter(Boolean));
 
-// tasks.json: open tmux session with claude on folder open
+// tasks.json: open psmux session with claude on folder open
 const SESSION_PREFIX = 'btn-';
 const AI_TASK_PREFIX = 'schedule-';
 
 function buildTasksJson(sessionOrName) {
   // If already a full session name (schedule- or btn-), use as-is; otherwise prepend SESSION_PREFIX
   const session = sessionOrName.startsWith(AI_TASK_PREFIX) ? sessionOrName : `${SESSION_PREFIX}${sessionOrName}`;
-  const attachCmd = `timeout=30; while [ $timeout -gt 0 ] && ! ${TMUX} has-session -t ${session} 2>/dev/null; do sleep 0.5; timeout=$((timeout-1)); done; ${TMUX} attach-session -t ${session}`;
+  const psmuxEsc = PSMUX_BIN.replace(/\\/g, '\\\\');
+  const attachCmd = `$t=60; while($t-- -gt 0){ & '${psmuxEsc}' has-session -t ${session} 2>$null; if($LASTEXITCODE -eq 0){ & '${psmuxEsc}' attach-session -t ${session}; break }; Start-Sleep 1 }`;
   return {
     version: "2.0.0",
     tasks: [{
-      label: "claude-tmux",
+      label: "claude-psmux",
       type: "shell",
       command: attachCmd,
       options: {
         shell: {
-          executable: BASH_PATH,
-          args: ["-l", "-c"]
+          executable: "powershell.exe",
+          args: ["-NoProfile", "-Command"]
         }
       },
       runOptions: { runOn: "folderOpen" },
@@ -1044,9 +1081,9 @@ function setProtectedSessions(list) {
 
 async function getActiveSessions() {
   return new Promise((resolve) => {
-    exec(`"${BASH_PATH}" -lc "${TMUX} list-sessions -F '#S' 2>/dev/null"`, (err, stdout) => {
+    exec(`"${PSMUX_BIN}" list-sessions`, { encoding: 'utf8' }, (err, stdout) => {
       if (err) return resolve([]);
-      const all = stdout.trim().split('\n').filter(Boolean);
+      const all = parseSessionNames(stdout);
       const sessions = [];
       for (const s of all) {
         if (s.startsWith(SESSION_PREFIX)) sessions.push(s.slice(SESSION_PREFIX.length));
@@ -1062,10 +1099,9 @@ function killUnprotectedSessions() {
     console.log('[kill] Skipping killUnprotectedSessions — AI task is running');
     return;
   }
-  const scriptPath = path.join(__dirname, 'kill-sessions.sh').replace(/\\/g, '/');
   const closeScript = path.join(__dirname, 'close-window.ps1');
 
-  getActiveSessions().then(activeSessions => {
+  getActiveSessions().then(async (activeSessions) => {
     const protectedList = getProtectedSessions();
     // Only kill btn- sessions, never schedule- sessions
     const btnSessions = activeSessions.filter(s => !s.startsWith(AI_TASK_PREFIX));
@@ -1076,8 +1112,8 @@ function killUnprotectedSessions() {
     console.log(`[kill] Killing unprotected sessions: ${toKill.join(', ')} (protected: ${protectedList.join(', ') || 'none'})`);
 
     for (const session of toKill) {
-      exec(`"${BASH_PATH}" -l "${scriptPath}" "${SESSION_PREFIX}${session}"`, (err) => {
-        if (err) console.error(`[kill-sessions] Error killing ${session}:`, err.message);
+      const fullSession = `${SESSION_PREFIX}${session}`;
+      gracefulKillSession(fullSession).then(() => {
         const titleQuery = EDITOR_TITLE ? `${session} - ${EDITOR_TITLE}` : session;
         exec(`powershell.exe -ExecutionPolicy Bypass -File "${closeScript}" -TitlePrefix "${titleQuery}"`, (err) => {
           if (err) console.error(`[close-window] Error closing ${session}:`, err.message);
@@ -1114,18 +1150,16 @@ function openProjectInEditor(name) {
 
   setTimeout(() => {
     const session = `${SESSION_PREFIX}${name}`;
-    const projMsys = toMsys(PROJECTS_DIR);
     const claudeBinMsys = toMsys(CLAUDE_BIN);
+    const workDir = path.join(PROJECTS_DIR, name);
+    const claudeCmd = `${claudeBinMsys} --dangerously-skip-permissions --model ${CLAUDE_MODEL} --name ${name}`;
 
-    const createCmd = `${TMUX} kill-session -t ${session} 2>/dev/null; ${TMUX} new-session -d -s ${session} -c ${projMsys}/${name}; ${TMUX} source-file ~/.tmux.conf 2>/dev/null; ${TMUX} send-keys -t ${session} '${claudeBinMsys} --dangerously-skip-permissions --model ${CLAUDE_MODEL} --name ${name}' Enter`;
-    exec(`"${BASH_PATH}" -lc "${createCmd}"`, (err) => {
-      // Grant socket access to all users (SYSTEM→user cross-session)
-      exec(`icacls "${TMUX_SOCKET_WIN}" /grant Everyone:F /Q`, () => {});
+    createPsmuxSession(session, workDir, claudeCmd, (err) => {
       if (err) {
-        console.error('[proj] tmux session create error:', err.message);
+        console.error('[proj] psmux session create error:', err.message);
         return;
       }
-      console.log(`[proj] Created tmux session: ${session}`);
+      console.log(`[proj] Created psmux session: ${session}`);
 
       // Protect proj session so killUnprotectedSessions doesn't kill it
       const protectedList = getProtectedSessions();
@@ -1142,7 +1176,9 @@ function openProjectInEditor(name) {
       let lastReadyOutput = null;
 
       function capturePaneTail(cb) {
-        exec(`"${BASH_PATH}" -lc "${TMUX} capture-pane -t ${session} -p -S - | sed '/^[[:space:]]*$/d' | tail -15"`, { encoding: 'utf8' }, cb);
+        exec(`"${PSMUX_BIN}" capture-pane -t ${session} -p -S -`, { encoding: 'utf8' }, (err, raw) => {
+          cb(err, err ? undefined : captureTail(raw || ''));
+        });
       }
 
 
@@ -1154,7 +1190,7 @@ function openProjectInEditor(name) {
         const RC_VERIFY_DELAY = 5000;
         const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
         console.log(`[proj] Claude stable in ${elapsed}s, sending /remote-control (attempt ${attempt}/${MAX_RC_ATTEMPTS})`);
-        exec(`"${BASH_PATH}" -lc "${TMUX} send-keys -t ${session} '/remote-control' Enter"`, (err) => {
+        exec(`"${PSMUX_BIN}" send-keys -t ${session} '/remote-control' Enter`, (err) => {
           if (err) console.error('[proj] /remote-control send error:', err.message);
           else console.log(`[proj] Sent /remote-control to ${session}`);
 
@@ -1181,7 +1217,7 @@ function openProjectInEditor(name) {
 
       function cleanupFailedSession() {
         console.log(`[proj] Cleaning up failed session: ${session}`);
-        exec(`"${BASH_PATH}" -lc "${TMUX} kill-session -t ${session} 2>/dev/null"`, () => {});
+        exec(`"${PSMUX_BIN}" kill-session -t ${session}`, () => {});
         setProtectedSessions(getProtectedSessions().filter(s => s !== name));
       }
 
@@ -1197,7 +1233,7 @@ function openProjectInEditor(name) {
             } else {
               // Claude may be loading — send /remote-control as fallback
               console.log(`[proj] Sending /remote-control despite timeout`);
-              exec(`"${BASH_PATH}" -lc "${TMUX} send-keys -t ${session} '/remote-control' Enter"`, (err) => {
+              exec(`"${PSMUX_BIN}" send-keys -t ${session} '/remote-control' Enter`, (err) => {
                 if (err) console.error('[proj] /remote-control send error:', err.message);
                 else console.log(`[proj] Sent /remote-control to ${session} (timeout fallback)`);
               });
@@ -1225,7 +1261,7 @@ function openProjectInEditor(name) {
           if (!trustHandled && hasTrustPrompt(output)) {
             trustHandled = true;
             console.log(`[proj] Trust prompt detected at ${elapsed}s, sending Enter to accept`);
-            exec(`"${BASH_PATH}" -lc "${TMUX} send-keys -t ${session} Enter"`, () => {});
+            exec(`"${PSMUX_BIN}" send-keys -t ${session} Enter`, () => {});
             lastReadyOutput = null;
             setTimeout(waitForClaude, POLL_INTERVAL);
             return;
@@ -1327,36 +1363,30 @@ app.post('/run', verifySecret, (req, res) => {
       return res.status(400).json({ ok: false, message: 'Invalid session name' });
     }
     setProtectedSessions(getProtectedSessions().filter(s => s !== name));
-    const scriptPath = path.join(__dirname, 'kill-sessions.sh').replace(/\\/g, '/');
     const closeScript = path.join(__dirname, 'close-window.ps1');
     // schedule- sessions already have full name from getActiveSessions(); btn- sessions need prefix
-    const tmuxSession = name.startsWith(AI_TASK_PREFIX) ? name : `${SESSION_PREFIX}${name}`;
+    const psmuxSession = name.startsWith(AI_TASK_PREFIX) ? name : `${SESSION_PREFIX}${name}`;
 
     // For schedule- sessions, also kill editor process and cancel idle timer
     let editorName;
     if (name.startsWith(AI_TASK_PREFIX)) {
       const safeName = name.slice(AI_TASK_PREFIX.length);
-      const running = [...runningAiTasks.values()].find(e => {
-        const n = e.task.name ? e.task.name.replace(/[^a-zA-Z0-9_-]/g, '-').replace(/-+/g, '-').slice(0, 40) : e.task.id.slice(0, 8);
-        return n === safeName;
-      });
+      const running = [...runningAiTasks.values()].find(e => taskSafeName(e.task) === safeName);
       if (running) {
         if (running.editorPid) try { process.kill(running.editorPid); } catch {}
-        if (running.editorCloseTimer) { clearInterval(running.editorCloseTimer.interval); clearTimeout(running.editorCloseTimer.timeout); }
+        clearEditorTimer(running);
         runningAiTasks.delete(running.task.id);
       }
       const taskProject = running?.task?.project
         || readTaskQueue().find(t => {
-          const n = t.name ? t.name.replace(/[^a-zA-Z0-9_-]/g, '-').replace(/-+/g, '-').slice(0, 40) : t.id.slice(0, 8);
-          return n === safeName;
+          return taskSafeName(t) === safeName;
         })?.project;
       editorName = taskProject ? path.basename(taskProject) : safeName;
     } else {
       editorName = name;
     }
 
-    exec(`"${BASH_PATH}" -l "${scriptPath}" "${tmuxSession}"`, (err) => {
-      if (err) console.error(`[kill-session] Error:`, err.message);
+    gracefulKillSession(psmuxSession).then(() => {
       const titleQuery = EDITOR_TITLE ? `${editorName} - ${EDITOR_TITLE}` : editorName;
       exec(`powershell.exe -ExecutionPolicy Bypass -File "${closeScript}" -TitlePrefix "${titleQuery}"`, (err) => {
         if (err) console.error(`[close-window] Error:`, err.message);
@@ -1491,15 +1521,15 @@ app.post('/run', verifySecret, (req, res) => {
     const { taskId } = req.body.params || req.body;
     if (!taskId) return res.status(400).json({ ok: false, message: 'taskId is required' });
 
-    // If running, kill tmux session + editor
+    // If running, kill psmux session + editor
     const running = runningAiTasks.get(taskId);
     if (running) {
-      const safeName = running.task.name ? running.task.name.replace(/[^a-zA-Z0-9_-]/g, '-').replace(/-+/g, '-').slice(0, 40) : taskId.slice(0, 8);
+      const safeName = taskSafeName(running.task);
       const session = `${AI_TASK_PREFIX}${safeName}`;
       if (running.editorPid) try { process.kill(running.editorPid); } catch {}
-      if (running.editorCloseTimer) { clearInterval(running.editorCloseTimer.interval); clearTimeout(running.editorCloseTimer.timeout); }
+      clearEditorTimer(running);
       runningAiTasks.delete(taskId);
-      exec(`"${BASH_PATH}" -lc "${TMUX} kill-session -t ${session} 2>/dev/null"`, () => {});
+      exec(`"${PSMUX_BIN}" kill-session -t ${session}`, () => {});
       setProtectedSessions(getProtectedSessions().filter(s => s !== session));
       if (EDITOR_TITLE) {
         const projName = running.task.project ? path.basename(running.task.project) : safeName;
@@ -1613,13 +1643,13 @@ async function executeSleepAction(action, delaySec = 0) {
   }, 3000);
 }
 
-// --- Boot readiness: wait for tmux before accepting commands ---
+// --- Boot readiness: verify psmux before accepting commands ---
 
 let tmuxReady = false;
 
-function checkTmux() {
+function checkPsmux() {
   return new Promise((resolve) => {
-    exec(`"${BASH_PATH}" -lc "tmux -V"`, (err) => resolve(!err));
+    exec(`"${PSMUX_BIN}" --version`, (err) => resolve(!err));
   });
 }
 
@@ -1627,15 +1657,15 @@ async function waitForTmux(maxWaitMs = 60_000) {
   const start = Date.now();
   const interval = 2_000;
   while (Date.now() - start < maxWaitMs) {
-    if (await checkTmux()) {
+    if (await checkPsmux()) {
       tmuxReady = true;
-      console.log(`[boot] tmux ready (${Math.round((Date.now() - start) / 1000)}s after start)`);
+      console.log(`[boot] psmux ready (${Math.round((Date.now() - start) / 1000)}s after start)`);
       return;
     }
     await new Promise((r) => setTimeout(r, interval));
   }
   tmuxReady = true;
-  console.warn(`[boot] tmux not detected after ${maxWaitMs / 1000}s, proceeding anyway`);
+  console.warn(`[boot] psmux not detected after ${maxWaitMs / 1000}s, proceeding anyway`);
 }
 
 // --- Start ---
