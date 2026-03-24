@@ -382,13 +382,12 @@ function executeAiTask(task) {
 You MUST follow these steps sequentially. Before moving to the next step, output the step result.
 Skipping steps or jumping ahead is PROHIBITED — document why each step was insufficient before proceeding.
 
-STEP 1: Check learned approaches
-- Read D:/projects/button/agent/.task-learned.json
-- Read D:/projects/button/agent/.task-queue.json (check similar completed/failed tasks)
-- Output: "STEP 1 RESULT: [MATCH: {approach}]" or "STEP 1 RESULT: [NO MATCH — {reason}]"
-- If match found AND it aligns with the user's instructions → use that approach. Go to execution.
-- If match found BUT it conflicts with the user's instructions → IGNORE the learned approach. The user's instructions always take priority. Do additional research to fulfill the user's actual request. Proceed to Step 2.
-- If no match → proceed to Step 2.
+STEP 1: Check learned approaches (INJECTED ABOVE ONLY — do NOT re-read files for matching)
+- If a "Previously successful approach" section exists above, check if it aligns with YOUR task instructions.
+- A match is valid ONLY if the approach describes the SAME TYPE OF WORK as your instructions (e.g., YouTube download matches YouTube download, NOT steamcmd/game tasks).
+- If match is valid AND aligns with instructions → use it. Output: "STEP 1 RESULT: [MATCH: {approach}]"
+- If match conflicts with instructions OR describes different work → IGNORE it. Output: "STEP 1 RESULT: [NO MATCH — approach describes {X} but task requires {Y}]". Proceed to Step 2.
+- If no approach section above → Output: "STEP 1 RESULT: [NO MATCH — no learned data]". Proceed to Step 2.
 
 STEP 2: Programmatic approach (non-GUI)
 - Try ALL non-GUI methods: CLI tools, APIs, PowerShell, shell scripts, package managers, direct file operations, registry edits, web requests, etc.

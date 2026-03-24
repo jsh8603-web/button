@@ -1,0 +1,132 @@
+{
+  "Echo test": {
+    "approach": "echo test passed",
+    "lastUsed": "2026-03-23T05:16:21.943Z",
+    "successCount": 1
+  },
+  "Echo test with input": {
+    "approach": "user said <color>. If no response after stating your question,",
+    "lastUsed": "2026-03-23T05:35:21.891Z",
+    "successCount": 1
+  },
+  "Echo test with input v2": {
+    "approach": "user said blue",
+    "lastUsed": "2026-03-23T05:42:20.612Z",
+    "successCount": 1
+  },
+  "Test AI task opus": {
+    "approach": "AI task test completed. Running as claude-sonnet-4-6 (Sonnet 4.6). Hello confirmed. Note: instructions mentioned \"opus model\" but current session uses Sonnet 4.6.",
+    "lastUsed": "2026-03-23T07:31:22.545Z",
+    "successCount": 1
+  },
+  "AI Task Test - Echo Hello": {
+    "approach": "\"Hello from AI Task!\" echoed successfully. Running as claude-opus-4-6",
+    "lastUsed": "2026-03-23T07:46:53.475Z",
+    "successCount": 1
+  },
+  "AI Task Test - Editor Stay Open": {
+    "approach": "\"Hello from AI Task!\" echoed successfully. Running as",
+    "lastUsed": "2026-03-23T07:56:07.273Z",
+    "successCount": 1
+  },
+  "AI Task Test - Editor Window": {
+    "approach": "\"Hello from AI Task!\" echoed successfully. Test complete.",
+    "lastUsed": "2026-03-23T08:01:12.165Z",
+    "successCount": 1
+  },
+  "AI Task Test - New Editor Window": {
+    "approach": "\"Hello!\" echoed successfully. AI task test complete.",
+    "lastUsed": "2026-03-23T08:08:19.946Z",
+    "successCount": 1
+  },
+  "AI Task Test - Close and Reopen": {
+    "approach": "'Hello!' echoed successfully. AI task test complete.",
+    "lastUsed": "2026-03-23T08:12:23.137Z",
+    "successCount": 1
+  },
+  "AI Task Opus Test": {
+    "approach": "opus ai task test complete",
+    "lastUsed": "2026-03-23T08:14:23.144Z",
+    "successCount": 1
+  },
+  "AI Task Opus Remote Test": {
+    "approach": "remote-control test complete",
+    "lastUsed": "2026-03-23T08:24:53.198Z",
+    "successCount": 1
+  },
+  "Remote Control Auto Test": {
+    "approach": "steamcmd Steam library integration configured — game moved to Steam library path, global rules updated with integration procedure and example",
+    "lastUsed": "2026-03-23T09:23:42.415Z",
+    "successCount": 1
+  },
+  "Download Skul The Hero Slayer via steamcmd": {
+    "approach": "Downloaded via steamcmd (Step 1 match)\")",
+    "lastUsed": "2026-03-24T03:12:16.201Z",
+    "successCount": 3
+  },
+  "test-schedule-prefix": {
+    "approach": "test file created",
+    "lastUsed": "2026-03-23T13:18:50.220Z",
+    "successCount": 1
+  },
+  "preempt-test-task": {
+    "approach": "preemption test done",
+    "lastUsed": "2026-03-23T13:20:47.217Z",
+    "successCount": 1
+  },
+  "common-task-test": {
+    "approach": "default project test",
+    "lastUsed": "2026-03-23T13:27:00.544Z",
+    "successCount": 1
+  },
+  "task-1-running": {
+    "approach": "task 1 done",
+    "lastUsed": "2026-03-23T13:28:44.942Z",
+    "successCount": 1
+  },
+  "task-2-queued": {
+    "approach": "task 2 done",
+    "lastUsed": "2026-03-23T13:29:45.069Z",
+    "successCount": 1
+  },
+  "parallel-B": {
+    "approach": "task B done",
+    "lastUsed": "2026-03-23T13:34:56.204Z",
+    "successCount": 1
+  },
+  "parallel-A": {
+    "approach": "task B done",
+    "lastUsed": "2026-03-23T13:34:56.212Z",
+    "successCount": 1
+  },
+  "babyplace-audit-wf": {
+    "approach": "감사 wf 중단됨 (사용자 요청으로 tmux 세션 종료)",
+    "lastUsed": "2026-03-23T14:08:59.987Z",
+    "successCount": 1
+  },
+  "Delete top 3 largest unused Steam games": {
+    "approach": "3개월 이상 미사용 Steam 게임 중 용량 상위 3개를 삭제했습니다. 1) Black Myth: Wukong — 139.6 GB (마지막 플레이: 2025-07-29), 2) Where Winds Meet — 116.6 GB (마지막 플레이: 2025-12-08), 3) THRONE AND LIBERTY — 85.3 GB",
+    "lastUsed": "2026-03-23T14:46:38.194Z",
+    "successCount": 2
+  },
+  "tmux-settings-test": {
+    "approach": "All 5 tmux settings are correct. history-limit=250000, allow-passthrough=on, mouse=on, escape-time=0, extended-keys=on.",
+    "lastUsed": "2026-03-23T14:59:00.940Z",
+    "successCount": 1
+  },
+  "uninstall-unused-steam-games": {
+    "approach": "90일 이상 미플레이 Steam 게임 중 용량 상위 3개를 삭제했습니다.",
+    "lastUsed": "2026-03-23T15:58:37.880Z",
+    "successCount": 1
+  },
+  "Uninstall Skul The Hero Slayer via steamcmd": {
+    "approach": "Game found at D:\\steamlibrary\\steamapps\\common\\skul. Verified no appmanifest_1147560.acf in Steam, steamcmd, or steamlibrary paths. Removed empty leftover dir. Use steamcmd app_uninstall 1147560 + PowerShell Remove-Item for cleanup. Verify via Test-Path on manifest and game folder.",
+    "lastUsed": "2026-03-24T03:50:00.000Z",
+    "successCount": 3
+  },
+  "Uninstall Dave the Diver via steamcmd": {
+    "approach": "Game found at D:\\Program Files (x86)\\Steam\\steamapps\\common\\Dave the Diver. steamcmd app_uninstall returns 'Not installed' (steamcmd doesn't manage Steam client library). Use PowerShell Remove-Item to delete appmanifest_1868140.acf and game folder directly. Verify via Test-Path on manifest and game folder.",
+    "lastUsed": "2026-03-24T04:00:00.000Z",
+    "successCount": 1
+  }
+}
