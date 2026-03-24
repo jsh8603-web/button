@@ -408,8 +408,9 @@ STEP 3: GUI automation (last resort — screenshot, click, visual interaction)
 - NEVER close VS Code windows or editor windows that belong to other projects.
 - If you need user credentials, login info, or a decision you cannot make, clearly state what you need and WAIT for the user to respond. The user will check this session via remote.
 - Progress updates and status messages: write in Korean (한국어). Code, commands, and file operations stay in English.
-- At the end, output exactly: SUCCESS: <summary in Korean> or FAILURE: <reason in Korean>
-- Include which steps you followed in your final output (e.g., "SUCCESS: steamcmd로 삭제 완료 (Step 1 match)")
+- At the end, output exactly one of these markers on its own line:
+  SUCCESS: <summary in Korean, include which step worked>
+  FAILURE: <reason in Korean>
 `;
 
   const promptFile = path.join(__dirname, `.ai-task-prompt-${shortId}.txt`);
