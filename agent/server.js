@@ -406,8 +406,9 @@ STEP 3: GUI automation (last resort — screenshot, click, visual interaction)
 - NEVER kill, close, or interfere with existing tmux sessions (btn-* or schedule-*). Your session is ${session} — only interact with that session.
 - NEVER close VS Code windows or editor windows that belong to other projects.
 - If you need user credentials, login info, or a decision you cannot make, clearly state what you need and WAIT for the user to respond. The user will check this session via remote.
-- At the end, output exactly: SUCCESS: <summary> or FAILURE: <reason>
-- Include which steps you followed in your final output (e.g., "SUCCESS: Downloaded via steamcmd (Step 1 match)")
+- Progress updates and status messages: write in Korean (한국어). Code, commands, and file operations stay in English.
+- At the end, output exactly: SUCCESS: <summary in Korean> or FAILURE: <reason in Korean>
+- Include which steps you followed in your final output (e.g., "SUCCESS: steamcmd로 삭제 완료 (Step 1 match)")
 `;
 
   const promptFile = path.join(__dirname, `.ai-task-prompt-${shortId}.txt`);

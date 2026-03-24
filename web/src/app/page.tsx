@@ -494,25 +494,49 @@ function ScheduleTab() {
 
   const fetchTasks = useCallback(async () => {
     try {
+      let agentTasks: TaskInfo[] = [];
       // Try status first (fast: returns cached tasks when offline)
       const statusRes = await api("/api/status");
       if (statusRes.ok) {
         const statusData = await statusRes.json();
         if (statusData.tasks) {
-          setTasks([...statusData.tasks].reverse());
-          return;
+          agentTasks = statusData.tasks;
         }
       }
       // Online: fetch full task list from Agent
-      const res = await api("/api/run", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "task-list" }),
-      });
-      if (res.ok) {
-        const data = await res.json();
-        if (data.tasks) setTasks([...data.tasks].reverse());
+      if (agentTasks.length === 0) {
+        const res = await api("/api/run", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "task-list" }),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (data.tasks) agentTasks = data.tasks;
+        }
       }
+      // Fetch Pi deferred tasks (deliverAt pending)
+      let deferredTasks: TaskInfo[] = [];
+      try {
+        const dRes = await api("/api/deferred");
+        if (dRes.ok) {
+          const deferred: { body: { action: string; params?: Record<string, unknown>; deliverAt?: string }; createdAt: string; deliverAt: string | null }[] = await dRes.json();
+          deferredTasks = deferred.map((d, i) => ({
+            id: `deferred-${i}`,
+            type: (d.body.params?.type as TaskInfo["type"]) || undefined,
+            name: (d.body.params?.name as string) || "Task",
+            command: (d.body.params?.command as string) || null,
+            instructions: (d.body.params?.instructions as string) || null,
+            scheduledAt: (d.body.params?.scheduledAt as string) || d.deliverAt || d.createdAt,
+            repeat: null,
+            onComplete: (d.body.params?.onComplete as string) || null,
+            status: "pending" as const,
+            log: null,
+            completedAt: null,
+          }));
+        }
+      } catch { /* ignore */ }
+      setTasks([...deferredTasks, ...agentTasks].reverse());
     } catch { /* ignore */ }
   }, []);
 
