@@ -355,7 +355,7 @@ function executeAiTask(task) {
     prompt += `\nPreviously successful approach for similar task:\n${learned.approach}\n`;
   }
   prompt += `\nAvailable Tools & Logs:\nRead the tool inventory first: ~/.claude/rules/pc-tools.md\nIt has a quick-select table mapping task types to skill files. Read the relevant skill file for detailed usage.\nKey tools: NirCmd (system control), AutoHotkey v2 (GUI), PyAutoGUI (screenshot/image recognition), Playwright (browser), yt-dlp+ffmpeg (media), aria2 (downloads).\n\nPast task logs (check before starting — may have useful approaches or known failures):\n- Learned approaches: D:/projects/button/agent/.task-learned.json\n- Task history (completed/failed): D:/projects/button/agent/.task-queue.json\nRead these files first if your task is similar to a previous one.\n`;
-  prompt += `\nRules:\n- Execute the task using Bash commands, file operations, etc.\n- ALWAYS prefer programmatic approaches first (CLI, API, scripts) for speed and reliability. Only use GUI tools (AHK, PyAutoGUI, Playwright) as fallback when programmatic methods fail.\n- When using GUI tools, try to discover the programmatic route for future use (e.g., find the CLI command or API endpoint that achieves the same result).\n- If the primary approach fails, research and try alternatives\n- Install any missing tools yourself (choco, winget, npm, etc.) — never fail because something is not installed\n- Before using a PC tool, Read the relevant skill file from ~/.claude/rules/ for correct syntax and paths\n- If you need user credentials, login info, or a decision you cannot make, clearly state what you need and WAIT for the user to respond. The user will check this session via remote.\n- At the end, output exactly: SUCCESS: <summary> or FAILURE: <reason>`;
+  prompt += `\nRules:\n- Execute the task using Bash commands, file operations, etc.\n- ALWAYS prefer programmatic approaches first (CLI, API, scripts) for speed and reliability. Only use GUI tools (AHK, PyAutoGUI, Playwright) as fallback when programmatic methods fail.\n- When using GUI tools, try to discover the programmatic route for future use (e.g., find the CLI command or API endpoint that achieves the same result).\n- If the primary approach fails, research and try alternatives\n- Install any missing tools yourself (choco, winget, npm, etc.) — never fail because something is not installed\n- Before using a PC tool, Read the relevant skill file from ~/.claude/rules/ for correct syntax and paths\n- NEVER kill, close, or interfere with existing tmux sessions (btn-* or schedule-*). Your session is ${session} — only interact with that session.\n- NEVER close VS Code windows or editor windows that belong to other projects.\n- If you need user credentials, login info, or a decision you cannot make, clearly state what you need and WAIT for the user to respond. The user will check this session via remote.\n- At the end, output exactly: SUCCESS: <summary> or FAILURE: <reason>`;
 
   const promptFile = path.join(__dirname, `.ai-task-prompt-${shortId}.txt`);
   fs.writeFileSync(promptFile, prompt);
@@ -438,6 +438,9 @@ function executeAiTask(task) {
       if (hasTrustPrompt(output)) return false;
       return output.includes('\u276F') || output.includes('>') || output.includes('\u256D') || output.includes('human');
     }
+
+    let promptIdleCount = 0;
+    const PROMPT_IDLE_THRESHOLD = 3; // require 3 consecutive polls (~30s) before marking as waiting
 
     function poll() {
       if (Date.now() - startTime > AI_TASK_TIMEOUT) {
@@ -534,10 +537,14 @@ function executeAiTask(task) {
             return;
           }
 
-          // No markers yet — if Claude prompt re-appeared, it may be waiting for user input
+          // No markers yet — if Claude prompt persists across multiple polls, it may be waiting for user input
           if (hasClaudePrompt(output)) {
-            setTaskWaitingForInput(task, true);
+            promptIdleCount++;
+            if (promptIdleCount >= PROMPT_IDLE_THRESHOLD) {
+              setTaskWaitingForInput(task, true);
+            }
           } else {
+            promptIdleCount = 0;
             setTaskWaitingForInput(task, false);
           }
 
@@ -747,11 +754,14 @@ app.get('/status', verifySecret, async (req, res) => {
   const activeSessions = await getActiveSessions();
   let protectedList = getProtectedSessions();
 
-  // Clean stale protected entries (also when no sessions exist)
-  const cleaned = protectedList.filter(s => activeSessions.includes(s));
-  if (cleaned.length !== protectedList.length) {
-    protectedList = cleaned;
-    setProtectedSessions(protectedList);
+  // Clean stale protected entries — but only when tmux has active sessions
+  // (after hibernate wake, tmux may return empty list temporarily; wiping protected list would be destructive)
+  if (activeSessions.length > 0) {
+    const cleaned = protectedList.filter(s => activeSessions.includes(s));
+    if (cleaned.length !== protectedList.length) {
+      protectedList = cleaned;
+      setProtectedSessions(protectedList);
+    }
   }
 
   const sessions = activeSessions.map(name => ({
@@ -765,6 +775,7 @@ app.get('/status', verifySecret, async (req, res) => {
     sessions,
     projects: getProjectList(),
     metrics: await collectMetrics(),
+    tasks: readTaskQueue(),
   });
 });
 

@@ -394,6 +394,10 @@ const server = http.createServer(async (req, res) => {
     try {
       const result = await agentRequest('GET', '/status', null, 2000);
       if (result.data?.metrics) checkAlerts(result.data.metrics);
+      // Cache tasks from status response for offline use
+      if (result.data?.tasks) {
+        saveTaskCache({ tasks: result.data.tasks, cachedAt: new Date().toISOString() });
+      }
       return sendJson(res, 200, { ...result.data, alerts });
     } catch {
       const cache = loadTaskCache();
@@ -478,6 +482,15 @@ const server = http.createServer(async (req, res) => {
         // Cache task-list responses
         if (body.action === 'task-list' && result.data?.tasks) {
           saveTaskCache({ tasks: result.data.tasks, cachedAt: new Date().toISOString() });
+        }
+        // After successful task-add, refresh cache so offline status shows updated tasks
+        if (body.action === 'task-add' && result.data?.ok) {
+          try {
+            const listResult = await agentRequest('POST', '/run', { action: 'task-list' });
+            if (listResult.data?.tasks) {
+              saveTaskCache({ tasks: listResult.data.tasks, cachedAt: new Date().toISOString() });
+            }
+          } catch { /* best effort */ }
         }
         return sendJson(res, result.status, result.data);
       } catch {
