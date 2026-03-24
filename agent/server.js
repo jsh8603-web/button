@@ -666,11 +666,13 @@ function finishAiTask(task, status, result) {
   // Schedule editor close after 10 min idle (cancel if user interacts)
   scheduleEditorClose(task, editorPid);
 
-  // Remove AI task session from protected list (allows cleanup on next proj call)
-  const session = `${AI_TASK_PREFIX}${task.id.slice(0, 8)}`;
+  // Kill tmux session and remove from protected list
+  const safeName = task.name ? task.name.replace(/[^a-zA-Z0-9_-]/g, '-').replace(/-+/g, '-').slice(0, 40) : task.id.slice(0, 8);
+  const session = `${AI_TASK_PREFIX}${safeName}`;
   const updatedProtected = getProtectedSessions().filter(s => s !== session);
   setProtectedSessions(updatedProtected);
-  console.log(`[ai-task] Unprotected completed session: ${session}`);
+  exec(`"${BASH_PATH}" -lc "${TMUX} kill-session -t ${session} 2>/dev/null"`, () => {});
+  console.log(`[ai-task] Killed and unprotected session: ${session}`);
 
   // Restore tasks.json to original project session
   const project = task.project || 'D:/projects/common-task';
@@ -742,6 +744,19 @@ function cleanupOrphanedTasks() {
     exec(`"${BASH_PATH}" -lc "${TMUX} kill-session -t ${session} 2>/dev/null"`, () => {});
   }
   if (changed) writeTaskQueue(tasks);
+
+  // Also kill zombie tmux sessions for already completed/failed tasks
+  exec(`"${BASH_PATH}" -lc "${TMUX} list-sessions -F '#S' 2>/dev/null"`, { encoding: 'utf8' }, (err, stdout) => {
+    if (err) return;
+    const sessions = (stdout || '').trim().split('\n').filter(s => s.startsWith(AI_TASK_PREFIX));
+    for (const s of sessions) {
+      exec(`"${BASH_PATH}" -lc "${TMUX} kill-session -t ${s} 2>/dev/null"`, () => {});
+      console.log(`[ai-task] Killed zombie session: ${s}`);
+    }
+    // Clean protected-sessions of dead schedule-* entries
+    const protectedList = getProtectedSessions().filter(p => !p.startsWith(AI_TASK_PREFIX));
+    setProtectedSessions(protectedList);
+  });
 }
 
 function startTaskRunner() {
