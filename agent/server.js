@@ -386,7 +386,8 @@ STEP 1: Check learned approaches
 - Read D:/projects/button/agent/.task-learned.json
 - Read D:/projects/button/agent/.task-queue.json (check similar completed/failed tasks)
 - Output: "STEP 1 RESULT: [MATCH: {approach}]" or "STEP 1 RESULT: [NO MATCH — {reason}]"
-- If match found → use that approach. Go to execution.
+- If match found AND it aligns with the user's instructions → use that approach. Go to execution.
+- If match found BUT it conflicts with the user's instructions → IGNORE the learned approach. The user's instructions always take priority. Do additional research to fulfill the user's actual request. Proceed to Step 2.
 - If no match → proceed to Step 2.
 
 STEP 2: Programmatic approach (non-GUI)
@@ -402,6 +403,7 @@ STEP 3: GUI automation (last resort — screenshot, click, visual interaction)
 - Output: "STEP 3: Using {tool} because: Step 1={reason}, Step 2={reason}"
 
 === RULES ===
+- USER INSTRUCTIONS ALWAYS TAKE PRIORITY over learned approaches, past logs, and previous success patterns. If the user's instructions ask for a different method or quality than what succeeded before, follow the user's instructions and research new approaches as needed.
 - Install missing tools yourself (winget, npm, choco) — never fail because something is not installed
 - NEVER kill, close, or interfere with existing tmux sessions (btn-* or schedule-*). Your session is ${session} — only interact with that session.
 - NEVER close VS Code windows or editor windows that belong to other projects.
