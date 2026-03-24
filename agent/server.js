@@ -19,6 +19,7 @@ const CLAUDE_BIN = process.env.CLAUDE_BIN || 'claude';
 const IGNORE_DIRS_ENV = process.env.IGNORE_DIRS || 'node_modules,screenshots';
 const EDITOR_TITLE = process.env.EDITOR_TITLE || '';
 const CLAUDE_MODEL = process.env.CLAUDE_MODEL || 'opus';
+const AI_TASK_MODEL = process.env.AI_TASK_MODEL || 'sonnet';
 const AGENT_SECRET = process.env.AGENT_SECRET;
 const PI_HOST = process.env.PI_HOST || '192.168.219.125';
 const PI_PORT = parseInt(process.env.PI_PORT || '7777', 10);
@@ -354,14 +355,44 @@ function executeAiTask(task) {
   if (learned) {
     prompt += `\nPreviously successful approach for similar task:\n${learned.approach}\n`;
   }
-  prompt += `\nAvailable Tools & Logs:\nRead the tool inventory first: ~/.claude/rules/pc-tools.md\nIt has a quick-select table mapping task types to skill files. Read the relevant skill file for detailed usage.\nKey tools: NirCmd (system control), AutoHotkey v2 (GUI), PyAutoGUI (screenshot/image recognition), Playwright (browser), yt-dlp+ffmpeg (media), aria2 (downloads).\n\nPast task logs (check before starting — may have useful approaches or known failures):\n- Learned approaches: D:/projects/button/agent/.task-learned.json\n- Task history (completed/failed): D:/projects/button/agent/.task-queue.json\nRead these files first if your task is similar to a previous one.\n`;
-  prompt += `\nRules:\n- Execute the task using Bash commands, file operations, etc.\n- ALWAYS prefer programmatic approaches first (CLI, API, scripts) for speed and reliability. Only use GUI tools (AHK, PyAutoGUI, Playwright) as fallback when programmatic methods fail.\n- When using GUI tools, try to discover the programmatic route for future use (e.g., find the CLI command or API endpoint that achieves the same result).\n- If the primary approach fails, research and try alternatives\n- Install any missing tools yourself (choco, winget, npm, etc.) — never fail because something is not installed\n- Before using a PC tool, Read the relevant skill file from ~/.claude/rules/ for correct syntax and paths\n- NEVER kill, close, or interfere with existing tmux sessions (btn-* or schedule-*). Your session is ${session} — only interact with that session.\n- NEVER close VS Code windows or editor windows that belong to other projects.\n- If you need user credentials, login info, or a decision you cannot make, clearly state what you need and WAIT for the user to respond. The user will check this session via remote.\n- At the end, output exactly: SUCCESS: <summary> or FAILURE: <reason>`;
+  prompt += `
+=== MANDATORY EXECUTION ORDER ===
+You MUST follow these steps sequentially. Before moving to the next step, output the step result.
+Skipping steps or jumping ahead is PROHIBITED — document why each step was insufficient before proceeding.
+
+STEP 1: Check learned approaches
+- Read D:/projects/button/agent/.task-learned.json
+- Read D:/projects/button/agent/.task-queue.json (check similar completed/failed tasks)
+- Output: "STEP 1 RESULT: [MATCH: {approach}]" or "STEP 1 RESULT: [NO MATCH — {reason}]"
+- If match found → use that approach. Go to execution.
+- If no match → proceed to Step 2.
+
+STEP 2: Programmatic approach (non-GUI)
+- Try ALL non-GUI methods: CLI tools, APIs, PowerShell, shell scripts, package managers, direct file operations, registry edits, web requests, etc.
+- Research alternatives if the first attempt fails (WebSearch, --help, docs).
+- Output: "STEP 2 RESULT: [SUCCESS: {method}]" or "STEP 2 RESULT: [FAILED: {what you tried} — {error}]" or "STEP 2 RESULT: [NO PROGRAMMATIC METHOD: {reason}]"
+- If success → done. If failed/none → proceed to Step 3.
+
+STEP 3: GUI automation (last resort — screenshot, click, visual interaction)
+- Only when Step 2 exhausted all programmatic options.
+- Read ~/.claude/rules/pc-tools.md for tool inventory.
+- Read the relevant skill file (from ~/.claude/docs/) before using any GUI tool.
+- Output: "STEP 3: Using {tool} because: Step 1={reason}, Step 2={reason}"
+
+=== RULES ===
+- Install missing tools yourself (winget, npm, choco) — never fail because something is not installed
+- NEVER kill, close, or interfere with existing tmux sessions (btn-* or schedule-*). Your session is ${session} — only interact with that session.
+- NEVER close VS Code windows or editor windows that belong to other projects.
+- If you need user credentials, login info, or a decision you cannot make, clearly state what you need and WAIT for the user to respond. The user will check this session via remote.
+- At the end, output exactly: SUCCESS: <summary> or FAILURE: <reason>
+- Include which steps you followed in your final output (e.g., "SUCCESS: Downloaded via steamcmd (Step 1 match)")
+`;
 
   const promptFile = path.join(__dirname, `.ai-task-prompt-${shortId}.txt`);
   fs.writeFileSync(promptFile, prompt);
   const promptFileMsys = toMsys(promptFile);
 
-  const createCmd = `${TMUX} kill-session -t ${session} 2>/dev/null; ${TMUX} new-session -d -s ${session} -c ${projMsys}; ${TMUX} source-file ~/.tmux.conf 2>/dev/null; ${TMUX} send-keys -t ${session} '${claudeBinMsys} --dangerously-skip-permissions --model ${CLAUDE_MODEL}' Enter`;
+  const createCmd = `${TMUX} kill-session -t ${session} 2>/dev/null; ${TMUX} new-session -d -s ${session} -c ${projMsys}; ${TMUX} source-file ~/.tmux.conf 2>/dev/null; ${TMUX} send-keys -t ${session} '${claudeBinMsys} --dangerously-skip-permissions --model ${AI_TASK_MODEL}' Enter`;
 
   console.log(`[ai-task] Creating tmux session: ${session} in ${project}`);
   exec(`"${BASH_PATH}" -lc "${createCmd}"`, (err) => {
