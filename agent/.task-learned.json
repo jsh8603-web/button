@@ -128,5 +128,28 @@
     "approach": "Game found at D:\\Program Files (x86)\\Steam\\steamapps\\common\\Dave the Diver. steamcmd app_uninstall returns 'Not installed' (steamcmd doesn't manage Steam client library). Use PowerShell Remove-Item to delete appmanifest_1868140.acf and game folder directly. Verify via Test-Path on manifest and game folder.",
     "lastUsed": "2026-03-24T04:00:00.000Z",
     "successCount": 1
+  },
+  "Email YouTube video 240p no split": {
+    "approach": "steamcmd로 삭제 완료 (Step 1 match)\")",
+    "lastUsed": "2026-03-24T04:28:52.508Z",
+    "successCount": 1
+  },
+  "Email YouTube video 480p 3-part split": {
+    "failedApproaches": [
+      {
+        "approach": "<reason in Korean>",
+        "date": "2026-03-24T04:59:12.845Z"
+      }
+    ]
+  },
+  "Upload YouTube video to Google Drive and email link": {
+    "approach": "or FAILURE: followed by a summary in Korean (include which step worked or failed).",
+    "lastUsed": "2026-03-24T05:28:04.872Z",
+    "successCount": 1
+  },
+  "Stress test echo v2": {
+    "approach": "stress test echo v2 완료",
+    "lastUsed": "2026-03-24T07:27:47.437Z",
+    "successCount": 1
   }
 }

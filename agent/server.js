@@ -184,6 +184,7 @@ async function collectMetrics() {
       drive: caption,
       freeGB: Math.round(freeBytes / 1024 / 1024 / 1024),
       totalGB: Math.round(totalBytes / 1024 / 1024 / 1024),
+      usedPercent: Math.round((1 - freeBytes / totalBytes) * 100),
     });
   }
 
@@ -594,12 +595,15 @@ STEP 3: GUI automation (last resort — screenshot, click, visual interaction)
         // Phase 2: Check full buffer for SUCCESS/FAILURE markers (after prompt text)
         exec(`"${BASH_PATH}" -lc "${TMUX} capture-pane -t ${session} -p -S -"`, { encoding: 'utf8', maxBuffer: 1024 * 1024 }, (err, fullOutput) => {
           const buffer = (fullOutput || '').trim();
-          // Skip the entire prompt portion to avoid matching markers from instructions
+          // Skip past the instructions/rules block to avoid matching example markers
+          // Use lastIndexOf to find the final (= Claude's) SUCCESS/FAILURE, not the example in instructions
           const markerCutoff = buffer.lastIndexOf('=== RULES ===');
-          const rulesEnd = markerCutoff >= 0 ? buffer.indexOf('\n❯', markerCutoff) || buffer.indexOf('\n>', markerCutoff) || buffer.indexOf('\n╭', markerCutoff) : -1;
-          const searchArea = rulesEnd >= 0 ? buffer.slice(rulesEnd) : (markerCutoff >= 0 ? buffer.slice(markerCutoff + 200) : buffer);
-          const successMatch = searchArea.match(/SUCCESS:\s*(.+)/);
-          const failureMatch = searchArea.match(/FAILURE:\s*(.+)/);
+          const searchArea = markerCutoff >= 0 ? buffer.slice(markerCutoff + 200) : buffer;
+          // Find LAST occurrence to skip instruction examples
+          const allSuccess = [...searchArea.matchAll(/SUCCESS:\s*(.+)/g)];
+          const allFailure = [...searchArea.matchAll(/FAILURE:\s*(.+)/g)];
+          const successMatch = allSuccess.length > 0 ? allSuccess[allSuccess.length - 1] : null;
+          const failureMatch = allFailure.length > 0 ? allFailure[allFailure.length - 1] : null;
 
           if (successMatch) {
             console.log(`[ai-task] Claude finished for "${task.id}", collecting results`);

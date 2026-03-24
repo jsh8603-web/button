@@ -56,10 +56,9 @@ const failureMap = new Map();
 function isRateLimited(ip) {
   const entry = failureMap.get(ip);
   if (!entry) return false;
+  if (!entry.lockedUntil) return false;
   if (entry.lockedUntil > Date.now()) return true;
-  if (entry.lockedUntil <= Date.now()) {
-    failureMap.delete(ip);
-  }
+  failureMap.delete(ip);
   return false;
 }
 
@@ -398,7 +397,7 @@ const server = http.createServer(async (req, res) => {
   // --- Status: check if Agent is online, get sessions/projects ---
   if (req.method === 'GET' && pathname === '/api/status') {
     try {
-      const result = await agentRequest('GET', '/status', null, 2000);
+      const result = await agentRequest('GET', '/status', null, 5000);
       if (result.data?.metrics) checkAlerts(result.data.metrics);
       // Cache tasks from status response for offline use
       if (result.data?.tasks) {
