@@ -663,8 +663,20 @@ function finishAiTask(task, status, result) {
   writeTaskQueue(tasks);
   console.log(`[ai-task] Finished "${t.id}" — status: ${status}, result: ${(result || '').slice(0, 100)}`);
 
-  // Schedule editor close after 10 min idle (cancel if user interacts)
-  scheduleEditorClose(task, editorPid);
+  // Close editor window immediately on task completion
+  if (editorPid) {
+    try { process.kill(editorPid); } catch {}
+    console.log(`[ai-task] Closed editor (PID ${editorPid})`);
+  }
+  const project = task.project || 'D:/projects/common-task';
+  const projName = path.basename(project);
+  if (EDITOR_TITLE) {
+    const closeScript = path.join(__dirname, 'close-window.ps1');
+    const titleQuery = `${projName} - ${EDITOR_TITLE}`;
+    exec(`powershell.exe -ExecutionPolicy Bypass -File "${closeScript}" -TitlePrefix "${titleQuery}"`, (err) => {
+      if (err) console.error('[ai-task] close-window error:', err.message);
+    });
+  }
 
   // Kill tmux session and remove from protected list
   const safeName = task.name ? task.name.replace(/[^a-zA-Z0-9_-]/g, '-').replace(/-+/g, '-').slice(0, 40) : task.id.slice(0, 8);
@@ -675,8 +687,6 @@ function finishAiTask(task, status, result) {
   console.log(`[ai-task] Killed and unprotected session: ${session}`);
 
   // Restore tasks.json to original project session
-  const project = task.project || 'D:/projects/common-task';
-  const projName = path.basename(project);
   const projDir = project.replace(/\//g, '\\');
   const vscodeDir = path.join(projDir, '.vscode');
   const tasksFile = path.join(vscodeDir, 'tasks.json');
