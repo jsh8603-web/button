@@ -26,6 +26,14 @@ const PI_PORT = parseInt(process.env.PI_PORT || '7777', 10);
 // Windows path → MSYS path (e.g. D:\projects → /d/projects)
 const toMsys = (p) => p.replace(/\\/g, '/').replace(/^([A-Z]):/i, (_, d) => `/${d.toLowerCase()}`);
 
+// Shared tmux socket — SYSTEM (Task Scheduler) and user session use same server
+const TMUX_SOCK_DIR = '/tmp/button-tmux';
+const TMUX_SOCKET = `${TMUX_SOCK_DIR}/default`;
+const TMUX = `tmux -S ${TMUX_SOCKET}`;
+
+// Ensure socket dir is accessible by all users (SYSTEM creates, user attaches via VS Code)
+exec(`"${BASH_PATH}" -lc "mkdir -p ${TMUX_SOCK_DIR} && chmod 777 ${TMUX_SOCK_DIR} 2>/dev/null"`, () => {});
+
 // Warn if path-sensitive env vars use short command names (may fail without PATH)
 for (const [name, val] of [['EDITOR_CMD', EDITOR_CMD], ['CLAUDE_BIN', CLAUDE_BIN]]) {
   if (!val.includes('/') && !val.includes('\\')) {
@@ -244,14 +252,14 @@ function saveLearned(taskName, approach) {
 const runningAiTasks = new Map();
 
 function cleanupLingeringScheduleSessions() {
-  exec(`"${BASH_PATH}" -lc "tmux list-sessions -F '#S' 2>/dev/null"`, (err, stdout) => {
+  exec(`"${BASH_PATH}" -lc "${TMUX} list-sessions -F '#S' 2>/dev/null"`, (err, stdout) => {
     if (err || !stdout) return;
     const sessions = stdout.trim().split('\n').filter(s => s.startsWith(AI_TASK_PREFIX));
     if (sessions.length === 0) return;
     console.log(`[ai-task] Cleaning up ${sessions.length} lingering schedule session(s): ${sessions.join(', ')}`);
     const closeScript = path.join(__dirname, 'close-window.ps1');
     for (const s of sessions) {
-      exec(`"${BASH_PATH}" -lc "tmux kill-session -t ${s} 2>/dev/null"`, () => {});
+      exec(`"${BASH_PATH}" -lc "${TMUX} kill-session -t ${s} 2>/dev/null"`, () => {});
       // Close editor window for the task's project
       if (EDITOR_TITLE) {
         const safeName = s.slice(AI_TASK_PREFIX.length);
@@ -281,7 +289,7 @@ function scheduleEditorClose(task, editorPid) {
   let snapshot = null;
 
   // Capture current pane output as baseline
-  exec(`"${BASH_PATH}" -lc "tmux capture-pane -t ${session} -p 2>/dev/null | tail -20"`, { encoding: 'utf8' }, (err, out) => {
+  exec(`"${BASH_PATH}" -lc "${TMUX} capture-pane -t ${session} -p 2>/dev/null | tail -20"`, { encoding: 'utf8' }, (err, out) => {
     snapshot = err ? null : out;
   });
 
@@ -291,7 +299,7 @@ function scheduleEditorClose(task, editorPid) {
 
   const interval = setInterval(() => {
     // Check if session still exists
-    exec(`"${BASH_PATH}" -lc "tmux has-session -t ${session} 2>/dev/null"`, (err) => {
+    exec(`"${BASH_PATH}" -lc "${TMUX} has-session -t ${session} 2>/dev/null"`, (err) => {
       if (err) {
         // Session gone — close editor
         clearInterval(interval);
@@ -301,7 +309,7 @@ function scheduleEditorClose(task, editorPid) {
       }
 
       // Capture current output and compare with snapshot
-      exec(`"${BASH_PATH}" -lc "tmux capture-pane -t ${session} -p 2>/dev/null | tail -20"`, { encoding: 'utf8' }, (err2, current) => {
+      exec(`"${BASH_PATH}" -lc "${TMUX} capture-pane -t ${session} -p 2>/dev/null | tail -20"`, { encoding: 'utf8' }, (err2, current) => {
         if (err2) return;
         if (snapshot && current !== snapshot) {
           // User interacted — cancel scheduled close
@@ -314,7 +322,7 @@ function scheduleEditorClose(task, editorPid) {
         if (Date.now() - startTime >= IDLE_TIMEOUT) {
           clearInterval(interval);
           try { process.kill(editorPid); } catch {}
-          exec(`"${BASH_PATH}" -lc "tmux kill-session -t ${session} 2>/dev/null"`, () => {});
+          exec(`"${BASH_PATH}" -lc "${TMUX} kill-session -t ${session} 2>/dev/null"`, () => {});
           console.log(`[ai-task] 10min idle, closed editor (PID ${editorPid}) and killed session ${session}`);
         }
       });
@@ -347,7 +355,7 @@ function executeAiTask(task) {
   fs.writeFileSync(promptFile, prompt);
   const promptFileMsys = toMsys(promptFile);
 
-  const createCmd = `tmux source-file ~/.tmux.conf 2>/dev/null; tmux kill-session -t ${session} 2>/dev/null; tmux new-session -d -s ${session} -c ${projMsys}; tmux send-keys -t ${session} '${claudeBinMsys} --dangerously-skip-permissions --model ${CLAUDE_MODEL}' Enter`;
+  const createCmd = `${TMUX} kill-session -t ${session} 2>/dev/null; ${TMUX} new-session -d -s ${session} -c ${projMsys}; chmod 777 ${TMUX_SOCKET} 2>/dev/null; ${TMUX} source-file ~/.tmux.conf 2>/dev/null; ${TMUX} send-keys -t ${session} '${claudeBinMsys} --dangerously-skip-permissions --model ${CLAUDE_MODEL}' Enter`;
 
   console.log(`[ai-task] Creating tmux session: ${session} in ${project}`);
   exec(`"${BASH_PATH}" -lc "${createCmd}"`, (err) => {
@@ -411,7 +419,7 @@ function executeAiTask(task) {
     let instructionsSent = false;
 
     function capture(cb) {
-      exec(`"${BASH_PATH}" -lc "tmux capture-pane -t ${session} -p -S - | sed '/^[[:space:]]*$/d' | tail -15"`, { encoding: 'utf8' }, cb);
+      exec(`"${BASH_PATH}" -lc "${TMUX} capture-pane -t ${session} -p -S - | sed '/^[[:space:]]*$/d' | tail -15"`, { encoding: 'utf8' }, cb);
     }
 
     function hasTrustPrompt(output) {
@@ -439,7 +447,7 @@ function executeAiTask(task) {
           if (!trustHandled && hasTrustPrompt(output)) {
             trustHandled = true;
             console.log(`[ai-task] Trust prompt detected, accepting...`);
-            exec(`"${BASH_PATH}" -lc "tmux send-keys -t ${session} Enter"`, () => {});
+            exec(`"${BASH_PATH}" -lc "${TMUX} send-keys -t ${session} Enter"`, () => {});
             setTimeout(poll, 3000);
             return;
           }
@@ -455,12 +463,12 @@ function executeAiTask(task) {
               console.log(`[ai-task] Claude ready, sending /remote-control then instructions for "${task.id}"`);
             }
             // Send /remote-control first (like proj sessions), then instructions
-            exec(`"${BASH_PATH}" -lc "tmux send-keys -t ${session} '/remote-control' Enter"`, (err) => {
+            exec(`"${BASH_PATH}" -lc "${TMUX} send-keys -t ${session} '/remote-control' Enter"`, (err) => {
               if (err) console.error(`[ai-task] /remote-control send error:`, err.message);
               else console.log(`[ai-task] Sent /remote-control to ${session}`);
               // Wait for /remote-control to be processed, then send instructions
               setTimeout(() => {
-                exec(`"${BASH_PATH}" -lc "tmux load-buffer ${promptFileMsys} && tmux paste-buffer -t ${session} && sleep 1 && tmux send-keys -t ${session} Enter && sleep 1 && tmux send-keys -t ${session} Enter"`, (err) => {
+                exec(`"${BASH_PATH}" -lc "${TMUX} load-buffer ${promptFileMsys} && ${TMUX} paste-buffer -t ${session} && sleep 1 && ${TMUX} send-keys -t ${session} Enter && sleep 1 && ${TMUX} send-keys -t ${session} Enter"`, (err) => {
                   if (err) console.error(`[ai-task] Send error:`, err.message);
                   try { fs.unlinkSync(promptFile); } catch {}
                 });
@@ -480,7 +488,7 @@ function executeAiTask(task) {
         }
 
         // Phase 2: Check full buffer for SUCCESS/FAILURE markers (after prompt text)
-        exec(`"${BASH_PATH}" -lc "tmux capture-pane -t ${session} -p -S -"`, { encoding: 'utf8', maxBuffer: 1024 * 1024 }, (err, fullOutput) => {
+        exec(`"${BASH_PATH}" -lc "${TMUX} capture-pane -t ${session} -p -S -"`, { encoding: 'utf8', maxBuffer: 1024 * 1024 }, (err, fullOutput) => {
           const buffer = (fullOutput || '').trim();
           // Skip the prompt portion to avoid matching "SUCCESS: <summary>" from instructions
           const markerCutoff = buffer.lastIndexOf('At the end, output exactly');
@@ -713,13 +721,11 @@ app.get('/status', verifySecret, async (req, res) => {
   const activeSessions = await getActiveSessions();
   let protectedList = getProtectedSessions();
 
-  // Clean stale protected entries
-  if (activeSessions.length > 0) {
-    const cleaned = protectedList.filter(s => activeSessions.includes(s));
-    if (cleaned.length !== protectedList.length) {
-      protectedList = cleaned;
-      setProtectedSessions(protectedList);
-    }
+  // Clean stale protected entries (also when no sessions exist)
+  const cleaned = protectedList.filter(s => activeSessions.includes(s));
+  if (cleaned.length !== protectedList.length) {
+    protectedList = cleaned;
+    setProtectedSessions(protectedList);
   }
 
   const sessions = activeSessions.map(name => ({
@@ -763,7 +769,7 @@ const AI_TASK_PREFIX = 'schedule-';
 function buildTasksJson(sessionOrName) {
   // If already a full session name (schedule- or btn-), use as-is; otherwise prepend SESSION_PREFIX
   const session = sessionOrName.startsWith(AI_TASK_PREFIX) ? sessionOrName : `${SESSION_PREFIX}${sessionOrName}`;
-  const attachCmd = `timeout=30; while [ $timeout -gt 0 ] && ! tmux has-session -t ${session} 2>/dev/null; do sleep 0.5; timeout=$((timeout-1)); done; tmux attach-session -t ${session}`;
+  const attachCmd = `timeout=30; while [ $timeout -gt 0 ] && ! ${TMUX} has-session -t ${session} 2>/dev/null; do sleep 0.5; timeout=$((timeout-1)); done; ${TMUX} attach-session -t ${session}`;
   return {
     version: "2.0.0",
     tasks: [{
@@ -797,7 +803,7 @@ function setProtectedSessions(list) {
 
 async function getActiveSessions() {
   return new Promise((resolve) => {
-    exec(`"${BASH_PATH}" -lc "tmux list-sessions -F '#S' 2>/dev/null"`, (err, stdout) => {
+    exec(`"${BASH_PATH}" -lc "${TMUX} list-sessions -F '#S' 2>/dev/null"`, (err, stdout) => {
       if (err) return resolve([]);
       const all = stdout.trim().split('\n').filter(Boolean);
       const sessions = [];
@@ -870,7 +876,7 @@ function openProjectInEditor(name) {
     const projMsys = toMsys(PROJECTS_DIR);
     const claudeBinMsys = toMsys(CLAUDE_BIN);
 
-    const createCmd = `tmux source-file ~/.tmux.conf 2>/dev/null; tmux kill-session -t ${session} 2>/dev/null; tmux new-session -d -s ${session} -c ${projMsys}/${name}; tmux send-keys -t ${session} '${claudeBinMsys} --dangerously-skip-permissions --model ${CLAUDE_MODEL} --name ${name}' Enter`;
+    const createCmd = `${TMUX} kill-session -t ${session} 2>/dev/null; ${TMUX} new-session -d -s ${session} -c ${projMsys}/${name}; chmod 777 ${TMUX_SOCKET} 2>/dev/null; ${TMUX} source-file ~/.tmux.conf 2>/dev/null; ${TMUX} send-keys -t ${session} '${claudeBinMsys} --dangerously-skip-permissions --model ${CLAUDE_MODEL} --name ${name}' Enter`;
     exec(`"${BASH_PATH}" -lc "${createCmd}"`, (err) => {
       if (err) {
         console.error('[proj] tmux session create error:', err.message);
@@ -893,7 +899,7 @@ function openProjectInEditor(name) {
       let lastReadyOutput = null;
 
       function capturePaneTail(cb) {
-        exec(`"${BASH_PATH}" -lc "tmux capture-pane -t ${session} -p -S - | sed '/^[[:space:]]*$/d' | tail -15"`, { encoding: 'utf8' }, cb);
+        exec(`"${BASH_PATH}" -lc "${TMUX} capture-pane -t ${session} -p -S - | sed '/^[[:space:]]*$/d' | tail -15"`, { encoding: 'utf8' }, cb);
       }
 
       function hasTrustPrompt(output) {
@@ -906,11 +912,12 @@ function openProjectInEditor(name) {
       }
 
       let trustHandled = false;
+      let captureErrors = 0;
 
       function sendRemoteControl() {
         const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
         console.log(`[proj] Claude stable in ${elapsed}s, sending /remote-control`);
-        exec(`"${BASH_PATH}" -lc "tmux send-keys -t ${session} '/remote-control' Enter"`, (err) => {
+        exec(`"${BASH_PATH}" -lc "${TMUX} send-keys -t ${session} '/remote-control' Enter"`, (err) => {
           if (err) console.error('[proj] /remote-control send error:', err.message);
           else console.log(`[proj] Sent /remote-control to ${session}`);
 
@@ -929,34 +936,53 @@ function openProjectInEditor(name) {
         });
       }
 
+      function cleanupFailedSession() {
+        console.log(`[proj] Cleaning up failed session: ${session}`);
+        exec(`"${BASH_PATH}" -lc "${TMUX} kill-session -t ${session} 2>/dev/null"`, () => {});
+        setProtectedSessions(getProtectedSessions().filter(s => s !== name));
+      }
+
       function waitForClaude() {
         if (Date.now() - startTime > MAX_WAIT) {
           capturePaneTail((err, stdout) => {
+            const output = (stdout || '').trim();
             console.error(`[proj] Claude did not start within ${MAX_WAIT / 1000}s in ${session}`);
-            console.error(`[proj] Pane content at timeout:\n${(stdout || '(empty)').trim()}`);
-            // Send /remote-control anyway — Claude may start later
-            console.log(`[proj] Sending /remote-control despite timeout`);
-            exec(`"${BASH_PATH}" -lc "tmux send-keys -t ${session} '/remote-control' Enter"`, (err) => {
-              if (err) console.error('[proj] /remote-control send error:', err.message);
-              else console.log(`[proj] Sent /remote-control to ${session} (timeout fallback)`);
-            });
+            console.error(`[proj] Pane content at timeout:\n${output || '(empty)'}`);
+            // If pane shows bare shell (no Claude indicators), clean up
+            if (!output || (!output.includes('\u256D') && !output.includes('human') && !output.includes('Claude'))) {
+              cleanupFailedSession();
+            } else {
+              // Claude may be loading — send /remote-control as fallback
+              console.log(`[proj] Sending /remote-control despite timeout`);
+              exec(`"${BASH_PATH}" -lc "${TMUX} send-keys -t ${session} '/remote-control' Enter"`, (err) => {
+                if (err) console.error('[proj] /remote-control send error:', err.message);
+                else console.log(`[proj] Sent /remote-control to ${session} (timeout fallback)`);
+              });
+            }
           });
           return;
         }
 
         capturePaneTail((err, stdout) => {
           if (err) {
-            console.error('[proj] capture-pane error:', err.message);
+            captureErrors++;
+            console.error(`[proj] capture-pane error (${captureErrors}):`, err.message);
+            if (captureErrors >= 5) {
+              console.error(`[proj] Session ${session} appears dead after ${captureErrors} capture errors`);
+              cleanupFailedSession();
+              return;
+            }
             setTimeout(waitForClaude, POLL_INTERVAL);
             return;
           }
+          captureErrors = 0;
           const output = (stdout || '').trim();
           const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
 
           if (!trustHandled && hasTrustPrompt(output)) {
             trustHandled = true;
             console.log(`[proj] Trust prompt detected at ${elapsed}s, sending Enter to accept`);
-            exec(`"${BASH_PATH}" -lc "tmux send-keys -t ${session} Enter"`, () => {});
+            exec(`"${BASH_PATH}" -lc "${TMUX} send-keys -t ${session} Enter"`, () => {});
             lastReadyOutput = null;
             setTimeout(waitForClaude, POLL_INTERVAL);
             return;
@@ -1230,7 +1256,7 @@ app.post('/run', verifySecret, (req, res) => {
       if (running.editorPid) try { process.kill(running.editorPid); } catch {}
       if (running.editorCloseTimer) clearInterval(running.editorCloseTimer);
       runningAiTasks.delete(taskId);
-      exec(`"${BASH_PATH}" -lc "tmux kill-session -t ${session} 2>/dev/null"`, () => {});
+      exec(`"${BASH_PATH}" -lc "${TMUX} kill-session -t ${session} 2>/dev/null"`, () => {});
       setProtectedSessions(getProtectedSessions().filter(s => s !== session));
       if (EDITOR_TITLE) {
         const projName = running.task.project ? path.basename(running.task.project) : safeName;
