@@ -27,12 +27,18 @@ const PI_PORT = parseInt(process.env.PI_PORT || '7777', 10);
 const toMsys = (p) => p.replace(/\\/g, '/').replace(/^([A-Z]):/i, (_, d) => `/${d.toLowerCase()}`);
 
 // Shared tmux socket — SYSTEM (Task Scheduler) and user session use same server
+// MSYS2 /tmp maps to C:\msys64\tmp — use Windows path for icacls ACL
 const TMUX_SOCK_DIR = '/tmp/button-tmux';
+const TMUX_SOCK_DIR_WIN = 'C:\\msys64\\tmp\\button-tmux';
 const TMUX_SOCKET = `${TMUX_SOCK_DIR}/default`;
+const TMUX_SOCKET_WIN = `${TMUX_SOCK_DIR_WIN}\\default`;
 const TMUX = `tmux -S ${TMUX_SOCKET}`;
 
 // Ensure socket dir is accessible by all users (SYSTEM creates, user attaches via VS Code)
-exec(`"${BASH_PATH}" -lc "mkdir -p ${TMUX_SOCK_DIR} && chmod 777 ${TMUX_SOCK_DIR} 2>/dev/null"`, () => {});
+// chmod doesn't work for Windows ACLs on sockets — use icacls to grant Everyone Full Control
+exec(`"${BASH_PATH}" -lc "mkdir -p ${TMUX_SOCK_DIR}"`, () => {
+  exec(`icacls "${TMUX_SOCK_DIR_WIN}" /grant Everyone:F /T /Q`, () => {});
+});
 
 // Warn if path-sensitive env vars use short command names (may fail without PATH)
 for (const [name, val] of [['EDITOR_CMD', EDITOR_CMD], ['CLAUDE_BIN', CLAUDE_BIN]]) {
@@ -355,10 +361,12 @@ function executeAiTask(task) {
   fs.writeFileSync(promptFile, prompt);
   const promptFileMsys = toMsys(promptFile);
 
-  const createCmd = `${TMUX} kill-session -t ${session} 2>/dev/null; ${TMUX} new-session -d -s ${session} -c ${projMsys}; chmod 777 ${TMUX_SOCKET} 2>/dev/null; ${TMUX} source-file ~/.tmux.conf 2>/dev/null; ${TMUX} send-keys -t ${session} '${claudeBinMsys} --dangerously-skip-permissions --model ${CLAUDE_MODEL}' Enter`;
+  const createCmd = `${TMUX} kill-session -t ${session} 2>/dev/null; ${TMUX} new-session -d -s ${session} -c ${projMsys}; ${TMUX} source-file ~/.tmux.conf 2>/dev/null; ${TMUX} send-keys -t ${session} '${claudeBinMsys} --dangerously-skip-permissions --model ${CLAUDE_MODEL}' Enter`;
 
   console.log(`[ai-task] Creating tmux session: ${session} in ${project}`);
   exec(`"${BASH_PATH}" -lc "${createCmd}"`, (err) => {
+    // Grant socket access to all users (SYSTEM→user cross-session)
+    exec(`icacls "${TMUX_SOCKET_WIN}" /grant Everyone:F /Q`, () => {});
     if (err) {
       console.error(`[ai-task] Session create error:`, err.message);
       finishAiTask(task, 'failed', `Session create error: ${err.message}`);
@@ -428,7 +436,7 @@ function executeAiTask(task) {
 
     function hasClaudePrompt(output) {
       if (hasTrustPrompt(output)) return false;
-      return output.includes('>') || output.includes('\u256D') || output.includes('human');
+      return output.includes('\u276F') || output.includes('>') || output.includes('\u256D') || output.includes('human');
     }
 
     function poll() {
@@ -463,17 +471,35 @@ function executeAiTask(task) {
               console.log(`[ai-task] Claude ready, sending /remote-control then instructions for "${task.id}"`);
             }
             // Send /remote-control first (like proj sessions), then instructions
-            exec(`"${BASH_PATH}" -lc "${TMUX} send-keys -t ${session} '/remote-control' Enter"`, (err) => {
-              if (err) console.error(`[ai-task] /remote-control send error:`, err.message);
-              else console.log(`[ai-task] Sent /remote-control to ${session}`);
-              // Wait for /remote-control to be processed, then send instructions
-              setTimeout(() => {
-                exec(`"${BASH_PATH}" -lc "${TMUX} load-buffer ${promptFileMsys} && ${TMUX} paste-buffer -t ${session} && sleep 1 && ${TMUX} send-keys -t ${session} Enter && sleep 1 && ${TMUX} send-keys -t ${session} Enter"`, (err) => {
-                  if (err) console.error(`[ai-task] Send error:`, err.message);
-                  try { fs.unlinkSync(promptFile); } catch {}
-                });
-              }, 3000);
-            });
+            function sendRcWithRetry(attempt = 1) {
+              const MAX_RC = 3;
+              exec(`"${BASH_PATH}" -lc "${TMUX} send-keys -t ${session} '/remote-control' Enter"`, (err) => {
+                if (err) console.error(`[ai-task] /remote-control send error:`, err.message);
+                else console.log(`[ai-task] Sent /remote-control to ${session} (attempt ${attempt}/${MAX_RC})`);
+                if (attempt === 1) {
+                  // Send instructions after first /remote-control attempt (don't block on verify)
+                  setTimeout(() => {
+                    exec(`"${BASH_PATH}" -lc "${TMUX} load-buffer ${promptFileMsys} && ${TMUX} paste-buffer -t ${session} && sleep 1 && ${TMUX} send-keys -t ${session} Enter && sleep 1 && ${TMUX} send-keys -t ${session} Enter"`, (err) => {
+                      if (err) console.error(`[ai-task] Send error:`, err.message);
+                      try { fs.unlinkSync(promptFile); } catch {}
+                    });
+                  }, 3000);
+                }
+                // Verify /remote-control took effect, retry if needed
+                setTimeout(() => {
+                  exec(`"${BASH_PATH}" -lc "${TMUX} capture-pane -t ${session} -p -S - | sed '/^[[:space:]]*$/d' | tail -15"`, { encoding: 'utf8' }, (err, stdout) => {
+                    if (err) return;
+                    const pane = (stdout || '').trim();
+                    const hasRemote = pane.includes('remote') || pane.includes('Remote');
+                    if (!hasRemote && attempt < MAX_RC) {
+                      console.log(`[ai-task] /remote-control not detected, retrying (${attempt + 1}/${MAX_RC})`);
+                      sendRcWithRetry(attempt + 1);
+                    }
+                  });
+                }, 5000);
+              });
+            }
+            sendRcWithRetry();
             // Wait for Claude to start working before checking completion
             setTimeout(poll, 20000);
             return;
@@ -876,8 +902,10 @@ function openProjectInEditor(name) {
     const projMsys = toMsys(PROJECTS_DIR);
     const claudeBinMsys = toMsys(CLAUDE_BIN);
 
-    const createCmd = `${TMUX} kill-session -t ${session} 2>/dev/null; ${TMUX} new-session -d -s ${session} -c ${projMsys}/${name}; chmod 777 ${TMUX_SOCKET} 2>/dev/null; ${TMUX} source-file ~/.tmux.conf 2>/dev/null; ${TMUX} send-keys -t ${session} '${claudeBinMsys} --dangerously-skip-permissions --model ${CLAUDE_MODEL} --name ${name}' Enter`;
+    const createCmd = `${TMUX} kill-session -t ${session} 2>/dev/null; ${TMUX} new-session -d -s ${session} -c ${projMsys}/${name}; ${TMUX} source-file ~/.tmux.conf 2>/dev/null; ${TMUX} send-keys -t ${session} '${claudeBinMsys} --dangerously-skip-permissions --model ${CLAUDE_MODEL} --name ${name}' Enter`;
     exec(`"${BASH_PATH}" -lc "${createCmd}"`, (err) => {
+      // Grant socket access to all users (SYSTEM→user cross-session)
+      exec(`icacls "${TMUX_SOCKET_WIN}" /grant Everyone:F /Q`, () => {});
       if (err) {
         console.error('[proj] tmux session create error:', err.message);
         return;
@@ -908,15 +936,17 @@ function openProjectInEditor(name) {
 
       function hasClaudePrompt(output) {
         if (hasTrustPrompt(output)) return false;
-        return output.includes('>') || output.includes('\u256D') || output.includes('human');
+        return output.includes('\u276F') || output.includes('>') || output.includes('\u256D') || output.includes('human');
       }
 
       let trustHandled = false;
       let captureErrors = 0;
 
-      function sendRemoteControl() {
+      function sendRemoteControl(attempt = 1) {
+        const MAX_RC_ATTEMPTS = 3;
+        const RC_VERIFY_DELAY = 5000;
         const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-        console.log(`[proj] Claude stable in ${elapsed}s, sending /remote-control`);
+        console.log(`[proj] Claude stable in ${elapsed}s, sending /remote-control (attempt ${attempt}/${MAX_RC_ATTEMPTS})`);
         exec(`"${BASH_PATH}" -lc "${TMUX} send-keys -t ${session} '/remote-control' Enter"`, (err) => {
           if (err) console.error('[proj] /remote-control send error:', err.message);
           else console.log(`[proj] Sent /remote-control to ${session}`);
@@ -928,11 +958,17 @@ function openProjectInEditor(name) {
                 return;
               }
               const pane = (stdout || '').trim();
-              const alive = !pane.includes('$') || pane.includes('remote');
-              console.log(`[proj] Health check (${session}): ${alive ? 'OK' : 'Claude may have exited'}`);
-              if (!alive) console.log(`[proj] Pane content:\n${pane}`);
+              const hasRemote = pane.includes('remote') || pane.includes('Remote');
+              const alive = !pane.includes('$') || hasRemote;
+              console.log(`[proj] Health check (${session}): ${alive ? 'OK' : 'Claude may have exited'}, remote=${hasRemote}`);
+              if (!hasRemote && alive && attempt < MAX_RC_ATTEMPTS) {
+                console.log(`[proj] /remote-control not detected, retrying (${attempt + 1}/${MAX_RC_ATTEMPTS})`);
+                sendRemoteControl(attempt + 1);
+              } else if (!alive) {
+                console.log(`[proj] Pane content:\n${pane}`);
+              }
             });
-          }, 5000);
+          }, RC_VERIFY_DELAY);
         });
       }
 
