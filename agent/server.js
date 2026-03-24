@@ -1,7 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcrypt');
-const { exec, spawn } = require('child_process');
+const { exec } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
@@ -37,8 +37,11 @@ const TMUX = `tmux -S ${TMUX_SOCKET}`;
 
 // Ensure socket dir is accessible by all users (SYSTEM creates, user attaches via VS Code)
 // chmod doesn't work for Windows ACLs on sockets — use icacls to grant Everyone Full Control
-exec(`"${BASH_PATH}" -lc "mkdir -p ${TMUX_SOCK_DIR}"`, () => {
-  exec(`icacls "${TMUX_SOCK_DIR_WIN}" /grant Everyone:F /T /Q`, () => {});
+exec(`"${BASH_PATH}" -lc "mkdir -p ${TMUX_SOCK_DIR}"`, (err) => {
+  if (err) console.error('[boot] Socket dir error:', err.message);
+  exec(`icacls "${TMUX_SOCK_DIR_WIN}" /grant Everyone:F /T /Q`, (err2) => {
+    if (err2) console.error('[boot] Socket ACL error:', err2.message);
+  });
 });
 
 // Warn if path-sensitive env vars use short command names (may fail without PATH)
@@ -269,6 +272,17 @@ function saveLearned(taskName, approach, failed = false) {
   console.log(`[ai-task] Saved ${failed ? 'failed' : 'successful'} approach for "${taskName}"`);
 }
 
+// --- Tmux Output Detection ---
+
+function hasTrustPrompt(output) {
+  return output.includes('trust this folder') || output.includes('I trust');
+}
+
+function hasClaudePrompt(output) {
+  if (hasTrustPrompt(output)) return false;
+  return output.includes('\u276F') || output.includes('>') || output.includes('\u256D') || output.includes('human');
+}
+
 // --- AI Task Execution ---
 
 // Track multiple concurrent AI tasks: taskId → { task, editorPid, editorCloseTimer }
@@ -353,6 +367,9 @@ function scheduleEditorClose(task, editorPid) {
   }, CHECK_INTERVAL);
 
   setTimeout(() => { clearInterval(interval); }, IDLE_TIMEOUT + CHECK_INTERVAL);
+
+  const entry = runningAiTasks.get(task.id);
+  if (entry) entry.editorCloseTimer = interval;
 }
 
 function executeAiTask(task) {
@@ -487,15 +504,6 @@ STEP 3: GUI automation (last resort — screenshot, click, visual interaction)
 
     function capture(cb) {
       exec(`"${BASH_PATH}" -lc "${TMUX} capture-pane -t ${session} -p -S - | sed '/^[[:space:]]*$/d' | tail -15"`, { encoding: 'utf8' }, cb);
-    }
-
-    function hasTrustPrompt(output) {
-      return output.includes('trust this folder') || output.includes('I trust');
-    }
-
-    function hasClaudePrompt(output) {
-      if (hasTrustPrompt(output)) return false;
-      return output.includes('\u276F') || output.includes('>') || output.includes('\u256D') || output.includes('human');
     }
 
     let promptIdleCount = 0;
@@ -1057,14 +1065,6 @@ function openProjectInEditor(name) {
         exec(`"${BASH_PATH}" -lc "${TMUX} capture-pane -t ${session} -p -S - | sed '/^[[:space:]]*$/d' | tail -15"`, { encoding: 'utf8' }, cb);
       }
 
-      function hasTrustPrompt(output) {
-        return output.includes('trust this folder') || output.includes('I trust');
-      }
-
-      function hasClaudePrompt(output) {
-        if (hasTrustPrompt(output)) return false;
-        return output.includes('\u276F') || output.includes('>') || output.includes('\u256D') || output.includes('human');
-      }
 
       let trustHandled = false;
       let captureErrors = 0;
@@ -1361,7 +1361,7 @@ app.post('/run', verifySecret, (req, res) => {
         wakeRes.on('data', c => d += c);
         wakeRes.on('end', () => console.log(`[task] Registered wake-at on Pi: ${wakeAtISO}`, d));
       });
-      wakeReq.on('error', (e) => console.error(`[task] Failed to register wake-at:`, e.message));
+      wakeReq.on('error', (e) => { wakeReq.destroy(); console.error(`[task] Failed to register wake-at:`, e.message); });
       wakeReq.on('timeout', () => { wakeReq.destroy(); console.error('[task] wake-at request timed out'); });
       wakeReq.write(postData);
       wakeReq.end();

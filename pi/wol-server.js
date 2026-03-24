@@ -57,9 +57,8 @@ function isRateLimited(ip) {
   const entry = failureMap.get(ip);
   if (!entry) return false;
   if (entry.lockedUntil > Date.now()) return true;
-  if (entry.lockedUntil > 0 && entry.lockedUntil <= Date.now()) {
+  if (entry.lockedUntil <= Date.now()) {
     failureMap.delete(ip);
-    return false;
   }
   return false;
 }
@@ -96,6 +95,13 @@ function clearWakeAt() { try { fs.unlinkSync(WAKE_AT_FILE); } catch {} }
 const TASK_CACHE_FILE = path.join(__dirname, '.task-cache.json');
 function loadTaskCache() { try { return JSON.parse(fs.readFileSync(TASK_CACHE_FILE, 'utf8')); } catch { return null; } }
 function saveTaskCache(data) { fs.writeFileSync(TASK_CACHE_FILE, JSON.stringify(data)); }
+
+async function refreshTaskCache() {
+  try {
+    const listResult = await agentRequest('POST', '/run', { action: 'task-list' });
+    if (listResult.data?.tasks) saveTaskCache({ tasks: listResult.data.tasks, cachedAt: new Date().toISOString() });
+  } catch {}
+}
 
 // --- Cron expression matcher (no dependencies) ---
 // Format: "min hour dayOfMonth month dayOfWeek"
@@ -342,7 +348,7 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'POST' && pathname === '/api/auth') {
     const ip = getClientIp(req);
     if (isRateLimited(ip)) {
-      return sendJson(res, 429, { error: 'rate_limited' });
+      return sendJson(res, 429, { ok: false, error: 'rate_limited' });
     }
 
     try {
@@ -351,7 +357,7 @@ const server = http.createServer(async (req, res) => {
 
       if (!pin || typeof pin !== 'string' || !PIN_HASH) {
         recordFailure(ip);
-        return sendJson(res, 401, { error: 'invalid' });
+        return sendJson(res, 401, { ok: false, error: 'invalid' });
       }
 
       // Forward PIN verification to Agent (it has bcrypt)
@@ -365,7 +371,7 @@ const server = http.createServer(async (req, res) => {
 
       if (!valid) {
         recordFailure(ip);
-        return sendJson(res, 401, { error: 'invalid' });
+        return sendJson(res, 401, { ok: false, error: 'invalid' });
       }
 
       failureMap.delete(ip);
@@ -377,7 +383,7 @@ const server = http.createServer(async (req, res) => {
 
       return sendJson(res, 200, { ok: true, token });
     } catch {
-      return sendJson(res, 400, { error: 'invalid' });
+      return sendJson(res, 400, { ok: false, error: 'invalid' });
     }
   }
 
@@ -386,7 +392,7 @@ const server = http.createServer(async (req, res) => {
   const isLocalhost = clientIp === '127.0.0.1' || clientIp === '::1' || clientIp === '::ffff:127.0.0.1';
   const isAgent = clientIp === AGENT_HOST || clientIp === `::ffff:${AGENT_HOST}`;
   if (!isLocalhost && !isAgent && !requireAuth(req)) {
-    return sendJson(res, 401, { error: 'unauthorized' });
+    return sendJson(res, 401, { ok: false, error: 'unauthorized' });
   }
 
   // --- Status: check if Agent is online, get sessions/projects ---
@@ -446,14 +452,14 @@ const server = http.createServer(async (req, res) => {
         } else if (body.delayMinutes) {
           wakeAt = new Date(Date.now() + body.delayMinutes * 60_000).toISOString();
         } else {
-          return sendJson(res, 400, { error: 'at (ISO8601) or delayMinutes required' });
+          return sendJson(res, 400, { ok: false, error: 'at (ISO8601) or delayMinutes required' });
         }
         const timer = { active: true, wakeAt, createdAt: new Date().toISOString() };
         saveWakeAt(timer);
         console.log(`[wake-at] Scheduled WOL at ${wakeAt}`);
         return sendJson(res, 201, timer);
       } catch {
-        return sendJson(res, 400, { error: 'invalid' });
+        return sendJson(res, 400, { ok: false, error: 'invalid' });
       }
     }
     if (req.method === 'DELETE') {
@@ -480,10 +486,7 @@ const server = http.createServer(async (req, res) => {
         try {
           const result = await agentRequest('POST', '/run', taskBody);
           if (result.data?.ok) {
-            try {
-              const listResult = await agentRequest('POST', '/run', { action: 'task-list' });
-              if (listResult.data?.tasks) saveTaskCache({ tasks: listResult.data.tasks, cachedAt: new Date().toISOString() });
-            } catch {}
+            await refreshTaskCache();
             console.log(`[deferred] Task sent to Agent immediately, wake-at scheduled`);
             return sendJson(res, 200, { ok: true, task: result.data.task, wakeAt, message: 'Task registered and wake scheduled' });
           }
@@ -505,12 +508,7 @@ const server = http.createServer(async (req, res) => {
         }
         // After successful task-add, refresh cache so offline status shows updated tasks
         if (body.action === 'task-add' && result.data?.ok) {
-          try {
-            const listResult = await agentRequest('POST', '/run', { action: 'task-list' });
-            if (listResult.data?.tasks) {
-              saveTaskCache({ tasks: listResult.data.tasks, cachedAt: new Date().toISOString() });
-            }
-          } catch { /* best effort */ }
+          await refreshTaskCache();
         }
         return sendJson(res, result.status, result.data);
       } catch {
@@ -561,14 +559,14 @@ const server = http.createServer(async (req, res) => {
       try {
         const body = await parseBody(req);
         const { action, cron, label, enabled } = body;
-        if (!action || !cron || !label) return sendJson(res, 400, { error: 'action, cron, label required' });
+        if (!action || !cron || !label) return sendJson(res, 400, { ok: false, error: 'action, cron, label required' });
         const schedule = { id: crypto.randomUUID(), type: 'power', action, cron, label, enabled: enabled !== false };
         const list = loadSchedules();
         list.push(schedule);
         saveSchedules(list);
         return sendJson(res, 201, schedule);
       } catch {
-        return sendJson(res, 400, { error: 'invalid' });
+        return sendJson(res, 400, { ok: false, error: 'invalid' });
       }
     }
   }
@@ -579,7 +577,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'DELETE') {
       const list = loadSchedules();
       const next = list.filter(s => s.id !== id);
-      if (next.length === list.length) return sendJson(res, 404, { error: 'Not found' });
+      if (next.length === list.length) return sendJson(res, 404, { ok: false, error: 'Not found' });
       saveSchedules(next);
       return sendJson(res, 200, { ok: true });
     }
@@ -588,7 +586,7 @@ const server = http.createServer(async (req, res) => {
         const body = await parseBody(req);
         const list = loadSchedules();
         const idx = list.findIndex(s => s.id === id);
-        if (idx === -1) return sendJson(res, 404, { error: 'Not found' });
+        if (idx === -1) return sendJson(res, 404, { ok: false, error: 'Not found' });
         const { action, cron, label, enabled } = body;
         if (action !== undefined) list[idx].action = action;
         if (cron !== undefined) list[idx].cron = cron;
@@ -597,12 +595,12 @@ const server = http.createServer(async (req, res) => {
         saveSchedules(list);
         return sendJson(res, 200, list[idx]);
       } catch {
-        return sendJson(res, 400, { error: 'invalid' });
+        return sendJson(res, 400, { ok: false, error: 'invalid' });
       }
     }
   }
 
-  sendJson(res, 404, { error: 'Not found' });
+  sendJson(res, 404, { ok: false, error: 'Not found' });
 });
 
 let lastScheduleMinute = -1;
