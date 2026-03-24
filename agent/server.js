@@ -408,9 +408,7 @@ STEP 3: GUI automation (last resort — screenshot, click, visual interaction)
 - NEVER close VS Code windows or editor windows that belong to other projects.
 - If you need user credentials, login info, or a decision you cannot make, clearly state what you need and WAIT for the user to respond. The user will check this session via remote.
 - Progress updates and status messages: write in Korean (한국어). Code, commands, and file operations stay in English.
-- At the end, output exactly one of these markers on its own line:
-  SUCCESS: <summary in Korean, include which step worked>
-  FAILURE: <reason in Korean>
+- At the end, output one result marker on its own line. Use the prefix SUCCESS: or FAILURE: followed by a summary in Korean (include which step worked or failed).
 `;
 
   const promptFile = path.join(__dirname, `.ai-task-prompt-${shortId}.txt`);
@@ -584,9 +582,10 @@ STEP 3: GUI automation (last resort — screenshot, click, visual interaction)
         // Phase 2: Check full buffer for SUCCESS/FAILURE markers (after prompt text)
         exec(`"${BASH_PATH}" -lc "${TMUX} capture-pane -t ${session} -p -S -"`, { encoding: 'utf8', maxBuffer: 1024 * 1024 }, (err, fullOutput) => {
           const buffer = (fullOutput || '').trim();
-          // Skip the prompt portion to avoid matching "SUCCESS: <summary>" from instructions
-          const markerCutoff = buffer.lastIndexOf('At the end, output exactly');
-          const searchArea = markerCutoff >= 0 ? buffer.slice(markerCutoff + 80) : buffer;
+          // Skip the entire prompt portion to avoid matching markers from instructions
+          const markerCutoff = buffer.lastIndexOf('=== RULES ===');
+          const rulesEnd = markerCutoff >= 0 ? buffer.indexOf('\n❯', markerCutoff) || buffer.indexOf('\n>', markerCutoff) || buffer.indexOf('\n╭', markerCutoff) : -1;
+          const searchArea = rulesEnd >= 0 ? buffer.slice(rulesEnd) : (markerCutoff >= 0 ? buffer.slice(markerCutoff + 200) : buffer);
           const successMatch = searchArea.match(/SUCCESS:\s*(.+)/);
           const failureMatch = searchArea.match(/FAILURE:\s*(.+)/);
 
