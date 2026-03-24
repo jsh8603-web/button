@@ -417,7 +417,8 @@ STEP 3: GUI automation (last resort — screenshot, click, visual interaction)
   fs.writeFileSync(promptFile, prompt);
   const promptFileMsys = toMsys(promptFile);
 
-  const createCmd = `${TMUX} kill-session -t ${session} 2>/dev/null; ${TMUX} new-session -d -s ${session} -c ${projMsys}; ${TMUX} source-file ~/.tmux.conf 2>/dev/null; ${TMUX} send-keys -t ${session} '${claudeBinMsys} --dangerously-skip-permissions --model ${AI_TASK_MODEL}' Enter`;
+  const aiModel = task.project ? CLAUDE_MODEL : AI_TASK_MODEL; // project specified → opus, common-task → sonnet
+  const createCmd = `${TMUX} kill-session -t ${session} 2>/dev/null; ${TMUX} new-session -d -s ${session} -c ${projMsys}; ${TMUX} source-file ~/.tmux.conf 2>/dev/null; ${TMUX} send-keys -t ${session} '${claudeBinMsys} --dangerously-skip-permissions --model ${aiModel}' Enter`;
 
   console.log(`[ai-task] Creating tmux session: ${session} in ${project}`);
   exec(`"${BASH_PATH}" -lc "${createCmd}"`, (err) => {
