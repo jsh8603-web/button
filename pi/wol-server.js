@@ -468,13 +468,33 @@ const server = http.createServer(async (req, res) => {
     try {
       const body = await parseBody(req);
 
-      // Scheduled delivery: task-add with deliverAt → always defer
+      // Scheduled delivery: task-add with deliverAt → send to Agent now if online, schedule WOL for wake
       if (body.action === 'task-add' && body.deliverAt) {
-        const deferred = loadDeferred();
-        deferred.push({ body, createdAt: new Date().toISOString(), deliverAt: body.deliverAt, wolSent: false });
-        saveDeferred(deferred);
-        console.log(`[deferred] Scheduled task-add for delivery at ${body.deliverAt}`);
-        return sendJson(res, 202, { ok: true, deferred: true, deliverAt: body.deliverAt, message: 'Task scheduled for delivery' });
+        // Schedule WOL wake-at for deliverAt time (in case PC sleeps before execution)
+        const wakeAt = new Date(body.deliverAt).toISOString();
+        saveWakeAt({ active: true, wakeAt, createdAt: new Date().toISOString() });
+        console.log(`[deferred] Scheduled wake-at for ${wakeAt}`);
+
+        // Try to send task to Agent immediately (so it appears in web app)
+        const taskBody = { action: body.action, params: body.params };
+        try {
+          const result = await agentRequest('POST', '/run', taskBody);
+          if (result.data?.ok) {
+            try {
+              const listResult = await agentRequest('POST', '/run', { action: 'task-list' });
+              if (listResult.data?.tasks) saveTaskCache({ tasks: listResult.data.tasks, cachedAt: new Date().toISOString() });
+            } catch {}
+            console.log(`[deferred] Task sent to Agent immediately, wake-at scheduled`);
+            return sendJson(res, 200, { ok: true, task: result.data.task, wakeAt, message: 'Task registered and wake scheduled' });
+          }
+        } catch {
+          // Agent offline — defer as before
+          const deferred = loadDeferred();
+          deferred.push({ body: taskBody, createdAt: new Date().toISOString(), deliverAt: body.deliverAt, wolSent: false });
+          saveDeferred(deferred);
+          console.log(`[deferred] Agent offline, task deferred for ${body.deliverAt}`);
+          return sendJson(res, 202, { ok: true, deferred: true, deliverAt: body.deliverAt, wakeAt, message: 'PC offline — task deferred, wake scheduled' });
+        }
       }
 
       try {

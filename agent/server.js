@@ -225,13 +225,19 @@ function writeLearned(data) {
   fs.writeFileSync(LEARNED_FILE, JSON.stringify(data, null, 2));
 }
 
+const ACTION_VERBS = ['install', 'uninstall', 'download', 'delete', 'remove', 'update', 'upgrade', 'create', 'destroy', 'enable', 'disable', 'start', 'stop', 'open', 'close'];
+
 function findLearnedApproach(taskName) {
   if (!taskName) return null;
   const learned = readLearned();
   const words = taskName.toLowerCase().split(/\s+/);
+  const taskVerb = words.find(w => ACTION_VERBS.includes(w));
   let bestMatch = null, bestOverlap = 0;
   for (const [key, val] of Object.entries(learned)) {
     const keyWords = key.toLowerCase().split(/\s+/);
+    // Skip if action verbs conflict (e.g. install vs uninstall, download vs delete)
+    const keyVerb = keyWords.find(w => ACTION_VERBS.includes(w));
+    if (taskVerb && keyVerb && taskVerb !== keyVerb) continue;
     const overlap = words.filter(w => keyWords.includes(w)).length;
     if (overlap >= 2 && overlap > bestOverlap) {
       bestOverlap = overlap;
