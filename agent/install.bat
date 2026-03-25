@@ -20,11 +20,11 @@ if not exist "%SERVER_PATH%" (
     exit /b 1
 )
 
-:: Create task that runs at system startup (before user login)
-:: /ru SYSTEM = runs as SYSTEM account (no login required)
-schtasks /create /tn "ButtonAgent" /tr "\"%NODE_PATH%\" \"%SERVER_PATH%\"" /sc onstart /ru SYSTEM /rl highest /f
+:: Create task that runs at user logon (interactive session, can open GUI apps)
+:: /ru with current user = runs in user session (can open VS Code, psmux visible)
+schtasks /create /tn "ButtonAgent" /tr "\"%NODE_PATH%\" \"%SERVER_PATH%\"" /sc onlogon /ru "%USERNAME%" /rl highest /f
 
-echo ButtonAgent registered as system startup task (runs before login).
+echo ButtonAgent registered as logon startup task (runs in user session).
 echo   node: %NODE_PATH%
 echo   script: %SERVER_PATH%
 pause
