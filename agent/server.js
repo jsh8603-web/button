@@ -991,20 +991,27 @@ app.get('/health', (req, res) => {
 
 // Full status: sessions, projects, uptime (Pi relay calls this)
 app.get('/status', verifySecret, async (req, res) => {
-  const activeSessions = await getActiveSessions();
+  const sessionObjects = await getActiveSessionObjects();
+  const activeNames = sessionObjects.map(s => s.name);
   let protectedList = getProtectedSessions();
 
-  // Clean stale protected entries — but only when psmux has active sessions
-  // (after hibernate wake, psmux may return empty list temporarily; wiping protected list would be destructive)
-  if (activeSessions.length > 0) {
-    const cleaned = protectedList.filter(s => activeSessions.includes(s));
-    if (cleaned.length !== protectedList.length) {
-      protectedList = cleaned;
-      setProtectedSessions(protectedList);
+  // Auto-protect user-created sessions (same as proj sessions)
+  const userSessions = sessionObjects.filter(s => s.type === 'user');
+  for (const s of userSessions) {
+    if (!protectedList.includes(s.name)) {
+      protectedList.push(s.name);
+      console.log(`[status] Auto-protecting user session: ${s.name}`);
     }
   }
 
-  const sessions = activeSessions.map(name => ({
+  // Clean stale protected entries — but only when psmux has active sessions
+  // (after hibernate wake, psmux may return empty list temporarily; wiping protected list would be destructive)
+  if (activeNames.length > 0) {
+    protectedList = protectedList.filter(s => activeNames.includes(s));
+  }
+  setProtectedSessions(protectedList);
+
+  const sessions = activeNames.map(name => ({
     name,
     protected: protectedList.includes(name),
   }));
@@ -1079,19 +1086,25 @@ function setProtectedSessions(list) {
   fs.writeFileSync(PROTECTED_FILE, JSON.stringify(list));
 }
 
-async function getActiveSessions() {
+// Returns array of { name, psmuxName, type } where type is 'btn' | 'schedule' | 'user'
+async function getActiveSessionObjects() {
   return new Promise((resolve) => {
     exec(`"${PSMUX_BIN}" list-sessions`, { encoding: 'utf8' }, (err, stdout) => {
       if (err) return resolve([]);
       const all = parseSessionNames(stdout);
       const sessions = [];
       for (const s of all) {
-        if (s.startsWith(SESSION_PREFIX)) sessions.push(s.slice(SESSION_PREFIX.length));
-        else if (s.startsWith(AI_TASK_PREFIX)) sessions.push(s); // schedule- sessions: use full name
+        if (s.startsWith(SESSION_PREFIX)) sessions.push({ name: s.slice(SESSION_PREFIX.length), psmuxName: s, type: 'btn' });
+        else if (s.startsWith(AI_TASK_PREFIX)) sessions.push({ name: s, psmuxName: s, type: 'schedule' });
+        else sessions.push({ name: s, psmuxName: s, type: 'user' });
       }
       resolve(sessions);
     });
   });
+}
+
+async function getActiveSessions() {
+  return (await getActiveSessionObjects()).map(s => s.name);
 }
 
 function killUnprotectedSessions() {
@@ -1101,22 +1114,21 @@ function killUnprotectedSessions() {
   }
   const closeScript = path.join(__dirname, 'close-window.ps1');
 
-  getActiveSessions().then(async (activeSessions) => {
+  getActiveSessionObjects().then(async (sessionObjects) => {
     const protectedList = getProtectedSessions();
-    // Only kill btn- sessions, never schedule- sessions
-    const btnSessions = activeSessions.filter(s => !s.startsWith(AI_TASK_PREFIX));
-    const toKill = btnSessions.filter(s => !protectedList.includes(s));
+    // Kill unprotected btn- and user sessions; never schedule- sessions
+    const killable = sessionObjects.filter(s => s.type !== 'schedule');
+    const toKill = killable.filter(s => !protectedList.includes(s.name));
 
     if (toKill.length === 0) return;
 
-    console.log(`[kill] Killing unprotected sessions: ${toKill.join(', ')} (protected: ${protectedList.join(', ') || 'none'})`);
+    console.log(`[kill] Killing unprotected sessions: ${toKill.map(s => s.name).join(', ')} (protected: ${protectedList.join(', ') || 'none'})`);
 
-    for (const session of toKill) {
-      const fullSession = `${SESSION_PREFIX}${session}`;
-      gracefulKillSession(fullSession).then(() => {
-        const titleQuery = EDITOR_TITLE ? `${session} - ${EDITOR_TITLE}` : session;
+    for (const s of toKill) {
+      gracefulKillSession(s.psmuxName).then(() => {
+        const titleQuery = EDITOR_TITLE ? `${s.name} - ${EDITOR_TITLE}` : s.name;
         exec(`powershell.exe -ExecutionPolicy Bypass -File "${closeScript}" -TitlePrefix "${titleQuery}"`, (err) => {
-          if (err) console.error(`[close-window] Error closing ${session}:`, err.message);
+          if (err) console.error(`[close-window] Error closing ${s.name}:`, err.message);
         });
       });
     }
@@ -1323,7 +1335,7 @@ app.get('/projects', verifySecret, (req, res) => {
 });
 
 // Run actions (Pi relay forwards commands here)
-app.post('/run', verifySecret, (req, res) => {
+app.post('/run', verifySecret, async (req, res) => {
   const { action, name } = req.body;
 
   if (action === 'proj') {
@@ -1364,8 +1376,13 @@ app.post('/run', verifySecret, (req, res) => {
     }
     setProtectedSessions(getProtectedSessions().filter(s => s !== name));
     const closeScript = path.join(__dirname, 'close-window.ps1');
-    // schedule- sessions already have full name from getActiveSessions(); btn- sessions need prefix
-    const psmuxSession = name.startsWith(AI_TASK_PREFIX) ? name : `${SESSION_PREFIX}${name}`;
+    // Resolve psmux session name: schedule- and user sessions use name as-is, btn- sessions need prefix
+    const psmuxSession = name.startsWith(AI_TASK_PREFIX) ? name
+      : await (async () => {
+          const objs = await getActiveSessionObjects();
+          const found = objs.find(s => s.name === name);
+          return found ? found.psmuxName : `${SESSION_PREFIX}${name}`;
+        })();
 
     // For schedule- sessions, also kill editor process and cancel idle timer
     let editorName;
