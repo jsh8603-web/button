@@ -559,9 +559,9 @@ STEP 3: GUI automation (last resort — screenshot, click, visual interaction)
   const aiModel = task.project ? CLAUDE_MODEL : AI_TASK_MODEL; // project specified → opus, common-task → sonnet
   let runnerCmd;
   if (isGemini) {
-    // Gemini: launch with -p flag (prompt piped via script, paste-buffer doesn't work with ink TUI)
+    // Gemini: launch interactively, prompt sent via @file after TUI ready
     const launchScript = path.join(__dirname, `.ai-task-gemini-${shortId}.sh`);
-    fs.writeFileSync(launchScript, `#!/bin/bash\nexport PATH="/c/Program Files/nodejs:$PATH"\n${geminiBinMsys} --yolo -p "$(cat '${promptFileMsys}')"\necho ""\necho "Gemini process exited."\n`);
+    fs.writeFileSync(launchScript, `#!/bin/bash\nexport PATH="/c/Program Files/nodejs:$PATH"\n${geminiBinMsys} --yolo\n`);
     runnerCmd = `bash ${toMsys(launchScript)}`;
   } else {
     runnerCmd = `${claudeBinMsys} --dangerously-skip-permissions --model ${aiModel}`;
@@ -626,24 +626,23 @@ STEP 3: GUI automation (last resort — screenshot, click, visual interaction)
     const startTime = Date.now();
     const PROMPT_DETECT_TIMEOUT = 120000; // 2 min to detect prompt
     let trustHandled = false;
-    let instructionsSent = isGemini; // Gemini: prompt already in launch script via -p flag
+    let instructionsSent = false;
     const runnerLabel = isGemini ? 'Gemini' : 'Claude';
 
+    const captureFlag = isGemini ? '-p' : '-p -S -';
     function capture(cb) {
-      exec(`"${PSMUX_BIN}" capture-pane -t ${session} -p -S -`, { encoding: 'utf8' }, (err, raw) => {
+      exec(`"${PSMUX_BIN}" capture-pane -t ${session} ${captureFlag}`, { encoding: 'utf8' }, (err, raw) => {
         cb(err, err ? undefined : captureTail(raw || ''));
       });
     }
 
     function captureFull(cb) {
-      exec(`"${PSMUX_BIN}" capture-pane -t ${session} -p -S -`, { encoding: 'utf8', maxBuffer: 1024 * 1024 }, cb);
+      exec(`"${PSMUX_BIN}" capture-pane -t ${session} ${captureFlag}`, { encoding: 'utf8', maxBuffer: 1024 * 1024 }, cb);
     }
 
-    // Gemini prompt detection: looks for ">" or gemini-specific markers
     function hasRunnerPrompt(output) {
       if (isGemini) {
-        // Gemini CLI shows ">" prompt when ready
-        return output.includes('>') && !output.includes('trust');
+        return output.includes('Type your message') || output.includes('? for shortcuts');
       }
       return hasClaudePrompt(output);
     }
@@ -684,8 +683,11 @@ STEP 3: GUI automation (last resort — screenshot, click, visual interaction)
               console.log(`[ai-task] ${runnerLabel} ready, sending instructions for "${task.id}"`);
             }
 
-            // Claude: /remote-control → verify → paste prompt
-            sendRcWithRetry();
+            if (isGemini) {
+              sendGeminiInstructions();
+            } else {
+              sendRcWithRetry();
+            }
             setTimeout(poll, 20000);
             return;
           }
@@ -734,6 +736,28 @@ STEP 3: GUI automation (last resort — screenshot, click, visual interaction)
           setTimeout(poll, 10000);
         });
       });
+    }
+
+    // --- Gemini instruction sender (via @file reference in send-keys) ---
+    function sendGeminiInstructions() {
+      // Copy prompt file to project dir for relative @file reference
+      const projPrompt = path.join(project.replace(/\//g, '\\'), '.gemini-task-prompt.txt');
+      try { fs.copyFileSync(promptFile, projPrompt); } catch (e) {
+        console.error(`[ai-task] Failed to copy prompt to project:`, e.message);
+      }
+      setTimeout(async () => {
+        try {
+          await tmuxRun(`send-keys -t ${session} '@.gemini-task-prompt.txt'`);
+          await delay(1000);
+          await tmuxRun(`send-keys -t ${session} Enter`);
+          await delay(2000);
+          await tmuxRun(`send-keys -t ${session} Enter`);
+          console.log(`[ai-task] Gemini instructions sent via @file to ${session}`);
+        } catch (err) {
+          console.error(`[ai-task] Gemini send error:`, err.message);
+        }
+        try { fs.unlinkSync(promptFile); } catch {}
+      }, 3000);
     }
 
     // --- Claude instruction sender (with /remote-control) ---
