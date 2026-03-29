@@ -24,6 +24,7 @@ const GEMINI_BIN = process.env.GEMINI_BIN || 'C:\\Users\\jsh86\\AppData\\Roaming
 const AGENT_SECRET = process.env.AGENT_SECRET;
 const PI_HOST = process.env.PI_HOST || '192.168.219.125';
 const PI_PORT = parseInt(process.env.PI_PORT || '7777', 10);
+const telegram = require('./telegram');
 
 // Windows path → MSYS path (e.g. D:\projects → /d/projects)
 const toMsys = (p) => p.replace(/\\/g, '/').replace(/^([A-Z]):/i, (_, d) => `/${d.toLowerCase()}`);
@@ -315,14 +316,39 @@ async function gracefulKillSession(session) {
 }
 
 // Create psmux session with bash shell and launch claude
-function createPsmuxSession(session, workDir, claudeCmd, callback) {
+function createPsmuxSession(session, workDir, runnerCmd, callback) {
   exec(`"${PSMUX_BIN}" kill-session -t ${session}`, () => {
     const winDir = workDir.replace(/\//g, '\\');
     exec(`"${PSMUX_BIN}" new-session -d -s ${session} -c "${winDir}" -- "${BASH_PATH}" -l`, (err) => {
       if (err) return callback(err);
-      setTimeout(() => {
-        exec(`"${PSMUX_BIN}" send-keys -t ${session} '${claudeCmd}' Enter`, callback);
-      }, 1500);
+
+      // Wait for bash prompt, then send runner command with retry
+      const SEND_DELAY = 2000;
+      const VERIFY_DELAY = 5000;
+      const MAX_RETRIES = 2;
+      let attempt = 0;
+
+      function sendRunner() {
+        attempt++;
+        exec(`"${PSMUX_BIN}" send-keys -t ${session} '${runnerCmd}' Enter`, (sendErr) => {
+          if (sendErr) return callback(sendErr);
+          // Verify runner started after delay
+          setTimeout(() => {
+            exec(`"${PSMUX_BIN}" capture-pane -t ${session} -p`, { encoding: 'utf8' }, (_, stdout) => {
+              const output = (stdout || '').trim();
+              const hasRunner = /claude|gemini|❯|>>>|\$\s*$/.test(output);
+              const isBarePrompt = /^\$\s*$/m.test(output) && output.split('\n').filter(l => l.trim()).length <= 3;
+              if (isBarePrompt && attempt <= MAX_RETRIES) {
+                console.warn(`[psmux] Runner not detected in ${session} (attempt ${attempt}/${MAX_RETRIES + 1}), retrying...`);
+                exec(`"${PSMUX_BIN}" send-keys -t ${session} '${runnerCmd}' Enter`, () => {});
+              }
+              callback(null);
+            });
+          }, VERIFY_DELAY);
+        });
+      }
+
+      setTimeout(sendRunner, SEND_DELAY);
     });
   });
 }
@@ -502,6 +528,12 @@ function executeAiTask(task) {
   // Build prompt and save to temp file (multi-line prompts break psmux send-keys)
   const learned = findLearnedApproach(task.name);
   let prompt = `You are executing a scheduled task. Work autonomously as much as possible.\n\nTask: ${task.name || 'Unnamed task'}\n\nInstructions:\n${task.instructions}\n`;
+  // Inject audit rules reading instruction for babyplace audit tasks
+  const AUDIT_KW = ['장소감사 wf', '장소감사wf', 'place audit wf', 'audit'];
+  const instrText = `${task.instructions || ''} ${task.name || ''}`.toLowerCase();
+  if (AUDIT_KW.some(k => instrText.includes(k.toLowerCase())) && (task.project || '').replace(/\\/g, '/').includes('babyplace')) {
+    prompt += `\n[CRITICAL] Before starting, you MUST read the file AUDIT_RULES.md in the project root using ReadFile. This file contains all audit rules and procedures. Do NOT skip this step. After reading, follow the rules exactly — especially the 30-minute time budget rule.\n`;
+  }
   if (learned) {
     if (learned.approach) prompt += `\nPreviously successful approach for similar task:\n${learned.approach}\n`;
     if (learned.failedApproaches?.length) {
@@ -511,6 +543,26 @@ function executeAiTask(task) {
       }
     }
   }
+  // Gemini doesn't auto-load CLAUDE.md — inject essential context into prompt
+  if (isGemini) {
+    prompt += `
+=== ENVIRONMENT (Windows 11, bash/MSYS2 shell) ===
+- Python 3.12: C:/Users/jsh86/AppData/Local/Programs/Python/Python312/python.exe
+- Node.js: "C:/Program Files/nodejs/node.exe"
+- yt-dlp: C:/Users/jsh86/AppData/Local/Microsoft/WinGet/Packages/yt-dlp.yt-dlp_Microsoft.Winget.Source_8wekyb3d8bbwe/yt-dlp.exe
+- ffmpeg: C:/Users/jsh86/AppData/Local/Microsoft/WinGet/Packages/Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe/ffmpeg-8.1-full_build/bin/ffmpeg.exe
+- aria2c: find /c/Users/jsh86/AppData/Local/Microsoft/WinGet/Packages -name "aria2c.exe" 2>/dev/null
+- 7-Zip: "C:/Program Files/7-Zip/7z.exe"
+- Tesseract: "C:/Program Files/Tesseract-OCR/tesseract.exe"
+- Playwright: NODE_PATH=C:/Users/jsh86/AppData/Roaming/npm/node_modules node script.js
+- Tool inventory: read file C:/Users/jsh86/.claude/rules/pc-tools.md for full list
+- NEVER kill/close existing psmux sessions or VS Code windows
+- Temp files: use /tmp/ (MSYS2) for scripts, Windows paths for tool arguments
+- Gmail SMTP credentials: read C:/Users/jsh86/.claude/keys/gmail-smtp.md
+- Google Drive OAuth: read C:/Users/jsh86/.claude/keys/gdrive-oauth.md
+`;
+  }
+
   prompt += `
 === MANDATORY EXECUTION ORDER ===
 You MUST follow these steps sequentially. Before moving to the next step, output the step result.
@@ -637,12 +689,17 @@ STEP 3: GUI automation (last resort — screenshot, click, visual interaction)
     }
 
     function captureFull(cb) {
-      exec(`"${PSMUX_BIN}" capture-pane -t ${session} ${captureFlag}`, { encoding: 'utf8', maxBuffer: 1024 * 1024 }, cb);
+      // Always use -S - for full scrollback — SUCCESS/FAILURE markers may scroll past visible pane
+      exec(`"${PSMUX_BIN}" capture-pane -t ${session} -p -S -`, { encoding: 'utf8', maxBuffer: 1024 * 1024 }, cb);
     }
 
     function hasRunnerPrompt(output) {
       if (isGemini) {
-        return output.includes('Type your message') || output.includes('? for shortcuts');
+        const hasPrompt = output.includes('Type your message') || output.includes('? for shortcuts');
+        // Gemini TUI always shows "Type your message" at bottom, even while working.
+        // Only count as idle prompt if NOT actively thinking/executing.
+        const isWorking = output.includes('esc to cancel') || output.includes('Thinking') || output.includes('Tab to focus');
+        return hasPrompt && !isWorking;
       }
       return hasClaudePrompt(output);
     }
@@ -753,6 +810,22 @@ STEP 3: GUI automation (last resort — screenshot, click, visual interaction)
           await delay(2000);
           await tmuxRun(`send-keys -t ${session} Enter`);
           console.log(`[ai-task] Gemini instructions sent via @file to ${session}`);
+          // Spawn audit-watchdog when audit trigger detected in babyplace project
+          // Checks both Korean triggers and English task name patterns
+          const AUDIT_TRIGGERS = ['장소감사 wf', '장소감사wf', 'audit'];
+          const searchText = `${prompt}\n${task.instructions || ''}\n${task.name || ''}`.toLowerCase();
+          const hasAuditTrigger = AUDIT_TRIGGERS.some(t => searchText.includes(t.toLowerCase()));
+          if (hasAuditTrigger && project && project.replace(/\\/g, '/').includes('babyplace')) {
+            const watchdogScript = path.join(project.replace(/\//g, '\\'), 'scripts', 'audit-watchdog.sh');
+            if (fs.existsSync(watchdogScript)) {
+              const watchdogCmd = `bash "${toMsys(watchdogScript)}" ${session} 30 --monitor-only`;
+              const watchdog = require('child_process').spawn('bash', ['-c', watchdogCmd], {
+                detached: true, stdio: 'ignore', env: { ...process.env, PSMUX_BIN: PSMUX_BIN }
+              });
+              watchdog.unref();
+              console.log(`[ai-task] audit-watchdog spawned for ${session} (pid: ${watchdog.pid})`);
+            }
+          }
         } catch (err) {
           console.error(`[ai-task] Gemini send error:`, err.message);
         }
@@ -845,6 +918,8 @@ function finishAiTask(task, status, result) {
 
   writeTaskQueue(tasks);
   console.log(`[ai-task] Finished "${t.id}" — status: ${status}, result: ${(result || '').slice(0, 100)}`);
+  const icon = status === 'completed' ? '\u2705' : '\u274C';
+  telegram.notify(`${icon} *AI Task ${status}*\n\`${t.id.slice(0,8)}\` ${t.name || 'task'}\n${(result || '').slice(0, 500)}`, { parse_mode: 'Markdown' });
 
   const project = task.project || 'D:/projects/common-task';
   const projName = path.basename(project);
@@ -1002,6 +1077,8 @@ function startTaskRunner() {
 
         writeTaskQueue(allTasks);
         console.log(`[task] Completed "${t.id}" — status: ${t.status}`);
+        const tIcon = t.status === 'completed' ? '\u2705' : '\u274C';
+        telegram.notify(`${tIcon} *Task ${t.status}*\n\`${t.id.slice(0,8)}\` ${t.name || t.command}`, { parse_mode: 'Markdown' });
 
         if (t.onComplete) {
           console.log(`[task] onComplete action: ${t.onComplete}`);
@@ -1017,6 +1094,20 @@ function startTaskRunner() {
 }
 
 // --- Routes ---
+
+// Telegram report endpoint (localhost only, no auth — used by sessions to send reports)
+function handleTelegram(req, res) {
+  const ip = req.ip || req.connection.remoteAddress;
+  if (ip !== '127.0.0.1' && ip !== '::1' && ip !== '::ffff:127.0.0.1') {
+    return res.status(403).json({ ok: false, message: 'Localhost only' });
+  }
+  const message = req.body?.message || req.query?.message;
+  if (!message) return res.status(400).json({ ok: false, message: 'message required' });
+  telegram.notify(message);
+  res.json({ ok: true });
+}
+app.get('/telegram', handleTelegram);
+app.post('/telegram', handleTelegram);
 
 // PIN verification endpoint (Pi relay uses this to validate user PINs)
 app.post('/verify-pin', async (req, res) => {
@@ -1068,10 +1159,32 @@ app.get('/status', verifySecret, async (req, res) => {
   }
   setProtectedSessions(protectedList);
 
-  const sessions = activeNames.map(name => ({
-    name,
-    protected: protectedList.includes(name),
-  }));
+  // Clean stale runner map entries (obj.name is already stripped of SESSION_PREFIX)
+  const activeBtnNames = sessionObjects.filter(s => s.type === 'btn').map(s => s.name);
+  let runnerMapChanged = false;
+  for (const key of sessionRunnerMap.keys()) {
+    if (!activeBtnNames.includes(key)) { sessionRunnerMap.delete(key); runnerMapChanged = true; }
+  }
+  if (runnerMapChanged) persistRunnerMap();
+
+  const taskQueue = readTaskQueue();
+  const sessions = sessionObjects.map(obj => {
+    const s = { name: obj.name, protected: protectedList.includes(obj.name) };
+    if (obj.type === 'btn') {
+      let runner = sessionRunnerMap.get(obj.name);
+      if (!runner) {
+        runner = fs.existsSync(path.join(__dirname, `.proj-gemini-${obj.name}.sh`)) ? 'gemini' : 'claude';
+        sessionRunnerMap.set(obj.name, runner);
+        runnerMapChanged = true;
+      }
+      s.runner = runner;
+    } else if (obj.type === 'schedule') {
+      const safeName = obj.name.slice(AI_TASK_PREFIX.length);
+      const task = taskQueue.find(t => t.status === 'running' && t.type === 'ai' && taskSafeName(t) === safeName);
+      s.runner = task ? (task.runner || 'claude') : null;
+    }
+    return s;
+  });
 
   res.json({
     status: 'online',
@@ -1106,6 +1219,18 @@ const IGNORE_DIRS = new Set(IGNORE_DIRS_ENV.split(',').map(s => s.trim()).filter
 // tasks.json: open psmux session with claude on folder open
 const SESSION_PREFIX = 'btn-';
 const AI_TASK_PREFIX = 'schedule-';
+const SESSION_RUNNER_FILE = path.join(__dirname, '.session-runners');
+const sessionRunnerMap = new Map(); // tracks runner per btn- session name
+
+// Load persisted runner map on startup
+try {
+  const data = JSON.parse(fs.readFileSync(SESSION_RUNNER_FILE, 'utf8'));
+  for (const [k, v] of Object.entries(data)) sessionRunnerMap.set(k, v);
+} catch {}
+
+function persistRunnerMap() {
+  fs.writeFileSync(SESSION_RUNNER_FILE, JSON.stringify(Object.fromEntries(sessionRunnerMap)));
+}
 
 function buildTasksJson(sessionOrName) {
   // If already a full session name (schedule- or btn-), use as-is; otherwise prepend SESSION_PREFIX
@@ -1192,7 +1317,8 @@ function killUnprotectedSessions() {
   });
 }
 
-function openProjectInEditor(name) {
+function openProjectInEditor(name, runner = 'claude') {
+  const isGeminiProj = runner === 'gemini';
   killUnprotectedSessions();
 
   const closeScript = path.join(__dirname, 'close-window.ps1');
@@ -1219,16 +1345,26 @@ function openProjectInEditor(name) {
 
   setTimeout(() => {
     const session = `${SESSION_PREFIX}${name}`;
-    const claudeBinMsys = toMsys(CLAUDE_BIN);
     const workDir = path.join(PROJECTS_DIR, name);
-    const claudeCmd = `${claudeBinMsys} --dangerously-skip-permissions --model ${CLAUDE_MODEL} --name ${name}`;
+    let runnerCmd;
+    if (isGeminiProj) {
+      const geminiBinMsys = toMsys(GEMINI_BIN);
+      const launchScript = path.join(__dirname, `.proj-gemini-${name}.sh`);
+      fs.writeFileSync(launchScript, `#!/bin/bash\nexport PATH="/c/Program Files/nodejs:$PATH"\n${geminiBinMsys} --yolo\n`);
+      runnerCmd = `bash ${toMsys(launchScript)}`;
+    } else {
+      const claudeBinMsys = toMsys(CLAUDE_BIN);
+      runnerCmd = `${claudeBinMsys} --dangerously-skip-permissions --model ${CLAUDE_MODEL} --name ${name}`;
+    }
 
-    createPsmuxSession(session, workDir, claudeCmd, (err) => {
+    createPsmuxSession(session, workDir, runnerCmd, (err) => {
       if (err) {
         console.error('[proj] psmux session create error:', err.message);
         return;
       }
-      console.log(`[proj] Created psmux session: ${session}`);
+      console.log(`[proj] Created psmux session: ${session} (runner: ${runner})`);
+      sessionRunnerMap.set(name, runner);
+      persistRunnerMap();
 
       // Protect proj session so killUnprotectedSessions doesn't kill it
       const protectedList = getProtectedSessions();
@@ -1250,111 +1386,129 @@ function openProjectInEditor(name) {
         });
       }
 
-
       let trustHandled = false;
       let captureErrors = 0;
-
-      function sendRemoteControl(attempt = 1) {
-        const MAX_RC_ATTEMPTS = 3;
-        const RC_VERIFY_DELAY = 5000;
-        const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-        console.log(`[proj] Claude stable in ${elapsed}s, sending /remote-control (attempt ${attempt}/${MAX_RC_ATTEMPTS})`);
-        exec(`"${PSMUX_BIN}" send-keys -t ${session} '/remote-control' Enter`, (err) => {
-          if (err) console.error('[proj] /remote-control send error:', err.message);
-          else console.log(`[proj] Sent /remote-control to ${session}`);
-
-          setTimeout(() => {
-            capturePaneTail((err, stdout) => {
-              if (err) {
-                console.error('[proj] health-check capture error:', err.message);
-                return;
-              }
-              const pane = (stdout || '').trim();
-              const hasRemote = pane.includes('remote') || pane.includes('Remote');
-              const alive = !pane.includes('$') || hasRemote;
-              console.log(`[proj] Health check (${session}): ${alive ? 'OK' : 'Claude may have exited'}, remote=${hasRemote}`);
-              if (!hasRemote && alive && attempt < MAX_RC_ATTEMPTS) {
-                console.log(`[proj] /remote-control not detected, retrying (${attempt + 1}/${MAX_RC_ATTEMPTS})`);
-                sendRemoteControl(attempt + 1);
-              } else if (!alive) {
-                console.log(`[proj] Pane content:\n${pane}`);
-              }
-            });
-          }, RC_VERIFY_DELAY);
-        });
-      }
 
       function cleanupFailedSession() {
         console.log(`[proj] Cleaning up failed session: ${session}`);
         exec(`"${PSMUX_BIN}" kill-session -t ${session}`, () => {});
         setProtectedSessions(getProtectedSessions().filter(s => s !== name));
+        if (isGeminiProj) {
+          try { fs.unlinkSync(path.join(__dirname, `.proj-gemini-${name}.sh`)); } catch {}
+        }
       }
 
-      function waitForClaude() {
-        if (Date.now() - startTime > MAX_WAIT) {
+      if (isGeminiProj) {
+        // Gemini: wait for TUI prompt, no /remote-control needed
+        function waitForGemini() {
+          if (Date.now() - startTime > MAX_WAIT) {
+            console.error(`[proj] Gemini did not start within ${MAX_WAIT / 1000}s in ${session}`);
+            cleanupFailedSession();
+            return;
+          }
           capturePaneTail((err, stdout) => {
-            const output = (stdout || '').trim();
-            console.error(`[proj] Claude did not start within ${MAX_WAIT / 1000}s in ${session}`);
-            console.error(`[proj] Pane content at timeout:\n${output || '(empty)'}`);
-            // If pane shows bare shell (no Claude indicators), clean up
-            if (!output || (!output.includes('\u256D') && !output.includes('human') && !output.includes('Claude'))) {
-              cleanupFailedSession();
-            } else {
-              // Claude may be loading — send /remote-control as fallback
-              console.log(`[proj] Sending /remote-control despite timeout`);
-              exec(`"${PSMUX_BIN}" send-keys -t ${session} '/remote-control' Enter`, (err) => {
-                if (err) console.error('[proj] /remote-control send error:', err.message);
-                else console.log(`[proj] Sent /remote-control to ${session} (timeout fallback)`);
-              });
-            }
-          });
-          return;
-        }
-
-        capturePaneTail((err, stdout) => {
-          if (err) {
-            captureErrors++;
-            console.error(`[proj] capture-pane error (${captureErrors}):`, err.message);
-            if (captureErrors >= 5) {
-              console.error(`[proj] Session ${session} appears dead after ${captureErrors} capture errors`);
-              cleanupFailedSession();
+            if (err) {
+              captureErrors++;
+              if (captureErrors >= 5) { cleanupFailedSession(); return; }
+              setTimeout(waitForGemini, POLL_INTERVAL);
               return;
             }
-            setTimeout(waitForClaude, POLL_INTERVAL);
-            return;
-          }
-          captureErrors = 0;
-          const output = (stdout || '').trim();
-          const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-
-          if (!trustHandled && hasTrustPrompt(output)) {
-            trustHandled = true;
-            console.log(`[proj] Trust prompt detected at ${elapsed}s, sending Enter to accept`);
-            exec(`"${PSMUX_BIN}" send-keys -t ${session} Enter`, () => {});
-            lastReadyOutput = null;
-            setTimeout(waitForClaude, POLL_INTERVAL);
-            return;
-          }
-
-          const isReady = hasClaudePrompt(output);
-          console.log(`[proj] Poll ${elapsed}s: ready=${isReady} output=${output.slice(-120)}`);
-
-          if (isReady) {
-            if (lastReadyOutput === null) {
-              lastReadyOutput = output;
-              console.log(`[proj] Prompt detected at ${elapsed}s, confirming stability...`);
-              setTimeout(waitForClaude, STABLE_INTERVAL);
+            captureErrors = 0;
+            const output = (stdout || '').trim();
+            const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+            const hasPrompt = output.includes('Type your message') || output.includes('? for shortcuts');
+            console.log(`[proj] Gemini poll ${elapsed}s: ready=${hasPrompt} output=${output.slice(-120)}`);
+            if (hasPrompt) {
+              console.log(`[proj] Gemini ready in ${elapsed}s`);
             } else {
-              sendRemoteControl();
+              setTimeout(waitForGemini, POLL_INTERVAL);
             }
-          } else {
-            lastReadyOutput = null;
-            setTimeout(waitForClaude, POLL_INTERVAL);
-          }
-        });
-      }
+          });
+        }
+        setTimeout(waitForGemini, 3000);
+      } else {
+        // Claude: wait for prompt, then send /remote-control
+        function sendRemoteControl(attempt = 1) {
+          const MAX_RC_ATTEMPTS = 3;
+          const RC_VERIFY_DELAY = 5000;
+          const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+          console.log(`[proj] Claude stable in ${elapsed}s, sending /remote-control (attempt ${attempt}/${MAX_RC_ATTEMPTS})`);
+          exec(`"${PSMUX_BIN}" send-keys -t ${session} '/remote-control' Enter`, (err) => {
+            if (err) console.error('[proj] /remote-control send error:', err.message);
+            else console.log(`[proj] Sent /remote-control to ${session}`);
 
-      setTimeout(waitForClaude, 2000);
+            setTimeout(() => {
+              capturePaneTail((err, stdout) => {
+                if (err) { console.error('[proj] health-check capture error:', err.message); return; }
+                const pane = (stdout || '').trim();
+                const hasRemote = pane.includes('remote') || pane.includes('Remote');
+                const alive = !pane.includes('$') || hasRemote;
+                console.log(`[proj] Health check (${session}): ${alive ? 'OK' : 'Claude may have exited'}, remote=${hasRemote}`);
+                if (!hasRemote && alive && attempt < MAX_RC_ATTEMPTS) {
+                  sendRemoteControl(attempt + 1);
+                } else if (!alive) {
+                  console.log(`[proj] Pane content:\n${pane}`);
+                }
+              });
+            }, RC_VERIFY_DELAY);
+          });
+        }
+
+        function waitForClaude() {
+          if (Date.now() - startTime > MAX_WAIT) {
+            capturePaneTail((err, stdout) => {
+              const output = (stdout || '').trim();
+              console.error(`[proj] Claude did not start within ${MAX_WAIT / 1000}s in ${session}`);
+              if (!output || (!output.includes('\u256D') && !output.includes('human') && !output.includes('Claude'))) {
+                cleanupFailedSession();
+              } else {
+                console.log(`[proj] Sending /remote-control despite timeout`);
+                exec(`"${PSMUX_BIN}" send-keys -t ${session} '/remote-control' Enter`, (err) => {
+                  if (err) console.error('[proj] /remote-control send error:', err.message);
+                });
+              }
+            });
+            return;
+          }
+
+          capturePaneTail((err, stdout) => {
+            if (err) {
+              captureErrors++;
+              if (captureErrors >= 5) { cleanupFailedSession(); return; }
+              setTimeout(waitForClaude, POLL_INTERVAL);
+              return;
+            }
+            captureErrors = 0;
+            const output = (stdout || '').trim();
+            const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+
+            if (!trustHandled && hasTrustPrompt(output)) {
+              trustHandled = true;
+              console.log(`[proj] Trust prompt detected at ${elapsed}s, sending Enter to accept`);
+              exec(`"${PSMUX_BIN}" send-keys -t ${session} Enter`, () => {});
+              lastReadyOutput = null;
+              setTimeout(waitForClaude, POLL_INTERVAL);
+              return;
+            }
+
+            const isReady = hasClaudePrompt(output);
+            console.log(`[proj] Poll ${elapsed}s: ready=${isReady} output=${output.slice(-120)}`);
+
+            if (isReady) {
+              if (lastReadyOutput === null) {
+                lastReadyOutput = output;
+                setTimeout(waitForClaude, STABLE_INTERVAL);
+              } else {
+                sendRemoteControl();
+              }
+            } else {
+              lastReadyOutput = null;
+              setTimeout(waitForClaude, POLL_INTERVAL);
+            }
+          });
+        }
+        setTimeout(waitForClaude, 2000);
+      }
     });
 
     console.log(`[proj] Opening editor: "${EDITOR_CMD}" "${projDir}"`);
@@ -1393,14 +1547,14 @@ app.get('/projects', verifySecret, (req, res) => {
 
 // Run actions (Pi relay forwards commands here)
 app.post('/run', verifySecret, async (req, res) => {
-  const { action, name } = req.body;
+  const { action, name, runner } = req.body;
 
   if (action === 'proj') {
     if (!name || !SAFE_NAME_RE.test(name)) {
       return res.status(400).json({ ok: false, message: 'Invalid project name' });
     }
     try {
-      openProjectInEditor(name);
+      openProjectInEditor(name, runner || 'claude');
       return res.json({ ok: true, action });
     } catch (err) {
       return res.status(500).json({ ok: false, message: err.message });
@@ -1752,5 +1906,13 @@ app.listen(PORT, async () => {
   cleanupOrphanedTasks();
   startTaskRunner();
   startRemoteControlWatchdog();
+  telegram.init({
+    getActiveSessionObjects,
+    getProtectedSessions,
+    sessionRunnerMap,
+    PSMUX_BIN,
+    SESSION_PREFIX,
+    AI_TASK_PREFIX,
+  });
   console.log('[agent] Ready — waiting for commands from Pi relay');
 });
