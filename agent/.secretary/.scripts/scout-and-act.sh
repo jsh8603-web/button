@@ -268,6 +268,34 @@ fi
 # =============================================
 
 HANDLED_COUNT=0
+TELEGRAM_NEEDED=0
+TELEGRAM_REASONS=""
+
+# === 헬퍼 함수 ===
+queue_sonnet_task() {
+  local TYPE="$1" SESSION="$2" CONTEXT="$3"
+  local QUEUE_DIR="$SECRETARY_DIR/$(jq -r '.queue_dir // ".sonnet-queue"' "$CONFIG" 2>/dev/null)"
+  mkdir -p "$QUEUE_DIR"
+  jq -n --arg type "$TYPE" --arg session "$SESSION" \
+    --arg context "$CONTEXT" --arg timestamp "$(date -Iseconds)" \
+    '{type:$type,session:$session,context:$context,timestamp:$timestamp}' \
+    > "$QUEUE_DIR/$(date +%s).json"
+  bash "$SECRETARY_DIR/.scripts/wake-sonnet.sh"
+  log_event SONNET "$SESSION" "sonnet_invoked" "type=$TYPE" "wake-sonnet.sh"
+}
+
+send_telegram_alert() {
+  local MSG="$1"
+  log_event ESCALATION "" "telegram_alert" "$MSG" "telegram"
+  local _SECRET _CFG
+  _SECRET=$(jq -r '.agent_secret // ""' "$CONFIG" 2>/dev/null)
+  _CFG=$(mktemp)
+  printf 'header = "Authorization: Bearer %s"\n' "$_SECRET" > "$_CFG"
+  curl -s -K "$_CFG" "http://localhost:9876/telegram" \
+    -H 'Content-Type: application/json' \
+    -d "$(jq -n --arg msg "$MSG" '{message:$msg}')"
+  rm -f "$_CFG"
+}
 
 for S in $SESSIONS; do
   BLOCK=$(sed -n "/^--- $S ---$/,/^--- /p" "$REPORT" | head -n -1)
@@ -277,9 +305,16 @@ for S in $SESSIONS; do
   FIRST_ERR=$(echo "$ERRORS" | head -1 | sed 's/[0-9]\+/N/g')
 
   if [ "$STATUS" = "SESSION_DEAD" ] || [ "$STATUS" = "AGENT_DEAD" ]; then
-    # 우선순위 1: 사망 → 부활
-    log_event ERROR "$S" "session_dead" "status=$STATUS" "revive.sh"
-    bash "$SECRETARY_DIR/.scripts/revive.sh" "$S"
+    # 우선순위 1: 사망 → 1차: revive / 2차: Telegram
+    if check_dedup "$S" "session_dead"; then
+      log_event ERROR "$S" "session_dead" "status=$STATUS" "revive.sh"
+      bash "$SECRETARY_DIR/.scripts/revive.sh" "$S"
+    else
+      # 이미 revive 시도했는데 다음 사이클도 사망 → 자율 복구 실패
+      TELEGRAM_NEEDED=$((TELEGRAM_NEEDED + 1))
+      TELEGRAM_REASONS="$TELEGRAM_REASONS revival_failed:$S"
+      log_event ERROR "$S" "revival_failed" "status=$STATUS" "telegram"
+    fi
     HANDLED_COUNT=$((HANDLED_COUNT + 1))
 
   elif echo "$BLOCK" | grep -q "COMPRESSED: YES"; then
@@ -302,27 +337,46 @@ for S in $SESSIONS; do
     HANDLED_COUNT=$((HANDLED_COUNT + 1))
 
   elif echo "$BLOCK" | grep -q "GUARD_BLOCKED: YES" || [ "$DENY_COUNT" -ge 5 ]; then
-    # 우선순위 3: Guard 교착 → 가드 임시 비활성화
+    # 우선순위 3: Guard 교착 → 1차: 스크립트 해제 / 실패 시: Sonnet 분석
     if [ ! -f "$RESTORE_MARKER" ]; then
       BACKUP=$(disable_blocking_guard)
       if [ "$BACKUP" != "FAIL" ] && [ -n "$BACKUP" ]; then
         echo "$BACKUP" > "$RESTORE_MARKER"
         echo "$S" > "${RESTORE_MARKER}.session"
         log_event WARN "$S" "guard_unlocked" "backup=$BACKUP deny=$DENY_COUNT" "guard-unlock"
-        "$PSMUX" send-keys -t "$S" "[secretary] 가드 임시 해제됨 (15분 후 자동 복원). 작업을 재개하세요." Enter
+        "$PSMUX" send-keys -t "$S" "[secretary] Guard temporarily disabled. Resume your work." Enter
       else
         log_event WARN "$S" "guard_unlock_failed" "deny=$DENY_COUNT" "guard-unlock-fail"
+        # 스크립트 해제 실패 → Sonnet에 hook 분석 요청
+        HOOK_CTX=$(tail -20 ~/.claude/hook-metrics.jsonl 2>/dev/null | jq -s '.' 2>/dev/null || echo "[]")
+        if [ -f "$SECRETARY_DIR/.sonnet-enabled" ] && check_dedup "$S" "guard_unlock_analysis"; then
+          queue_sonnet_task "guard_unlock_analysis" "$S" \
+            "guard unlock failed for session $S. deny_count=$DENY_COUNT. recent_hook_metrics=$HOOK_CTX"
+        else
+          TELEGRAM_NEEDED=$((TELEGRAM_NEEDED + 1))
+          TELEGRAM_REASONS="$TELEGRAM_REASONS guard_unlock_failed:$S"
+        fi
       fi
     fi
     HANDLED_COUNT=$((HANDLED_COUNT + 1))
 
   elif echo "$BLOCK" | grep -q "REPEAT_ERROR: FOUND"; then
-    # 우선순위 5: 삽질 반복 → 원문 맥락 전달
-    log_event WARN "$S" "repeat_error" "$FIRST_ERR" "repeat-warn"
-    PREV_CTX=$(echo "$BLOCK" | sed -n '/PREVIOUS_CONTEXT:/,/^[A-Z]/p' | grep "^  " | sed 's/^  //')
-    echo "$PREV_CTX" > /tmp/repeat-warn-${S}.txt
-    cat "$SECRETARY_DIR/.messages/repeat-warn-header.txt" /tmp/repeat-warn-${S}.txt > /tmp/repeat-warn-full-${S}.txt
-    bash "$SECRETARY_DIR/.scripts/msg.sh" "$S" /tmp/repeat-warn-full-${S}.txt
+    # 우선순위 5: 반복 에러 → 1차: 경고 전송 / 2차(지속): Sonnet 에스컬레이션
+    if check_dedup "$S" "repeat_error"; then
+      log_event WARN "$S" "repeat_error" "$FIRST_ERR" "repeat-warn"
+      PREV_CTX=$(echo "$BLOCK" | sed -n '/PREVIOUS_CONTEXT:/,/^[A-Z]/p' | grep "^  " | sed 's/^  //')
+      echo "$PREV_CTX" > /tmp/repeat-warn-${S}.txt
+      cat "$SECRETARY_DIR/.messages/repeat-warn-header.txt" /tmp/repeat-warn-${S}.txt > /tmp/repeat-warn-full-${S}.txt
+      bash "$SECRETARY_DIR/.scripts/msg.sh" "$S" /tmp/repeat-warn-full-${S}.txt
+    else
+      # 경고 보냈는데 다음 사이클도 동일 에러 → Sonnet 분석
+      if [ -f "$SECRETARY_DIR/.sonnet-enabled" ] && check_dedup "$S" "repeat_error_escalation"; then
+        SNAP_CTX=$(cat "$SNAP_DIR/$S/snap_$(cat "$SNAP_DIR/$S/.idx" 2>/dev/null || echo 0).txt" 2>/dev/null | tail -30)
+        queue_sonnet_task "semantic_error_analysis" "$S" \
+          "session=$S persistent_error=$FIRST_ERR context=$SNAP_CTX"
+        log_event SONNET "$S" "repeat_error_escalated" "$FIRST_ERR" "sonnet"
+      fi
+    fi
     HANDLED_COUNT=$((HANDLED_COUNT + 1))
 
   elif echo "$BLOCK" | grep -q "WAITING_FOR_USER: YES" && [ "$IDLE_SEC" -gt 600 ]; then
@@ -485,38 +539,11 @@ if [ "$RL_COUNT" -ge 2 ]; then
 fi
 
 # =============================================
-# S-1 에스컬레이션 (Sonnet 우선, Telegram 폴백)
+# S-1: Telegram — 자율 복구 실패 시에만
 # =============================================
-
-# UNHANDLED_SESSIONS 수집 (SESSIONS 루프 직후 삽입)
-UNHANDLED_SESSIONS=$(awk '/^--- /{cur=$0; sub("^--- ","",cur); sub(" ---$","",cur)} /STATUS: (AGENT_DEAD|SESSION_DEAD)|COMPRESSED: YES|REPEAT_ERROR: FOUND|WAITING_FOR_USER: YES/{if(cur!="") print cur}' "$REPORT")
-TOTAL_ISSUES=$(echo "$UNHANDLED_SESSIONS" | grep -c . 2>/dev/null || echo 0)
-
-if [ "$TOTAL_ISSUES" -gt "$HANDLED_COUNT" ]; then
-  if [ -f "$SECRETARY_DIR/.sonnet-enabled" ] && check_dedup "" "exception_analysis"; then
-    TYPE="exception_analysis"
-    QUEUE_DIR="$SECRETARY_DIR/$(jq -r '.queue_dir // ".sonnet-queue"' "$CONFIG" 2>/dev/null)"
-    mkdir -p "$QUEUE_DIR"
-    TASK_FILE="$QUEUE_DIR/$(date +%s).json"
-    jq -n \
-      --arg type "$TYPE" \
-      --arg report "$(cat "$REPORT")" \
-      --arg unhandled "$UNHANDLED_SESSIONS" \
-      --arg timestamp "$(date -Iseconds)" \
-      '{type:$type, report:$report, unhandled_sessions:$unhandled, timestamp:$timestamp}' \
-      > "$TASK_FILE"
-    bash "$SECRETARY_DIR/.scripts/wake-sonnet.sh"
-    log_event SONNET "" "sonnet_invoked" "type=$TYPE unhandled=$UNHANDLED_SESSIONS" "wake-sonnet.sh"
-  else
-    log_event ESCALATION "" "unhandled_anomaly" "total=$TOTAL_ISSUES handled=$HANDLED_COUNT" "telegram"
-    AGENT_SECRET=$(jq -r '.agent_secret // ""' "$CONFIG" 2>/dev/null)
-    _CURL_CFG=$(mktemp)
-    printf 'header = "Authorization: Bearer %s"\n' "$AGENT_SECRET" > "$_CURL_CFG"
-    curl -s -K "$_CURL_CFG" "http://localhost:9876/telegram" \
-      -H 'Content-Type: application/json' \
-      -d '{"message":"[secretary] Unhandled anomaly detected. Please check."}'
-    rm -f "$_CURL_CFG"
-  fi
+# 조건: revive 후에도 사망 지속 / 가드 해제 스크립트+Sonnet 모두 실패
+if [ "$TELEGRAM_NEEDED" -gt 0 ]; then
+  send_telegram_alert "[secretary] Human intervention needed: ${TELEGRAM_REASONS}"
 fi
 
 # =============================================
