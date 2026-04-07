@@ -297,14 +297,6 @@ fi
     fi
     echo "IDLE_PROMPT: $IDLE_PROMPT"
 
-    # promotion-signal 교착 감지 (pending-promotion.txt 미완료 항목 있으면 모든 tool 차단)
-    if [ -f "$HOME/.claude/pending-promotion.txt" ] && \
-       grep -q '^\[ \]' "$HOME/.claude/pending-promotion.txt"; then
-      echo "PROMO_BLOCKED: YES"
-    else
-      echo "PROMO_BLOCKED: NO"
-    fi
-
     # Circular work: 5사이클 unstaged diff 누적 추적 (net LOC ≈ 0 + 수정 > N)
     CIRC_DIR=$(grep "^${S}|" "$REGISTRY" | cut -d'|' -f3)
     if [ -n "$CIRC_DIR" ] && [ "$CIRC_DIR" != "unknown" ] && \
@@ -563,16 +555,6 @@ print(len([f for f in files if os.path.getmtime(f) > ts]))
     fi
     HANDLED_COUNT=$((HANDLED_COUNT + 1))
 
-  elif echo "$BLOCK" | grep -q "PROMO_BLOCKED: YES"; then
-    # promotion-signal 교착 → promotion-log.md 기록 요청 (STUCK 오판 방지)
-    if check_dedup "$S" "promo_blocked"; then
-      echo "pending-promotion.txt에 미완료 항목 있어. tool이 전부 차단된 상태야. promotion-log.md 먼저 기록하고 나서 계속해." \
-        > "$TMPDIR/promo-blocked-${S}.txt"
-      bash "$SECRETARY_DIR/.scripts/msg.sh" "$S" "$TMPDIR/promo-blocked-${S}.txt"
-      log_event WARN "$S" "promo_blocked_detected" "pending-promotion.txt has unchecked items" "promo-blocked-warn"
-    fi
-    HANDLED_COUNT=$((HANDLED_COUNT + 1))
-
   elif echo "$BLOCK" | grep -q "STUCK: YES" && ! echo "$BLOCK" | grep -q "IDLE_PROMPT: YES"; then
     # Feature 2: 5사이클+ 무진전 → 넛지 (idle 대기 중인 세션은 제외)
     if check_dedup "$S" "stuck_warn"; then
@@ -627,6 +609,10 @@ print(len([f for f in files if os.path.getmtime(f) > ts]))
       log_event INFO "$S" "rate_limit_skip" "rate_limit_detected — no action" "skip"
     else
     log_event ERROR "$S" "error_detected" "$ERRORS" "exception_analysis"
+    # promotion-log ERROR 기록 요청 (1회/세션)
+    if check_dedup "$S" "promo_error_remind"; then
+      bash "$SECRETARY_DIR/.scripts/msg.sh" "$S" "$SECRETARY_DIR/.messages/promo-error-remind.txt"
+    fi
     SESSION_MODEL=$(grep "^${S}|" "$REGISTRY" | cut -d'|' -f2)
     if echo "$SESSION_MODEL" | grep -qi "opus"; then
       # Opus 세션 → 직접 self-verify 메시지 (소환 없음)
@@ -664,6 +650,20 @@ print(len([f for f in files if os.path.getmtime(f) > ts]))
     WC_COMMIT_MSG=$(echo "$RECENT_COMMITS_WC" | head -1 | sed 's/^[a-f0-9]* //')
     WC_PROJ=$(basename "$WC_REG_DIR")
     echo "$(date +%s)|${WC_COMMIT_MSG}|${WC_PROJ}" > "$COMMIT_TS_FILE"
+    # promotion-log 기록 요청 (커밋 직후 1회/세션)
+    if check_dedup "$S" "promo_commit_remind"; then
+      bash "$SECRETARY_DIR/.scripts/msg.sh" "$S" "$SECRETARY_DIR/.messages/promo-commit-remind.txt"
+    fi
+    # simplify remind: diff LOC 50+ 시 (커밋 직후)
+    if [ -n "$WC_REG_DIR" ] && [ "$WC_REG_DIR" != "unknown" ]; then
+      DIFF_LOC=$(git -C "$WC_REG_DIR" diff HEAD~1 --unified=0 2>/dev/null | grep -c '^[+-][^+-]' || echo 0)
+      if [ "${DIFF_LOC:-0}" -ge 50 ] && check_dedup "$S" "simplify_remind"; then
+        echo "방금 커밋 diff가 ${DIFF_LOC}줄이야. 작업 끝나면 simplify 검토해봐 — 리팩토링/중복 제거 여지 있는지." \
+          > "$TMPDIR/simplify-remind-${S}.txt"
+        bash "$SECRETARY_DIR/.scripts/msg.sh" "$S" "$TMPDIR/simplify-remind-${S}.txt"
+        log_event INFO "$S" "simplify_remind_sent" "diff_loc=${DIFF_LOC}" "simplify"
+      fi
+    fi
   elif [ -f "$COMMIT_TS_FILE" ] && echo "$BLOCK" | grep -q "IDLE_PROMPT: YES" && [ "$IDLE_SEC" -gt 300 ]; then
     # 이전 사이클 커밋 있었고 + 현재 idle + 사용자도 부재 → 완료 Telegram
     WC_INFO=$(cat "$COMMIT_TS_FILE")
@@ -969,9 +969,7 @@ if [ -f "$WF_ACTIVE_FILE" ]; then
 fi
 
 # =============================================
-# Phase 4.7: request/pattern 기록 강제 nudge
-# 세션 JSONL에서 docs/ Read(request) 또는 Edit/Write 3건+(pattern) 감지
-# promotion-log.md 편집 없이 threshold 도달 시 → 에이전트에 기록 요청
+# Phase 4.7: promotion-log nudge + progress.md 생성 넛지
 # =============================================
 
 if [ -f "$REGISTRY" ]; then
@@ -981,34 +979,50 @@ if [ -f "$REGISTRY" ]; then
     [ -z "$FSID" ] && continue
 
     # JSONL 경로 탐색
-    PRJ_KEY=$(echo "$FD" | sed 's|.*[/\\]||; s|[^a-zA-Z0-9_-]|-|g')
     JSONL_FILE=$(/usr/bin/find "$HOME/.claude/projects" -name "${FSID}.jsonl" 2>/dev/null | head -1)
     [ -z "$JSONL_FILE" ] || [ ! -f "$JSONL_FILE" ] && continue
 
-    # promotion-log.md 이미 수정했는지 확인 → 했으면 skip
-    PROMO_EDIT=$(grep -c '"name":"Edit"' "$JSONL_FILE" 2>/dev/null | head -1 || echo 0)
+    # promotion-log.md 이미 기록했는지 확인 → 했으면 skip
     PROMO_LOGGED=$(grep '"file_path"' "$JSONL_FILE" 2>/dev/null | grep -c "promotion-log" || echo 0)
-    [ "${PROMO_LOGGED:-0}" -gt 0 ] && continue
 
-    # request 감지: docs/ 경로 Read
-    DOCS_READ_COUNT=$(grep -o '"file_path":"[^"]*"' "$JSONL_FILE" 2>/dev/null \
-      | grep -c '/docs/' || echo 0)
+    if [ "${PROMO_LOGGED:-0}" -eq 0 ]; then
+      # request 감지: docs/ 경로 Read
+      DOCS_READ_COUNT=$(grep -o '"file_path":"[^"]*"' "$JSONL_FILE" 2>/dev/null \
+        | grep -c '/docs/' || echo 0)
 
-    # pattern 감지: Edit + Write 합산
-    EDIT_COUNT=$(grep -o '"name":"Edit"\|"name":"Write"' "$JSONL_FILE" 2>/dev/null | wc -l | tr -d ' ')
+      # pattern 감지: Edit + Write 합산
+      EDIT_COUNT=$(grep -o '"name":"Edit"\|"name":"Write"' "$JSONL_FILE" 2>/dev/null | wc -l | tr -d ' ')
 
-    if [ "${DOCS_READ_COUNT:-0}" -gt 0 ] && check_dedup "$FS" "request_remind_${TODAY}"; then
-      echo "docs/ 파일 읽으면서 작업했어. 반복 가능한 작업이면 promotion-log.md에 R{번호}로 기록해줘." \
-        > "$TMPDIR/request-remind-${FS}.txt"
-      bash "$SECRETARY_DIR/.scripts/msg.sh" "$FS" "$TMPDIR/request-remind-${FS}.txt"
-      log_event INFO "$FS" "request_remind_sent" "docs_reads=${DOCS_READ_COUNT}" "request-remind"
+      if [ "${DOCS_READ_COUNT:-0}" -gt 0 ] && check_dedup "$FS" "request_remind_${TODAY}"; then
+        bash "$SECRETARY_DIR/.scripts/msg.sh" "$FS" "$SECRETARY_DIR/.messages/promo-commit-remind.txt"
+        log_event INFO "$FS" "request_remind_sent" "docs_reads=${DOCS_READ_COUNT}" "request-remind"
+      elif [ "${EDIT_COUNT:-0}" -ge 3 ] && check_dedup "$FS" "pattern_remind_${TODAY}"; then
+        bash "$SECRETARY_DIR/.scripts/msg.sh" "$FS" "$SECRETARY_DIR/.messages/promo-commit-remind.txt"
+        log_event INFO "$FS" "pattern_remind_sent" "edit_count=${EDIT_COUNT}" "pattern-remind"
+      fi
     fi
 
-    if [ "${EDIT_COUNT:-0}" -ge 3 ] && check_dedup "$FS" "pattern_remind_${TODAY}"; then
-      echo "이번 세션에서 파일 ${EDIT_COUNT}개 수정했어. 여러 단계 조합한 작업이면 promotion-log.md에 P{번호}로 기록해줘." \
-        > "$TMPDIR/pattern-remind-${FS}.txt"
-      bash "$SECRETARY_DIR/.scripts/msg.sh" "$FS" "$TMPDIR/pattern-remind-${FS}.txt"
-      log_event INFO "$FS" "pattern_remind_sent" "edit_count=${EDIT_COUNT}" "pattern-remind"
+    # progress.md 생성 넛지: plan.md 있고 progress.md 없음 + 세션 30분+
+    if [ -n "$FD" ] && [ "$FD" != "unknown" ]; then
+      PLAN_EXISTS=0; PROGRESS_EXISTS=0
+      [ -f "$FD/plan.md" ] && PLAN_EXISTS=1
+      [ -f "$FD/progress.md" ] && PROGRESS_EXISTS=1
+      if [ "$PLAN_EXISTS" -eq 1 ] && [ "$PROGRESS_EXISTS" -eq 0 ]; then
+        # 세션 나이 확인 (30분 = 1800초)
+        _SESS_AGE=$("$PYTHON" -c "
+import time
+from datetime import datetime
+try:
+    ts = datetime.fromisoformat('$FC'.replace('+09:00','+0900'))
+    print(int(time.time() - ts.timestamp()))
+except:
+    print(0)
+" 2>/dev/null || echo 0)
+        if [ "${_SESS_AGE:-0}" -gt 1800 ] && check_dedup "$FS" "progress_nudge_${TODAY}"; then
+          bash "$SECRETARY_DIR/.scripts/msg.sh" "$FS" "$SECRETARY_DIR/.messages/progress-nudge.txt"
+          log_event INFO "$FS" "progress_nudge_sent" "plan_exists=1 progress_missing=1" "progress-nudge"
+        fi
+      fi
     fi
   done < <(cat "$REGISTRY")
 fi

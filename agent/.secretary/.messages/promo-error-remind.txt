@@ -1,0 +1,15 @@
+에러 발생했어. promotion-log.md에 ERROR 유형으로 기록해줘.
+
+파일: ~/.claude/memory/promotion-log.md
+기록 방법: 전체 Read 불필요. 마지막 항목 확인은 grep으로만:
+  grep "^### " ~/.claude/memory/promotion-log.md | tail -3
+
+양식:
+### YYYY-MM-DD · {에러 키워드}
+**유형**: ERROR
+**상황**: {어떤 상황에서 발생했는지 1줄}
+**원인**: {왜 발생했는지 1줄}
+**해결**: {어떻게 해결했는지 1줄}
+**방지책**: {재발 방지 방법 1줄}
+
+위 양식을 파일 끝에 append하면 돼. 에러 해결 후 바로 기록할 것.
