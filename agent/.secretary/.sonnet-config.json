@@ -1,0 +1,13 @@
+{
+  "sonnet_session": "secretary-sonnet",
+  "queue_dir": ".sonnet-queue",
+  "log_dir": ".sonnet-log",
+  "dead_letter_dir": ".dead-letter",
+  "lock_ttl_sec": 600,
+  "daily_cap": 10,
+  "idle_timeout_sec": 300,
+  "audit_log_dir": "~/.claude/audit-log",
+  "psmux_path": "/c/Users/jsh86/AppData/Local/Microsoft/WinGet/Packages/marlocarlo.psmux_Microsoft.Winget.Source_8wekyb3d8bbwe/psmux.exe",
+  "bash_path": "C:/msys64/usr/bin/bash.exe",
+  "agent_secret": "btn-agent-secret-2026-x7k9m"
+}

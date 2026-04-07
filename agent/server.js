@@ -39,7 +39,19 @@ for (const [name, val] of [['EDITOR_CMD', EDITOR_CMD], ['CLAUDE_BIN', CLAUDE_BIN
   }
 }
 
+const rateLimit = require('express-rate-limit');
+
 // --- Middleware ---
+
+const limiter = rateLimit({
+	windowMs: 15 * 60 * 1000, // 15 minutes
+	max: 100, // Limit each IP to 100 requests per `window` (here, per 15 minutes)
+	standardHeaders: true, // Return rate limit info in the `RateLimit-*` headers
+	legacyHeaders: false, // Disable the `X-RateLimit-*` headers
+});
+
+// Apply the rate limiting middleware to all requests
+app.use(limiter);
 
 app.use(express.json());
 app.use(cors({ origin: ALLOWED_ORIGIN }));
@@ -201,7 +213,19 @@ function readTaskQueue() {
 }
 
 function writeTaskQueue(tasks) {
-  fs.writeFileSync(TASK_QUEUE_FILE, JSON.stringify(tasks, null, 2));
+  // Sanitize string fields to prevent JSON corruption from raw control chars
+  for (const t of tasks) {
+    for (const field of ['log', 'result', 'command', 'instructions']) {
+      if (typeof t[field] === 'string') {
+        t[field] = t[field].replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, ' ');
+      }
+    }
+  }
+  const json = JSON.stringify(tasks, null, 2);
+  // Write to temp file first, then rename (atomic write to prevent corruption)
+  const tmpFile = TASK_QUEUE_FILE + '.tmp';
+  fs.writeFileSync(tmpFile, json);
+  fs.renameSync(tmpFile, TASK_QUEUE_FILE);
 }
 
 // --- AI Task Learning ---
@@ -269,7 +293,9 @@ function hasTrustPrompt(output) {
 
 function hasClaudePrompt(output) {
   if (hasTrustPrompt(output)) return false;
-  return output.includes('\u276F') || output.includes('>') || output.includes('\u256D') || output.includes('human');
+  // ❯ = Claude input prompt, status line text = Claude UI fully loaded
+  if (output.includes('\u276F')) return true;
+  return output.includes('esc to interrupt') || output.includes('shift+tab');
 }
 
 // --- Shared Helpers ---
@@ -532,7 +558,7 @@ function executeAiTask(task) {
   const AUDIT_KW = ['장소감사 wf', '장소감사wf', 'place audit wf', 'audit'];
   const instrText = `${task.instructions || ''} ${task.name || ''}`.toLowerCase();
   if (AUDIT_KW.some(k => instrText.includes(k.toLowerCase())) && (task.project || '').replace(/\\/g, '/').includes('babyplace')) {
-    prompt += `\n[CRITICAL] Before starting, you MUST read the file AUDIT_RULES.md in the project root using ReadFile. This file contains all audit rules and procedures. Do NOT skip this step. After reading, follow the rules exactly — especially the 30-minute time budget rule.\n`;
+    prompt += `\n[CRITICAL] Before starting, you MUST read the file AUDIT_RULES.md in the project root (cat AUDIT_RULES.md). This file contains all audit rules and procedures. Do NOT skip this step. After reading, follow the rules exactly — especially the 30-minute time budget rule.\n`;
   }
   if (learned) {
     if (learned.approach) prompt += `\nPreviously successful approach for similar task:\n${learned.approach}\n`;
@@ -559,7 +585,13 @@ function executeAiTask(task) {
 - NEVER kill/close existing psmux sessions or VS Code windows
 - Temp files: use /tmp/ (MSYS2) for scripts, Windows paths for tool arguments
 - Gmail SMTP credentials: read C:/Users/jsh86/.claude/keys/gmail-smtp.md
-- Google Drive OAuth: read C:/Users/jsh86/.claude/keys/gdrive-oauth.md
+- Google Drive OAuth: read C:/Users/jsh86/.claude/keys/google-oauth.md
+- Task registration & execution API: read C:/Users/jsh86/.claude/docs/domain/agent-task-api.md (task-add, task-list, task-update, task-cancel, Pi wake-at, onComplete actions)
+- Code quality standards: read C:/Users/jsh86/.claude/docs/operations/code-quality.md
+- Email sending (SMTP): read C:/Users/jsh86/.claude/skills/email-smtp/skill.md
+- Gmail fetch (OAuth2): read C:/Users/jsh86/.claude/skills/gmail-fetch/skill.md
+- Google Drive upload: read C:/Users/jsh86/.claude/skills/gdrive-upload/skill.md
+- Telegram notifications: read C:/Users/jsh86/.claude/skills/telegram-notify/skill.md
 `;
   }
 
@@ -583,8 +615,8 @@ STEP 2: Programmatic approach (non-GUI)
 
 STEP 3: GUI automation (last resort — screenshot, click, visual interaction)
 - Only when Step 2 exhausted all programmatic options.
-- Read ~/.claude/rules/pc-tools.md for tool inventory.
-- Read the relevant skill file (from ~/.claude/docs/) before using any GUI tool.
+- Tool inventory: read C:/Users/jsh86/.claude/rules/pc-tools.md (or PC_TOOLS.md in project root if available)
+- Read the relevant skill file before using any GUI tool.
 - Output: "STEP 3: Using {tool} because: Step 1={reason}, Step 2={reason}"
 
 === RULES ===
@@ -706,9 +738,11 @@ STEP 3: GUI automation (last resort — screenshot, click, visual interaction)
 
     let promptIdleCount = 0;
     const PROMPT_IDLE_THRESHOLD = 3;
+    let rateLimitPauseMs = 0; // accumulate pause time from rate limits
+    let rateLimitHandling = false; // prevent duplicate rate limit handling
 
     function poll() {
-      if (Date.now() - startTime > AI_TASK_TIMEOUT) {
+      if (Date.now() - startTime - rateLimitPauseMs > AI_TASK_TIMEOUT) {
         console.error(`[ai-task] Timeout for "${task.id}" — session ${session} kept alive`);
         finishAiTask(task, 'failed', 'Timeout: exceeded 30 minutes');
         return;
@@ -754,6 +788,40 @@ STEP 3: GUI automation (last resort — screenshot, click, visual interaction)
             console.log(`[ai-task] Waiting for ${runnerLabel} prompt... (${waitElapsed}s, output length: ${output.length})`);
           }
           setTimeout(poll, 3000);
+          return;
+        }
+
+        // Rate limit detection: auto-select "Stop and wait for limit to reset"
+        if (!rateLimitHandling && (output.includes("You've hit your limit") || output.includes('rate-limit-options'))) {
+          rateLimitHandling = true;
+          // Parse reset time from output (e.g., "resets 1am (Asia/Seoul)")
+          const resetMatch = output.match(/resets\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)/i);
+          const resetTimeStr = resetMatch ? resetMatch[1] : 'unknown';
+          console.log(`[ai-task] Rate limit detected for "${task.id}", auto-selecting "Stop and wait" (resets: ${resetTimeStr})`);
+          // Press Enter to select option 1 (Stop and wait for limit to reset)
+          exec(`"${PSMUX_BIN}" send-keys -t ${session} Enter`, (err) => {
+            if (err) console.error(`[ai-task] Rate limit Enter send error:`, err.message);
+          });
+          // Calculate wait time — poll every 60s until rate limit clears
+          const rateLimitStart = Date.now();
+          function rateLimitPoll() {
+            capture((err, stdout) => {
+              const rlOutput = (stdout || '').trim();
+              const stillLimited = rlOutput.includes("You've hit your limit") || rlOutput.includes('rate-limit-options') || rlOutput.includes('Waiting for rate limit');
+              if (stillLimited) {
+                const waited = ((Date.now() - rateLimitStart) / 1000 / 60).toFixed(1);
+                console.log(`[ai-task] Still rate-limited for "${task.id}", waited ${waited}min...`);
+                setTimeout(rateLimitPoll, 60000);
+              } else {
+                const pauseTime = Date.now() - rateLimitStart;
+                rateLimitPauseMs += pauseTime;
+                rateLimitHandling = false;
+                console.log(`[ai-task] Rate limit cleared for "${task.id}" after ${(pauseTime / 1000 / 60).toFixed(1)}min, resuming`);
+                setTimeout(poll, 10000);
+              }
+            });
+          }
+          setTimeout(rateLimitPoll, 60000); // first check after 1 min
           return;
         }
 
@@ -818,12 +886,23 @@ STEP 3: GUI automation (last resort — screenshot, click, visual interaction)
           if (hasAuditTrigger && project && project.replace(/\\/g, '/').includes('babyplace')) {
             const watchdogScript = path.join(project.replace(/\//g, '\\'), 'scripts', 'audit-watchdog.sh');
             if (fs.existsSync(watchdogScript)) {
-              const watchdogCmd = `bash "${toMsys(watchdogScript)}" ${session} 30 --monitor-only`;
-              const watchdog = require('child_process').spawn('bash', ['-c', watchdogCmd], {
-                detached: true, stdio: 'ignore', env: { ...process.env, PSMUX_BIN: PSMUX_BIN }
+              const watchdogLogFile = path.join(project.replace(/\//g, '\\'), 'watchdog.log');
+              const watchdogLog = fs.openSync(watchdogLogFile, 'a');
+              const psmuxBinMsys = toMsys(PSMUX_BIN);
+              const watchdogCmd = `"${toMsys(watchdogScript)}" "${session}" 30 --monitor-only`;
+              const watchdog = require('child_process').spawn(BASH_PATH, ['-c', watchdogCmd], {
+                detached: true,
+                stdio: ['ignore', watchdogLog, watchdogLog],
+                env: { ...process.env, PSMUX_BIN: psmuxBinMsys }
+              });
+              watchdog.on('error', (err) => {
+                console.error(`[ai-task] audit-watchdog spawn error: ${err.message}`);
               });
               watchdog.unref();
-              console.log(`[ai-task] audit-watchdog spawned for ${session} (pid: ${watchdog.pid})`);
+              fs.closeSync(watchdogLog);
+              console.log(`[ai-task] audit-watchdog spawned for ${session} (pid: ${watchdog.pid}, log: ${watchdogLogFile})`);
+            } else {
+              console.warn(`[ai-task] audit-watchdog script not found: ${watchdogScript}`);
             }
           }
         } catch (err) {
@@ -908,6 +987,8 @@ function finishAiTask(task, status, result) {
   t.log = result;
 
   if (t.repeat) {
+    t.lastRunStatus = status;
+    t.lastRunAt = t.completedAt;
     const next = nextCronRun(t.repeat);
     t.scheduledAt = next ? next.toISOString() : null;
     t.status = t.scheduledAt ? 'pending' : t.status;
@@ -998,11 +1079,24 @@ function cleanupOrphanedTasks() {
 
   for (const t of tasks) {
     if (t.status !== 'running') continue;
-    t.status = 'failed';
-    t.result = t.result || 'Orphaned: agent restarted while task was running';
     t.completedAt = t.completedAt || new Date().toISOString();
     changed = true;
-    console.log(`[ai-task] Orphaned task "${t.id.slice(0, 8)}" (${t.name}) → failed`);
+
+    if (t.repeat) {
+      // Repeat task: record last run as failed, re-queue for next run
+      t.lastRunStatus = 'failed';
+      t.lastRunAt = t.completedAt;
+      t.result = null;
+      t.log = null;
+      const next = nextCronRun(t.repeat);
+      t.scheduledAt = next ? next.toISOString() : null;
+      t.status = t.scheduledAt ? 'pending' : 'failed';
+      console.log(`[ai-task] Orphaned repeat task "${t.id.slice(0, 8)}" (${t.name}) → re-queued at ${t.scheduledAt}`);
+    } else {
+      t.status = 'failed';
+      t.result = t.result || 'Orphaned: agent restarted while task was running';
+      console.log(`[ai-task] Orphaned task "${t.id.slice(0, 8)}" (${t.name}) → failed`);
+    }
 
     // Kill zombie psmux session
     const safeName = taskSafeName(t);
@@ -1053,6 +1147,22 @@ function startTaskRunner() {
         continue;
       }
 
+      // Safety guard: skip dangerous commands (shutdown/restart) if overdue by > 5 minutes
+      const DANGEROUS_CMD_RE = /\bshutdown\b|\brestart\b|\breboot\b/i;
+      const OVERDUE_GRACE_MS = 5 * 60 * 1000; // 5 minutes
+      if (DANGEROUS_CMD_RE.test(command) || DANGEROUS_CMD_RE.test(task.name || '')) {
+        const scheduledTime = new Date(task.scheduledAt).getTime();
+        if (now.getTime() - scheduledTime > OVERDUE_GRACE_MS) {
+          task.status = 'failed';
+          task.log = `Skipped: dangerous command overdue by ${Math.round((now.getTime() - scheduledTime) / 60000)}min (safety guard)`;
+          task.completedAt = new Date().toISOString();
+          changed = true;
+          console.log(`[task] SAFETY: Skipped overdue dangerous task "${task.id}" (${task.name || command})`);
+          telegram.notify(`⚠️ *Task skipped (safety)*\n\`${task.id.slice(0,8)}\` ${task.name || command}\nOverdue — dangerous command not auto-executed`, { parse_mode: 'Markdown' });
+          continue;
+        }
+      }
+
       console.log(`[task] Running "${task.id}" (${task.name || task.command})`);
       task.status = 'running';
       changed = true;
@@ -1067,6 +1177,8 @@ function startTaskRunner() {
         t.completedAt = new Date().toISOString();
 
         if (t.repeat) {
+          t.lastRunStatus = err ? 'failed' : 'completed';
+          t.lastRunAt = t.completedAt;
           const next = nextCronRun(t.repeat);
           t.scheduledAt = next ? next.toISOString() : null;
           t.status = t.scheduledAt ? 'pending' : 'completed';
@@ -1137,6 +1249,10 @@ app.get('/health', (req, res) => {
   res.json({ status: 'online', uptime: process.uptime() });
 });
 
+app.get('/ping', (req, res) => {
+    res.send('pong');
+});
+
 // Full status: sessions, projects, uptime (Pi relay calls this)
 app.get('/status', verifySecret, async (req, res) => {
   const sessionObjects = await getActiveSessionObjects();
@@ -1152,10 +1268,13 @@ app.get('/status', verifySecret, async (req, res) => {
     }
   }
 
-  // Clean stale protected entries — but only when psmux has active sessions
-  // (after hibernate wake, psmux may return empty list temporarily; wiping protected list would be destructive)
+  // Clean stale protected entries
+  // After hibernate wake, psmux may return empty temporarily — only clean after 60s uptime
   if (activeNames.length > 0) {
     protectedList = protectedList.filter(s => activeNames.includes(s));
+  } else if (protectedList.length > 0 && process.uptime() > 60) {
+    console.log(`[status] Clearing stale protected sessions (psmux empty, uptime ${Math.round(process.uptime())}s): ${protectedList.join(', ')}`);
+    protectedList = [];
   }
   setProtectedSessions(protectedList);
 
@@ -1180,8 +1299,8 @@ app.get('/status', verifySecret, async (req, res) => {
       s.runner = runner;
     } else if (obj.type === 'schedule') {
       const safeName = obj.name.slice(AI_TASK_PREFIX.length);
-      const task = taskQueue.find(t => t.status === 'running' && t.type === 'ai' && taskSafeName(t) === safeName);
-      s.runner = task ? (task.runner || 'claude') : null;
+      const task = taskQueue.find(t => t.type === 'ai' && taskSafeName(t) === safeName);
+      s.runner = task ? (task.runner || 'claude') : 'claude';
     }
     return s;
   });
@@ -1429,10 +1548,10 @@ function openProjectInEditor(name, runner = 'claude') {
       } else {
         // Claude: wait for prompt, then send /remote-control
         function sendRemoteControl(attempt = 1) {
-          const MAX_RC_ATTEMPTS = 3;
-          const RC_VERIFY_DELAY = 5000;
+          const MAX_RC_ATTEMPTS = 5;
+          const RC_VERIFY_DELAY = 6000;
           const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-          console.log(`[proj] Claude stable in ${elapsed}s, sending /remote-control (attempt ${attempt}/${MAX_RC_ATTEMPTS})`);
+          console.log(`[proj] Sending /remote-control (attempt ${attempt}/${MAX_RC_ATTEMPTS}, ${elapsed}s)`);
           exec(`"${PSMUX_BIN}" send-keys -t ${session} '/remote-control' Enter`, (err) => {
             if (err) console.error('[proj] /remote-control send error:', err.message);
             else console.log(`[proj] Sent /remote-control to ${session}`);
@@ -1445,7 +1564,11 @@ function openProjectInEditor(name, runner = 'claude') {
                 const alive = !pane.includes('$') || hasRemote;
                 console.log(`[proj] Health check (${session}): ${alive ? 'OK' : 'Claude may have exited'}, remote=${hasRemote}`);
                 if (!hasRemote && alive && attempt < MAX_RC_ATTEMPTS) {
-                  sendRemoteControl(attempt + 1);
+                  setTimeout(() => sendRemoteControl(attempt + 1), 2000);
+                } else if (!hasRemote && alive) {
+                  // All retries failed — schedule one final attempt after 30s
+                  console.warn(`[proj] /remote-control not confirmed after ${MAX_RC_ATTEMPTS} attempts, scheduling final retry in 30s`);
+                  setTimeout(() => sendRemoteControl(MAX_RC_ATTEMPTS + 1), 30000);
                 } else if (!alive) {
                   console.log(`[proj] Pane content:\n${pane}`);
                 }
@@ -1459,7 +1582,7 @@ function openProjectInEditor(name, runner = 'claude') {
             capturePaneTail((err, stdout) => {
               const output = (stdout || '').trim();
               console.error(`[proj] Claude did not start within ${MAX_WAIT / 1000}s in ${session}`);
-              if (!output || (!output.includes('\u256D') && !output.includes('human') && !output.includes('Claude'))) {
+              if (!output || (!output.includes('\u276F') && !output.includes('esc to interrupt') && !output.includes('Claude'))) {
                 cleanupFailedSession();
               } else {
                 console.log(`[proj] Sending /remote-control despite timeout`);
@@ -1499,7 +1622,9 @@ function openProjectInEditor(name, runner = 'claude') {
                 lastReadyOutput = output;
                 setTimeout(waitForClaude, STABLE_INTERVAL);
               } else {
-                sendRemoteControl();
+                // Extra 2s wait after stable detection to ensure Claude is fully ready
+                console.log(`[proj] Claude prompt stable at ${elapsed}s, waiting 2s before /remote-control`);
+                setTimeout(() => sendRemoteControl(), 2000);
               }
             } else {
               lastReadyOutput = null;
@@ -1521,6 +1646,48 @@ function openProjectInEditor(name, runner = 'claude') {
     exec(`powershell.exe -ExecutionPolicy Bypass -File "${maxScript}" -TitlePrefix "${name}"`, (err) => {
       if (err) console.error('[proj] Maximize error:', err.message);
     });
+
+    // Start secretary session (claude runner only)
+    if (!isGeminiProj) {
+      const secretaryDir = path.join(__dirname, '.secretary');
+      const loopScriptMsys = toMsys(path.join(secretaryDir, 'secretary-loop.sh'));
+      const secretarySession = 'secretary';
+
+      // Keep agent_secret in sonnet-config.json up to date
+      const cfgPath = path.join(secretaryDir, '.sonnet-config.json');
+      try {
+        const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+        cfg.agent_secret = AGENT_SECRET || '';
+        fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2));
+      } catch (e) { console.error('[secretary] config update error:', e.message); }
+
+      // Ensure .sonnet-enabled exists (activates S-1/S-2 Sonnet triggers)
+      try { fs.writeFileSync(path.join(secretaryDir, '.sonnet-enabled'), '', { flag: 'a' }); } catch {}
+
+      // If session already exists, just open wt.exe to show it
+      exec(`"${PSMUX_BIN}" has-session -t ${secretarySession}`, (hasErr) => {
+        if (!hasErr) {
+          console.log('[secretary] session already running, opening wt.exe');
+          exec(`wt.exe new-tab --title "secretary" -- "${PSMUX_BIN}" attach-session -t ${secretarySession}`, () => {});
+          return;
+        }
+        // Create new psmux session for secretary loop
+        const winDir = __dirname.replace(/\//g, '\\');
+        exec(`"${PSMUX_BIN}" new-session -d -s ${secretarySession} -c "${winDir}" -- "${BASH_PATH}" -l`, (err) => {
+          if (err) return console.error('[secretary] session create error:', err.message);
+          setTimeout(() => {
+            exec(`"${PSMUX_BIN}" send-keys -t ${secretarySession} 'bash ${loopScriptMsys}' Enter`, (err) => {
+              if (err) console.error('[secretary] loop start error:', err.message);
+              else console.log('[secretary] loop started in psmux session: ' + secretarySession);
+            });
+          }, 1500);
+          // Open visible wt.exe window so user can monitor secretary activity
+          exec(`wt.exe new-tab --title "secretary" -- "${PSMUX_BIN}" attach-session -t ${secretarySession}`, (err) => {
+            if (err) console.error('[secretary] wt.exe error:', err.message);
+          });
+        });
+      });
+    }
   }, 5000);
 }
 
@@ -1627,6 +1794,21 @@ app.post('/run', verifySecret, async (req, res) => {
     const delaySec = req.body.params?.delay ? parseInt(req.body.params.delay, 10) : 0;
     executeSleepAction(action, delaySec);
     return res.json({ ok: true, action });
+  }
+
+  if (action === 'restart-agent') {
+    res.json({ ok: true, message: 'Restarting agent...' });
+    console.log('[restart] Agent restart requested — exiting in 1s');
+    setTimeout(() => {
+      const serverJs = path.join(__dirname, 'server.js').replace(/\\/g, '\\\\');
+      const cwd = __dirname.replace(/\\/g, '\\\\');
+      const { spawn } = require('child_process');
+      spawn('powershell.exe', ['-Command', `Start-Sleep -Seconds 2; Start-Process node -ArgumentList '"${serverJs}"' -WorkingDirectory '${cwd}' -WindowStyle Hidden`], {
+        detached: true, stdio: 'ignore'
+      }).unref();
+      process.exit(0);
+    }, 1000);
+    return;
   }
 
   if (action === 'display_off') {
@@ -1906,6 +2088,52 @@ app.listen(PORT, async () => {
   cleanupOrphanedTasks();
   startTaskRunner();
   startRemoteControlWatchdog();
+
+  // Secretary heartbeat — revive session+loop if dead or stale
+  const SECRETARY_TS_FILE = path.join(__dirname, '.secretary', '.self-wake-ts');
+  const SECRETARY_LOOP_STALE_MS = 3 * 60 * 1000;
+  const secretaryLoopScript = toMsys(path.join(__dirname, '.secretary', 'secretary-loop.sh'));
+  const secretaryDir = path.join(__dirname, '.secretary');
+  const reviveSecretaryLoop = () => {
+    exec(`"${PSMUX_BIN}" send-keys -t secretary 'bash ${secretaryLoopScript}' Enter`, (err) => {
+      if (err) console.error('[secretary] heartbeat restart error:', err.message);
+      else console.log('[secretary] heartbeat: loop restarted');
+    });
+  };
+  setInterval(() => {
+    let tsMs = 0;
+    try {
+      const parsed = parseInt(fs.readFileSync(SECRETARY_TS_FILE, 'utf8').trim(), 10);
+      if (!isNaN(parsed)) tsMs = parsed;
+    } catch {}
+    const staleness = Date.now() - tsMs;
+    exec(`"${PSMUX_BIN}" has-session -t secretary`, (hasErr) => {
+      if (hasErr && hasErr.code !== 1) {
+        console.warn('[secretary] heartbeat: psmux error', hasErr.message);
+        return;
+      }
+      if (hasErr) {
+        // 세션 자체가 없음 → 재생성 + 루프 시작
+        console.log('[secretary] heartbeat: session gone, recreating');
+        const winDir = secretaryDir.replace(/\//g, '\\');
+        exec(`"${PSMUX_BIN}" new-session -d -s secretary -c "${winDir}" -- "${BASH_PATH}" -l`, (err) => {
+          if (err) return console.error('[secretary] heartbeat session create error:', err.message);
+          setTimeout(() => {
+            reviveSecretaryLoop();
+            exec(`wt.exe new-tab --title "secretary" -- "${PSMUX_BIN}" attach-session -t secretary`, (e) => {
+              if (e) console.error('[secretary] heartbeat wt.exe error:', e.message);
+            });
+          }, 1000);
+        });
+        return;
+      }
+      // 세션은 있지만 루프가 stale
+      if (staleness >= SECRETARY_LOOP_STALE_MS) {
+        console.log(`[secretary] heartbeat: loop stale (${Math.round(staleness / 1000)}s), restarting`);
+        reviveSecretaryLoop();
+      }
+    });
+  }, 1 * 60 * 1000);
   telegram.init({
     getActiveSessionObjects,
     getProtectedSessions,
