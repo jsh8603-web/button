@@ -518,8 +518,9 @@ print(len([f for f in files if os.path.getmtime(f) > ts]))
     fi
     HANDLED_COUNT=$((HANDLED_COUNT + 1))
 
-  elif echo "$BLOCK" | grep -q "GUARD_BLOCKED: YES" || [ "$DENY_COUNT" -ge 5 ]; then
-    # 우선순위 3: Guard 교착 → 1차: 스크립트 해제 / 실패 시: Sonnet 분석
+  elif echo "$BLOCK" | grep -q "GUARD_BLOCKED: YES" || \
+       ([ "$DENY_COUNT" -ge 5 ] && echo "$BLOCK" | grep -q "STUCK: YES"); then
+    # 우선순위 3: Guard 교착 (화면 stagnation 확인된 경우만) → 1차: 스크립트 해제 / 실패 시: Sonnet 분석
     if [ ! -f "$RESTORE_MARKER" ]; then
       BACKUP=$(disable_blocking_guard)
       if [ "$BACKUP" != "FAIL" ] && [ -n "$BACKUP" ]; then

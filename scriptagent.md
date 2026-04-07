@@ -258,15 +258,19 @@ fi
 
 #### 1-3. Guard 교착 해소
 
-> Guard 교착을 감지하면 해소 메시지를 발송한다.
+> **교착 상태일 때만** 해소한다. 에이전트가 작업 중 guard에 걸리는 것은 정상 동작이므로 개입하지 않는다.
+
+**교착 판정 조건 (둘 중 하나):**
+- `GUARD_BLOCKED: YES` — 화면에 guard 차단 키워드 + 직전 스냅샷과 화면 동일 (진전 없음)
+- `DENY_COUNT >= 5` AND `STUCK: YES` — 3분 내 5회 이상 deny **그리고** 5사이클 화면 stagnation
 
 ```bash
-# 감지: 최근 deny 로그에서 3분 내 3건+ 확인
-DENY_COUNT=$(grep "guard-deny" ~/.claude/hook-metrics.jsonl | tail -20 | \
-  awk -v cutoff="$THREE_MIN_AGO" '$0 ~ /"ts":/ { if ($NF > cutoff) count++ } END { print count+0 }')
+# DENY_COUNT 단독으로는 해제하지 않음 — 화면 stagnation(STUCK)이 함께 있어야 교착으로 판정
+elif echo "$BLOCK" | grep -q "GUARD_BLOCKED: YES" || \
+     ([ "$DENY_COUNT" -ge 5 ] && echo "$BLOCK" | grep -q "STUCK: YES"); then
 ```
 
-**조치**: `bash .scripts/msg.sh {세션} .messages/deadlock-resolve.txt`
+**조치**: `disable_blocking_guard()` → settings.json에서 blocking hook 제거 후 `.guard-restore` 백업. 실패 시 Obsidian 세션 스폰 → guard-watchdog 실행.
 
 ---
 
@@ -1913,8 +1917,9 @@ fi
 
 ### scout-and-act.sh — 가드 교착 자동 해제
 - **`disable_blocking_guard()` 함수 추가**: settings.json에서 self-config PreToolUse 훅을 Python으로 제거 후 백업
-- **가드 복원 체크 (스크립트 상단)**: `.guard-restore` 마커 존재 + 15분 경과 시 settings.json 자동 복원
+- **가드 복원 체크 (스크립트 상단)**: `.guard-restore` 마커 존재 + 화면 변화 감지 시 즉시 복원 (fallback: 5분 후)
 - **Phase 1 감지 추가**: 화면에 가드 차단 키워드 + 이전 스냅샷과 동일(변화 없음) → `GUARD_BLOCKED: YES`
+- **Phase 2 교착 처리**: **교착 상태일 때만** 해제. `GUARD_BLOCKED: YES` 또는 `DENY_COUNT >= 5 AND STUCK: YES`. DENY_COUNT 단독으로는 해제하지 않음 (작업 중 정상 deny는 개입 대상 아님)
 - **Phase 2 교착 처리 변경**: 메시지 전송 → 실제 가드 비활성화 + psmux로 "재개하세요" 전송
 
 ### spawn-session.sh (신규)
@@ -1924,3 +1929,108 @@ fi
 ### settings.json — psmux spawn-guard
 - 깨진 complex regex → 단순 `if(/new-session/.test(c)&&/psmux/i.test(c)&&!/spawn-session\.sh/.test(c))` 로 교체
 - 차단 방식: `process.exit(2)` → `permissionDecision:'deny'` JSON 출력 (이 환경에서 exit(2) 미작동 확인)
+
+---
+
+## 변경 이력 — 2026-04-07 (2차, 전체 설계 개선)
+
+### scout-and-act.sh — 모니터링 구조 전면 개편
+
+#### 세션 분류 체계 변경
+| 변경 전 | 변경 후 |
+|---------|---------|
+| 등록(레지스트리) = 풀 모니터링, 미등록 = 경량 모니터링 | 비서 자신만 제외, 나머지 전부 풀 모니터링 |
+| btn-*, button 하드코딩 패턴 필터 | 이름 패턴 제거 |
+| WF 세션 전체 제외 | WF 세션 모니터링 포함 (revive + autonomous-proceed만 제외) |
+
+#### 기능별 세션 적용 범위 (최종)
+| 기능 | secretary | WF 세션 | task-* | 나머지 (자동 등록) |
+|------|-----------|---------|--------|-------------------|
+| Phase 1 수집 / 압축 resume / 경고 / Guard / 에러 / 파일충돌 | ❌ | ✅ | ✅ | ✅ |
+| 사용자 부재 → 자율 진행 | ❌ | ❌ Supervisor | ✅ | ✅ |
+| 세션 사망 revive | ❌ | ❌ Supervisor | ❌ task queue | ✅ → 실패 시 Telegram |
+| git diff 브로드캐스트 | ❌ | ✅ | ❌ | ✅ |
+| DEAD_SESSIONS revive | ❌ | ❌ | ❌ | ✅ |
+
+#### Phase 4.6 자동 등록 범위 확대
+- **변경 전**: `.wf-active` 존재 시에만 실행, harness 세션만 등록
+- **변경 후**: 항상 실행, `secretary / task-* / SONNET_SESSION / WF 세션`만 제외하고 전부 등록
+- DIR 정보: psmux `display-message -p "#{pane_current_path}"` 로 실제 경로 읽기
+- SID 없으면 경고 로그 후 등록 (revive 가능, resume은 폴백)
+
+#### revive 제외 조건 변경
+- **변경 전**: 레지스트리 미등록이면 revive 스킵
+- **변경 후**: IS_WF / IS_TASK / IS_SONNET 명시적 체크, 나머지는 모두 revive 대상
+
+#### DEAD_SESSIONS 처리 (신규)
+- 레지스트리 등록됐지만 psmux에서 사라진 세션을 Phase 1 리포트에 SESSION_DEAD로 추가
+- Phase 2 루프에서 `$SESSIONS $DEAD_SESSIONS` 통합 처리
+
+#### ERRORS 패턴 강화
+- 전체 pane 스캔 → `tail -30` 으로 범위 제한
+- `failed` 단독 키워드 제거, 구체적 에러 패턴만 유지
+- 비서 자체 메시지(`revive failed`, `unlock_failed`) 제외 필터 추가
+
+#### 기타 버그 수정
+- `SONNET_SESSION` 변수 리팩토링 중 삭제된 것 복구 (CRITICAL)
+- `stat -c %Y` GNU 전용 → Python `os.path.getmtime()` 대체 (scout-and-act + revive.sh)
+- `PCT` dead variable 제거 (CONTEXT_PCT 필드가 리포트에 없음)
+- `IDLE_SEC` 숫자 검증 추가 (`grep -oE '^[0-9]+$'`)
+- Telegram 메시지에 세션명 포함 (`"Session 'xxx': revive failed"`)
+- AUTO_COMPACT_REMAIN 3중 평가 → 단일 변수 할당
+- REGISTRY 파일 `touch` 보장 (cut 실패 방지)
+
+---
+
+## 변경 이력 — 2026-04-07 (3차, LLM 분석 구조 개선)
+
+### LLM 역할 분리 (Sonnet → Sonnet + Opus 이원화)
+
+#### 모델 분리 결정
+| 태스크 | 변경 전 | 변경 후 | 이유 |
+|--------|---------|---------|------|
+| S-1 exception_analysis | Sonnet (트리거 없음) | Sonnet | 화면 보고 넛지, 코드 분석 불필요 |
+| S-2 semantic_error_analysis | Sonnet | **Opus** | 소스 코드 읽어 근본 원인 분석 필요 |
+| S-3 guard_unlock_analysis | Sonnet | Sonnet | settings.json + hook-metrics 판단으로 충분 |
+
+#### 신규 파일
+- `wake-opus.sh` — Opus 세션 생성/깨우기 (S-2 전용, daily cap 10)
+- `opus-constitution.txt` — Opus 역할 규칙 (S-2 전용)
+
+#### .sonnet-config.json 변경
+```json
+{
+  "opus_session": "secretary-opus",      // 신규
+  "triage_model": "sonnet",              // 신규
+  "analysis_model": "opus",             // 신규
+  "opus_queue_dir": ".opus-queue",      // 신규
+  "daily_cap": 20,                      // 10 → 20 (Sonnet)
+  "opus_daily_cap": 10                  // 신규 (Opus)
+}
+```
+
+#### queue_sonnet_task() 분기 추가
+- `semantic_error_analysis` → `.opus-queue/` + `wake-opus.sh`
+- 나머지(S-1, S-3) → `.sonnet-queue/` + `wake-sonnet.sh`
+- 모든 큐 태스크에 `jsonl_path`, `dir`, `sid` 포함 (LLM이 세션 컨텍스트 읽을 수 있도록)
+
+#### S-1 트리거 복원
+- **변경 전**: `elif [ -n "$ERRORS" ]` → log만 기록, 미처리
+- **변경 후**: Sonnet `exception_analysis` 큐에 추가 (check_dedup 적용)
+- 원래 설계 의도 복원: "elif 미매칭 이상 → Sonnet이 화면 보고 판단"
+
+#### Opus constitution (opus-constitution.txt) 설계 원칙
+- **Step 0**: 타겟 세션 활성 중이면 일시정지 메시지 먼저 전송 (삽질 방지)
+- **Step 1**: JSONL 읽어 세션 컨텍스트 파악 (뭘 하다가 에러났는지)
+- **Step 2**: 에러 패턴 분석 (스냅샷 3개 비교)
+- **Step 3**: 관련 소스 파일 Read → 파일명:줄번호 수준 원인 특정
+- **Step 4**: [ACTION] 전송 (근본 원인 + 구체적 수정 방향)
+
+#### generate-session-resume.sh 개선 (Claude Code 자동 요약과 중복 제거)
+| 제거 (중복) | 추가 (고유) |
+|------------|------------|
+| 대화 흐름 8턴 | 압축 직전 화면 스냅샷 (`tail -50`) |
+| MEMORY.md 전체 | 미완료 TODO 목록 (`- [ ]` 파싱) |
+| Recently Read Files → 복원 | 어시스턴트 마지막 응답 텍스트 |
+| | 활성 psmux 세션 목록 |
+
