@@ -65,7 +65,7 @@ fi
 
 # ── 모델 + wt.exe 배치 ──
 case "$SESSION" in
-  strategic) MODEL="opus";;
+  strategic|debate|judge) MODEL="opus";;
   *) MODEL="sonnet";;
 esac
 
@@ -74,6 +74,8 @@ case "$SESSION" in
   verifier)  POS="1280,0";   SIZE="130,40"; STAGGER=1;;
   healer)    POS="0,720";    SIZE="130,40"; STAGGER=2;;
   strategic) POS="1280,720"; SIZE="130,40"; STAGGER=3;;
+  debate)    POS="0,0";      SIZE="160,45"; STAGGER=0;;
+  judge)     POS="1280,0";   SIZE="160,45"; STAGGER=1;;
   *)         POS="640,360";  SIZE="130,40"; STAGGER=4;;
 esac
 
