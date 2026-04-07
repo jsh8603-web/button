@@ -82,7 +82,7 @@ else
 
   for i in $(seq 1 15); do
     sleep 1
-    "$PSMUX" capture-pane -t "$SONNET_SESSION" -p -S 0 -E 50 2>/dev/null | \
+    "$PSMUX" capture-pane -t "$SONNET_SESSION" -p -S -200 -E 50 2>/dev/null | \
       grep -qi "bypasspermission\|claude" && break
   done
 

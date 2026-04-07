@@ -1,1 +1,1 @@
-Guard 교착이 감지되었습니다. bulk-skip을 실행하고 작업을 계속하세요.
+Guard 교착 걸렸어. bulk-skip 실행하고 작업 계속해.

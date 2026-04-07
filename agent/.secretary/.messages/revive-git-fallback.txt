@@ -1,1 +1,1 @@
-메모리 파일이 없습니다. git log --oneline -20과 CLAUDE.md를 Read하여 현재 상태를 파악한 후 작업을 시작하세요.
+메모리 파일이 없어. git log --oneline -20이랑 CLAUDE.md 읽어서 현재 상태 파악하고 작업 시작해.
