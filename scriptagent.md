@@ -714,20 +714,8 @@ echo "REVIVE_REQUESTED: $SESSION_NAME (model=$MODEL, dir=$DIR, msg=$MSG)"
 ```
 
 #### .scripts/msg.sh
-```bash
-#!/bin/bash
-# 파일 기반 메시지 전송 (200자+ 대응)
-SESSION="$1"
-MSG_FILE="$2"
-PSMUX="$PSMUX_PATH"
 
-if [ ! -f "$MSG_FILE" ]; then
-  echo "MSG_FAIL: file not found: $MSG_FILE"
-  exit 1
-fi
-
-"$PSMUX" send-keys -t "$SESSION" "Read $(realpath "$MSG_FILE") 의 내용을 따르세요." Enter
-```
+> → 상세: `scriptagenthook.md`
 
 #### .scripts/get-idle-time.ps1
 ```powershell
@@ -748,17 +736,7 @@ public class IdleTime {
 
 ### 사전 작성 메시지 파일
 
-| 파일 | 내용 |
-|------|------|
-| ~~`.messages/save-context.txt`~~ | ~~삭제됨 (Debate A6+A10+B5)~~ |
-| `.messages/deadlock-resolve.txt` | "Guard 교착이 감지되었습니다. bulk-skip을 실행하고 작업을 계속하세요." |
-| `.messages/autonomous-proceed.txt` | "사용자가 현재 자리를 비웠습니다. 가장 안전한 선택지로 진행하세요. 자율 판단 항목은 나중에 보고하세요." |
-| `.messages/user-returned.txt` | "사용자가 돌아왔습니다. 부재 중 자율 진행한 내용을 요약 보고하세요." |
-| `.messages/revive-context.txt` | "최근 메모리 파일을 Read하고 미완료 작업부터 이어서 진행하세요." |
-| `.messages/revive-stale-memory.txt` | "메모리 파일이 오래되었습니다. git log --oneline -10을 먼저 확인하고, 메모리와 대조하여 작업을 재개하세요." |
-| `.messages/revive-git-fallback.txt` | "메모리 파일이 없습니다. git log --oneline -20과 CLAUDE.md를 Read하여 현재 상태를 파악한 후 작업을 시작하세요." |
-| `.messages/repeat-warn-header.txt` | "이 에러를 이전에도 만났습니다. 아래는 당시 캡처입니다. 다른 접근법을 시도하세요.\n---" |
-| `.messages/file-conflict.txt` | "다른 세션이 이 파일을 수정 중입니다. 해당 파일 수정을 보류하세요." |
+> 트리거 조건 + 파일 내용 전체 → `scriptagenthook.md`
 
 ### 세션 레지스트리 (.session-registry.txt)
 
@@ -1347,30 +1325,8 @@ fi
    - 판단 불가 → Telegram 에스컬레이션 (최후 수단은 여전히 사용자)
 4. 조치 결과를 `.sonnet-log/{날짜}.md`에 기록
 
-**Sonnet 지시 메시지** (`.messages/sonnet-exception-analysis.txt`):
-```
-당신은 비서 Sonnet 세션입니다. .sonnet-queue/ 의 exception_analysis 작업을 처리합니다.
-
-## 등급 분류 (필수)
-응답의 첫 줄에 반드시 등급 접두사를 붙이세요:
-- [INFO] 참고 정보 전달 (예: "이 상황은 ~인 것 같습니다")
-- [ACTION] 행동 지시 (예: "~을 실행해야 합니다") — 사용자 승인 후 전달됨
-
-## 작업 절차
-1. 작업 JSON의 report 필드에서 미처리 이상을 식별하세요.
-2. 해당 세션의 capture-pane을 직접 확인하세요:
-   psmux capture-pane -p -S 0 -t {세션명}
-3. 이상의 원인을 분석하고, 다음 중 하나를 실행하세요:
-   a) 해결 가능 → [INFO] 또는 [ACTION]으로 메시지 작성 → msg.sh로 전송
-   b) 세션 멈춤 → [ACTION] "현재 작업을 중단하고 상태를 보고하세요"
-   c) 판단 불가 → Telegram 에스컬레이션
-4. 결과를 .sonnet-log/{날짜}.md에 기록하세요.
-
-## 제약
-- 세션당 1개의 메시지만 전송
-- 메시지는 200자 이내로 간결하게
-- 판단에 자신 없으면 Telegram으로 넘기세요 (오판보다 알림이 안전)
-```
+**Sonnet 지시 메시지** → `agent/.secretary/.messages/sonnet-constitution.txt` (S-1 섹션 참조)
+> 상세: `scriptagenthook.md`
 
 ---
 
@@ -1423,26 +1379,8 @@ fi
 3. 근본 원인이 같다고 판단 → `[INFO]` 맥락 포함 경고 전송
 4. 다른 문제라고 판단 → 조치 불필요, 로그만 기록
 
-**Sonnet 지시 메시지** (`.messages/sonnet-semantic-analysis.txt`):
-```
-당신은 비서 Sonnet 세션입니다. .sonnet-queue/ 의 semantic_error_analysis 작업을 처리합니다.
-
-## 등급 분류 (필수)
-응답의 첫 줄에 반드시 등급 접두사를 붙이세요:
-- [INFO] 참고 정보 전달 — 대부분의 분석 결과는 INFO
-- [ACTION] 행동 지시 — 사용자 승인 후 전달됨
-
-## 작업 절차
-1. 작업 JSON의 snapshots 필드에서 최근 3사이클의 에러를 비교하세요.
-2. 표면적으로 다르지만 같은 근본 원인인 에러가 있는지 판단하세요.
-   예: "ECONNREFUSED :3000"과 "ECONNREFUSED :3001" = 서비스 미기동
-   예: "Cannot find module 'foo'"과 "Cannot find module './foo'" = 경로 해석 문제
-3. 같은 근본 원인이면:
-   → [INFO] 메시지 작성 → msg.sh로 전송:
-   "이전에 유사한 에러({요약})를 만났습니다. 근본 원인은 {분석}입니다. {제안}."
-4. 다른 문제라면:
-   → .sonnet-log에 "분석 완료, 별개 문제"로 기록만.
-```
+**Sonnet 지시 메시지** → `agent/.secretary/.messages/opus-constitution.txt` (S-2 섹션 참조)
+> 상세: `scriptagenthook.md`
 
 ---
 
