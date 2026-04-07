@@ -214,11 +214,18 @@ fi
     fi
 
     LAST_LINES=$(echo "$CAP" | tail -5)
+    _COMPRESS_FLAG="$SECRETARY_DIR/.compressed-recently-${S}"
     if echo "$LAST_LINES" | grep -qE '^\$\s*$|^bash-|^[A-Z]:[/\\]|^PS '; then
       echo "STATUS: AGENT_DEAD"
     elif echo "$LAST_LINES" | grep -qE '^[>❯]\s*$'; then
       # '>'/'❯'는 Claude Code 대기 프롬프트이기도 함 — 전체 pane에 Claude 컨텍스트 있으면 ALIVE
-      if echo "$CAP" | grep -qE '(Claude Code|claude-opus|claude-sonnet|claude-haiku|Opus|Sonnet|Haiku)'; then
+      # 상태바(auto-compact, bypass permissions, esc to interrupt)도 Claude Code 증거로 인정
+      if echo "$CAP" | grep -qE '(Claude Code|claude-opus|claude-sonnet|claude-haiku|Opus|Sonnet|Haiku|auto-compact|bypass permissions|esc to interrupt)'; then
+        echo "STATUS: ALIVE"
+        rm -f "$_COMPRESS_FLAG"
+      elif [ -f "$_COMPRESS_FLAG" ] && \
+           [ $(( $(date +%s) - $(cat "$_COMPRESS_FLAG" 2>/dev/null || echo 0) )) -lt 300 ]; then
+        # 압축 직후(5분 이내) — Claude 문자열 없어도 ALIVE (압축 후 오탐 방지)
         echo "STATUS: ALIVE"
       else
         echo "STATUS: AGENT_DEAD"
@@ -230,6 +237,8 @@ fi
     # 줄 시작 기준으로만 감지 — 대화 텍스트 중 'PostCompact' 언급에 오탐 방지
     if echo "$CAP" | grep -qE '^\s*(Compacted|Auto-compacted)|⎿\s+Compacted'; then
       echo "COMPRESSED: YES"
+      # 압축 직후 AGENT_DEAD 오탐 방지 flag 설정 (5분 유효)
+      echo "$(date +%s)" > "$_COMPRESS_FLAG"
     else
       echo "COMPRESSED: NO"
     fi
