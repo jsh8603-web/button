@@ -219,8 +219,8 @@ fi
       echo "STATUS: AGENT_DEAD"
     elif echo "$LAST_LINES" | grep -qE '^[>❯]\s*$'; then
       # '>'/'❯'는 Claude Code 대기 프롬프트이기도 함 — 전체 pane에 Claude 컨텍스트 있으면 ALIVE
-      # 상태바(auto-compact, bypass permissions, esc to interrupt)도 Claude Code 증거로 인정
-      if echo "$CAP" | grep -qE '(Claude Code|claude-opus|claude-sonnet|claude-haiku|Opus|Sonnet|Haiku|auto-compact|bypass permissions|esc to interrupt)'; then
+      # 상태바(auto-compact, bypass permissions) + UI 구분선(─{10,}), 재생버튼(⏵)도 Claude Code 증거
+      if echo "$CAP" | grep -qE '(Claude Code|claude-opus|claude-sonnet|claude-haiku|Opus|Sonnet|Haiku|auto-compact|bypass permissions|esc to interrupt|─{10,}|⏵)'; then
         echo "STATUS: ALIVE"
         rm -f "$_COMPRESS_FLAG"
       elif [ -f "$_COMPRESS_FLAG" ] && \

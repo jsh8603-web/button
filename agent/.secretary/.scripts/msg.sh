@@ -53,5 +53,12 @@ if echo "$FIRST_LINE" | grep -q "^\[ACTION\]"; then
   exit 0
 fi
 
+# 사용자가 입력 중이면 전송 차단 (프롬프트에 실제 텍스트 있음 — 빈 커서 "> |"는 허용)
+_CAP_CHECK=$("$PSMUX" capture-pane -p -S -5 -t "$SESSION" 2>/dev/null)
+if echo "$_CAP_CHECK" | grep -qE '^[>❯]\s+\S'; then
+  echo "MSG_SKIP: user is typing in $SESSION — message not sent" >&2
+  exit 0
+fi
+
 # [INFO] 또는 접두사 없음 → 세션 직접 전송
 "$PSMUX" send-keys -t "$SESSION" "Read $(realpath "$MSG_FILE") 의 내용을 참고하세요." Enter
