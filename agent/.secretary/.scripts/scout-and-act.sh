@@ -227,7 +227,8 @@ fi
       echo "STATUS: ALIVE"
     fi
 
-    if echo "$CAP" | grep -qE '(Compacted|PostCompact|compaction)'; then
+    # 줄 시작 기준으로만 감지 — 대화 텍스트 중 'PostCompact' 언급에 오탐 방지
+    if echo "$CAP" | grep -qE '^\s*(Compacted|Auto-compacted)|⎿\s+Compacted'; then
       echo "COMPRESSED: YES"
     else
       echo "COMPRESSED: NO"
