@@ -216,8 +216,8 @@ fi
     LAST_LINES=$(echo "$CAP" | tail -5)
     if echo "$LAST_LINES" | grep -qE '^\$\s*$|^bash-|^[A-Z]:[/\\]|^PS '; then
       echo "STATUS: AGENT_DEAD"
-    elif echo "$LAST_LINES" | grep -qE '^>\s*$'; then
-      # '>'는 Claude Code 대기 프롬프트이기도 함 — 전체 pane에 Claude 컨텍스트 있으면 ALIVE
+    elif echo "$LAST_LINES" | grep -qE '^[>❯]\s*$'; then
+      # '>'/'❯'는 Claude Code 대기 프롬프트이기도 함 — 전체 pane에 Claude 컨텍스트 있으면 ALIVE
       if echo "$CAP" | grep -qE '(Claude Code|claude-opus|claude-sonnet|claude-haiku|Opus|Sonnet|Haiku)'; then
         echo "STATUS: ALIVE"
       else
@@ -281,7 +281,7 @@ fi
 
     # 세션이 idle 상태인지 감지 (일 없이 대기 중 = 정상, stuck 아님)
     IDLE_PROMPT="NO"
-    if echo "$LAST_LINES" | grep -qE '^>\s*$' && \
+    if echo "$LAST_LINES" | grep -qE '^[>❯]\s*$' && \
        echo "$CAP" | grep -qE '(Claude Code|claude-opus|claude-sonnet|claude-haiku|Opus|Sonnet|Haiku)'; then
       IDLE_PROMPT="YES"
     fi
