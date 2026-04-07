@@ -1,0 +1,22 @@
+# Runtime state files
+.self-wake-ts
+.secretary-alive
+.watchdog-stop
+.scout-lock
+.scout-report.txt
+.user-absent
+.guard-restore
+.guard-restore.session
+.settings-guard-backup-*.json
+.last-audit-week
+.wf-active
+
+# Snapshots (runtime)
+.snapshots/
+
+# Sonnet queue (runtime)
+.sonnet-queue/
+
+# Session registry is tracked, but lock files are not
+.sonnet-queue/*.json
+.sonnet-queue/locks/
