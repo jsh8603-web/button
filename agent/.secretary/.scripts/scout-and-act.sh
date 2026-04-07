@@ -200,8 +200,9 @@ fi
       echo "COMPRESSED: NO"
     fi
 
-    PCT=$(echo "$CAP" | grep -oP '\d+%' | tail -1)
-    echo "CONTEXT_PCT: ${PCT:-UNKNOWN}"
+    # "X% until auto-compact" 패턴에서 남은 비율 추출
+    AUTO_COMPACT_REMAIN=$(echo "$CAP" | grep -oP '[0-9]+(?=%.{0,5}until.{0,5}auto.{0,5}compact)' | head -1)
+    echo "AUTO_COMPACT_REMAIN: ${AUTO_COMPACT_REMAIN:-NONE}"
 
     if echo "$LAST_LINES" | grep -qE '(진행할까요|번호를 입력|어떤 방향|선택해)'; then
       echo "WAITING_FOR_USER: YES"
@@ -326,13 +327,16 @@ for S in $SESSIONS; do
     fi
     HANDLED_COUNT=$((HANDLED_COUNT + 1))
 
-  elif [ "$(echo "$PCT" | grep -oE '[0-9]+')" -ge 85 ] 2>/dev/null; then
-    # 우선순위 2.5: 컨텍스트 85%+ 임박 → 에이전트에게 메모리 저장 요청 (사전 경고)
+  elif [ "$(echo "$BLOCK" | grep "^AUTO_COMPACT_REMAIN:" | awk '{print $2}')" != "NONE" ] && \
+       [ -n "$(echo "$BLOCK" | grep "^AUTO_COMPACT_REMAIN:" | awk '{print $2}')" ] && \
+       [ "$(echo "$BLOCK" | grep "^AUTO_COMPACT_REMAIN:" | awk '{print $2}')" -le 20 ] 2>/dev/null; then
+    # 우선순위 2.5: "X% until auto-compact" 20% 이하 → 메모리 저장 요청
+    REMAIN=$(echo "$BLOCK" | grep "^AUTO_COMPACT_REMAIN:" | awk '{print $2}')
     if check_dedup "$S" "context_near_limit"; then
       CTX_WARN_FILE="/tmp/ctx-warn-${S}.txt"
-      echo "[secretary] Context at ~${PCT}. Save current task state, decisions, and next steps to memory files now before compression." > "$CTX_WARN_FILE"
+      echo "[secretary] Context ${REMAIN}% until auto-compact. Save current task state, decisions, and next steps to memory files now." > "$CTX_WARN_FILE"
       bash "$SECRETARY_DIR/.scripts/msg.sh" "$S" "$CTX_WARN_FILE"
-      log_event WARN "$S" "context_near_limit" "PCT=$PCT" "pre-compression-warn"
+      log_event WARN "$S" "context_near_limit" "remain=${REMAIN}%" "pre-compression-warn"
     fi
     HANDLED_COUNT=$((HANDLED_COUNT + 1))
 
@@ -448,17 +452,31 @@ for S in $SESSIONS; do
 done
 
 # === btn-* 세션 PCT 전용 모니터링 (사전 압축 경고, 전체 elif 체인 제외) ===
+# === btn-* 세션: 압축 감지 + resume 주입 / 사전 경고 ===
 BTN_SESSIONS=$("$PSMUX" ls 2>/dev/null | cut -d: -f1 | grep "^btn-")
 for BS in $BTN_SESSIONS; do
   BTN_CAP=$("$PSMUX" capture-pane -p -S 0 -t "$BS" 2>/dev/null)
   [ -z "$BTN_CAP" ] && continue
-  BTN_PCT=$(echo "$BTN_CAP" | grep -oP '\d+%' | tail -1)
-  BTN_PCT_NUM=$(echo "$BTN_PCT" | grep -oE '[0-9]+' || echo 0)
-  if [ "${BTN_PCT_NUM:-0}" -ge 85 ] && check_dedup "$BS" "context_near_limit"; then
+
+  # 압축 완료 감지 → resume 주입
+  if echo "$BTN_CAP" | grep -qE '(Compacted|PostCompact|compaction)'; then
+    if check_dedup "$BS" "btn_compressed"; then
+      log_event WARN "$BS" "context_compressed" "" "session-resume-injected"
+      bash "$SECRETARY_DIR/.scripts/generate-session-resume.sh" "$BS"
+      if [ -f "/tmp/session-resume-${BS}.txt" ]; then
+        bash "$SECRETARY_DIR/.scripts/msg.sh" "$BS" "/tmp/session-resume-${BS}.txt"
+      fi
+    fi
+  fi
+
+  # 사전 경고: "X% until auto-compact" 20% 이하
+  BTN_REMAIN=$(echo "$BTN_CAP" | grep -oP '[0-9]+(?=%.{0,5}until.{0,5}auto.{0,5}compact)' | head -1)
+  if [ -n "$BTN_REMAIN" ] && [ "${BTN_REMAIN}" -le 20 ] 2>/dev/null && \
+     check_dedup "$BS" "context_near_limit"; then
     BTN_WARN_FILE="/tmp/ctx-warn-${BS}.txt"
-    echo "[secretary] Context at ~${BTN_PCT}. Save current task state, decisions, and next steps to memory files now before compression." > "$BTN_WARN_FILE"
+    echo "[secretary] Context ${BTN_REMAIN}% until auto-compact. Save current task state, decisions, and next steps to memory files now." > "$BTN_WARN_FILE"
     bash "$SECRETARY_DIR/.scripts/msg.sh" "$BS" "$BTN_WARN_FILE"
-    log_event WARN "$BS" "context_near_limit" "PCT=$BTN_PCT" "pre-compression-warn-btn"
+    log_event WARN "$BS" "context_near_limit" "remain=${BTN_REMAIN}%" "pre-compression-warn-btn"
   fi
 done
 
