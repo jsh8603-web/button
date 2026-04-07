@@ -146,5 +146,5 @@ c) 판단 불가 → Telegram 에스컬레이션:
    curl -s http://localhost:9876/telegram \
      -H 'Content-Type: application/json' \
      -H "Authorization: Bearer {agent_secret}" \
-     -d '{"message":"[secretary-opus] {session} 에러 분석 실패. 수동 확인 필요."}'
+     -d '{"message":"[agent] {session} analysis failed. Manual check needed."}'
    ```
