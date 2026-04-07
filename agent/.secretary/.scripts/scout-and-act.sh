@@ -660,7 +660,7 @@ print(len([f for f in files if os.path.getmtime(f) > ts]))
     WC_MSG="${WC_INFO#*|}"; WC_MSG="${WC_MSG%|*}"
     WC_PROJ_NAME="${WC_INFO##*|}"
     if check_dedup "$S" "work_completion"; then
-      send_telegram_alert "✅ [${WC_PROJ_NAME}] 작업 완료 감지 / 커밋: ${WC_MSG} / 세션: ${S}"
+      send_telegram_alert "✅ [${WC_PROJ_NAME}] Work done / commit: ${WC_MSG} / session: ${S}"
       log_event INFO "$S" "work_completion_detected" "proj=${WC_PROJ_NAME} commit=${WC_MSG}" "telegram"
     fi
     rm -f "$COMMIT_TS_FILE"
@@ -869,7 +869,7 @@ fi
 if [ "$TELEGRAM_NEEDED" -gt 0 ]; then
   # TELEGRAM_REASONS format: "revival_failed:sess1 guard_unlock_failed:sess2"
   # Build human-readable message with session names
-  TG_MSG="[secretary] Intervention needed ($(date '+%H:%M')):"
+  TG_MSG="[agent] Intervention needed ($(date '+%H:%M')):"
   for REASON_ENTRY in $TELEGRAM_REASONS; do
     REASON_TYPE="${REASON_ENTRY%%:*}"
     REASON_SESSION="${REASON_ENTRY##*:}"
@@ -950,7 +950,7 @@ if [ -f "$WF_ACTIVE_FILE" ]; then
     if [ "$ALL_WF_DEAD" = true ]; then
       if check_dedup "wf_active" "orphan_cleanup"; then
         WF_ORPHAN_CONTENT=$(cat "$WF_ACTIVE_FILE" 2>/dev/null | tr '\n' ' ' | head -c 100)
-        send_telegram_alert "[secretary] .wf-active 고아 감지 (${WF_ORPHAN_AGE}초 경과, 세션: ${WF_ORPHAN_CONTENT}). 삭제합니다."
+        send_telegram_alert "[agent] .wf-active orphan (${WF_ORPHAN_AGE}s, sessions: ${WF_ORPHAN_CONTENT}). Cleaning up."
         rm -f "$WF_ACTIVE_FILE"
         log_event WARN "" "wf_active_orphan_cleaned" "age=${WF_ORPHAN_AGE}s sessions=${WF_ORPHAN_CONTENT}" "cleanup"
       fi
@@ -1017,7 +1017,7 @@ if [ "$DOW" -eq 7 ] && [ "$LAST_AUDIT_WEEK" != "$THIS_WEEK" ]; then
   printf 'header = "Authorization: Bearer %s"\n' "$AGENT_SECRET" > "$_CURL_CFG"
   if curl -s -K "$_CURL_CFG" "http://localhost:9876/telegram" \
     -H 'Content-Type: application/json' \
-    -d '{"message":"[secretary] Weekly audit reminder. Run: claude audit-wf or session-audit."}'; then
+    -d '{"message":"[agent] Weekly audit reminder. Run: claude audit-wf or session-audit."}'; then
     echo "$THIS_WEEK" > "$SECRETARY_DIR/.last-audit-week"
     log_event INFO "" "weekly_reminder_sent" "week=$THIS_WEEK" "telegram"
   else
