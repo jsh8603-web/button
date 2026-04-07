@@ -287,6 +287,36 @@ fi
     fi
     echo "IDLE_PROMPT: $IDLE_PROMPT"
 
+    # Circular work: 5사이클 unstaged diff 누적 추적 (net LOC ≈ 0 + 수정 > N)
+    CIRC_DIR=$(grep "^${S}|" "$REGISTRY" | cut -d'|' -f3)
+    if [ -n "$CIRC_DIR" ] && [ "$CIRC_DIR" != "unknown" ] && \
+       git -C "$CIRC_DIR" rev-parse --git-dir >/dev/null 2>&1; then
+      DIFF_SHORT=$(git -C "$CIRC_DIR" diff --shortstat 2>/dev/null)
+      CIRC_INS=$(echo "$DIFF_SHORT" | grep -oE '[0-9]+ insertion' | grep -oE '[0-9]+' || echo 0)
+      CIRC_DEL=$(echo "$DIFF_SHORT" | grep -oE '[0-9]+ deletion' | grep -oE '[0-9]+' || echo 0)
+      CIRC_FILES=$(echo "$DIFF_SHORT" | grep -oE '[0-9]+ file' | grep -oE '[0-9]+' || echo 0)
+      CIRCULAR_FILE="$SNAP_DIR/$S/.circular"
+      echo "${CIRC_INS:-0}:${CIRC_DEL:-0}:${CIRC_FILES:-0}" >> "$CIRCULAR_FILE"
+      tail -5 "$CIRCULAR_FILE" > "${CIRCULAR_FILE}.tmp" && mv "${CIRCULAR_FILE}.tmp" "$CIRCULAR_FILE"
+      CIRC_LINES=$(wc -l < "$CIRCULAR_FILE" | tr -d ' \r\n')
+      if [ "${CIRC_LINES:-0}" -ge 5 ]; then
+        CIRC_TOTAL_INS=$(cut -d: -f1 "$CIRCULAR_FILE" | awk '{s+=$1}END{print s+0}')
+        CIRC_TOTAL_DEL=$(cut -d: -f2 "$CIRCULAR_FILE" | awk '{s+=$1}END{print s+0}')
+        CIRC_TOTAL_FILES=$(cut -d: -f3 "$CIRCULAR_FILE" | awk '{s+=$1}END{print s+0}')
+        CIRC_NET=$(( CIRC_TOTAL_INS - CIRC_TOTAL_DEL ))
+        [ "$CIRC_NET" -lt 0 ] && CIRC_NET=$(( -CIRC_NET ))
+        if [ "$CIRC_NET" -le 5 ] && [ "${CIRC_TOTAL_FILES:-0}" -ge 10 ]; then
+          echo "CIRCULAR: YES"
+        else
+          echo "CIRCULAR: NO"
+        fi
+      else
+        echo "CIRCULAR: NO"
+      fi
+    else
+      echo "CIRCULAR: NO"
+    fi
+
     # 가드 차단 + 화면 미변화 감지 (교착 판정)
     GUARD_BLOCKED="NO"
     if echo "$CAP" | grep -qiE '(self-config|permission.*block|훅.*차단|guard.*deny|blocked.*hook)'; then
@@ -523,6 +553,15 @@ print(len([f for f in files if os.path.getmtime(f) > ts]))
     fi
     HANDLED_COUNT=$((HANDLED_COUNT + 1))
 
+  elif echo "$BLOCK" | grep -q "CIRCULAR: YES" && ! echo "$BLOCK" | grep -q "IDLE_PROMPT: YES"; then
+    # Circular work: 5사이클 net LOC ≈ 0 + 수정 과다 → 삽질 넛지
+    if check_dedup "$S" "circular_work"; then
+      echo "같은 파일을 계속 수정하다가 원점으로 돌아오는 패턴이야. 지금 방향이 맞는 건지 다시 생각해봐. 일단 커밋하고 다른 접근으로 해봐." > "$TMPDIR/circular-warn-${S}.txt"
+      bash "$SECRETARY_DIR/.scripts/msg.sh" "$S" "$TMPDIR/circular-warn-${S}.txt"
+      log_event WARN "$S" "circular_work_detected" "net_loc_near_0 high_edit_count" "circular-warn"
+    fi
+    HANDLED_COUNT=$((HANDLED_COUNT + 1))
+
   elif echo "$BLOCK" | grep -q "REPEAT_ERROR: FOUND"; then
     # 우선순위 5: 반복 에러 → 1차: 경고 전송 / 2차(지속): Sonnet 에스컬레이션
     if check_dedup "$S" "repeat_error"; then
@@ -554,7 +593,10 @@ print(len([f for f in files if os.path.getmtime(f) > ts]))
     HANDLED_COUNT=$((HANDLED_COUNT + 1))
 
   elif [ -n "$ERRORS" ]; then
-    # S-1: elif 미매칭 에러 → 모델별 분기
+    # S-1: elif 미매칭 에러 → rate limit 시 skip, 모델별 분기
+    if echo "$ERRORS" | grep -qi "rate.limit\|overloaded"; then
+      log_event INFO "$S" "rate_limit_skip" "rate_limit_detected — no action" "skip"
+    else
     log_event ERROR "$S" "error_detected" "$ERRORS" "exception_analysis"
     SESSION_MODEL=$(grep "^${S}|" "$REGISTRY" | cut -d'|' -f2)
     if echo "$SESSION_MODEL" | grep -qi "opus"; then
@@ -569,6 +611,7 @@ print(len([f for f in files if os.path.getmtime(f) > ts]))
       SNAP_CTX=$(cat "$SNAP_DIR/$S/snap_$(cat "$SNAP_DIR/$S/.idx" 2>/dev/null || echo 0).txt" 2>/dev/null | tail -30)
       queue_sonnet_task "exception_analysis" "$S" "errors=$ERRORS context=$SNAP_CTX"
     fi
+    fi  # end: rate_limit else
     HANDLED_COUNT=$((HANDLED_COUNT + 1))
 
   fi
@@ -579,10 +622,36 @@ print(len([f for f in files if os.path.getmtime(f) > ts]))
     rm -f "$SECRETARY_DIR/.user-absent"
   fi
 
+  # Work completion detection (elif 체인과 독립)
+  # 사이클 N: 새 커밋 → .ts 저장 / 사이클 N+1: IDLE_PROMPT + 사용자 부재 → Telegram
+  COMMIT_TS_FILE="$TMPDIR/committed-${S}.ts"
+  WC_REG_DIR=$(grep "^${S}|" "$REGISTRY" | cut -d'|' -f3)
+  RECENT_COMMITS_WC=""
+  if [ -n "$WC_REG_DIR" ] && [ "$WC_REG_DIR" != "unknown" ]; then
+    RECENT_COMMITS_WC=$(git -C "$WC_REG_DIR" log --oneline --since="3 minutes ago" 2>/dev/null)
+  fi
+  if [ -n "$RECENT_COMMITS_WC" ]; then
+    # 이번 사이클 커밋 있음 → 타임스탬프+커밋메시지+프로젝트명 저장
+    WC_COMMIT_MSG=$(echo "$RECENT_COMMITS_WC" | head -1 | sed 's/^[a-f0-9]* //')
+    WC_PROJ=$(basename "$WC_REG_DIR")
+    echo "$(date +%s)|${WC_COMMIT_MSG}|${WC_PROJ}" > "$COMMIT_TS_FILE"
+  elif [ -f "$COMMIT_TS_FILE" ] && echo "$BLOCK" | grep -q "IDLE_PROMPT: YES" && [ "$IDLE_SEC" -gt 300 ]; then
+    # 이전 사이클 커밋 있었고 + 현재 idle + 사용자도 부재 → 완료 Telegram
+    WC_INFO=$(cat "$COMMIT_TS_FILE")
+    WC_MSG="${WC_INFO#*|}"; WC_MSG="${WC_MSG%|*}"
+    WC_PROJ_NAME="${WC_INFO##*|}"
+    if check_dedup "$S" "work_completion"; then
+      send_telegram_alert "✅ [${WC_PROJ_NAME}] 작업 완료 감지 / 커밋: ${WC_MSG} / 세션: ${S}"
+      log_event INFO "$S" "work_completion_detected" "proj=${WC_PROJ_NAME} commit=${WC_MSG}" "telegram"
+    fi
+    rm -f "$COMMIT_TS_FILE"
+  fi
+
   # S-2 슬라이딩 윈도우 — 5사이클 중 3+ 새 에러 → 의미적 분석 트리거
   ERR_WINDOW_FILE="$SNAP_DIR/$S/.err-window"
   mkdir -p "$SNAP_DIR/$S"
-  if [ -n "$ERRORS" ] && echo "$BLOCK" | grep -q "REPEAT_ERROR: NONE"; then
+  if [ -n "$ERRORS" ] && echo "$BLOCK" | grep -q "REPEAT_ERROR: NONE" && \
+     ! echo "$ERRORS" | grep -qi "rate.limit\|overloaded"; then
     echo "1" >> "$ERR_WINDOW_FILE"
   else
     echo "0" >> "$ERR_WINDOW_FILE"
@@ -841,6 +910,33 @@ if [ -f "$REGISTRY" ]; then
         "dir=${CAND_DIR} sid=${CAND_SID:0:8} model=${CAND_MODEL}" "registry"
     fi
   done
+fi
+
+# =============================================
+# Phase 4.75: .wf-active 고아 정리
+# 조건: mtime > 10분 + 모든 WF세션+supervisor psmux에 없음 + Telegram 후 삭제
+# =============================================
+
+if [ -f "$WF_ACTIVE_FILE" ]; then
+  WF_ORPHAN_AGE=$("$PYTHON" -c \
+    "import os,time; print(int(time.time()-os.path.getmtime('$WF_ACTIVE_FILE')))" 2>/dev/null || echo 0)
+  if [ "${WF_ORPHAN_AGE:-0}" -gt 600 ]; then
+    ALL_WF_DEAD=true
+    for WF_CAND in $WF_SESSION_LIST supervisor; do
+      if echo "$ALL_PSMUX" | grep -qxF "$WF_CAND"; then
+        ALL_WF_DEAD=false
+        break
+      fi
+    done
+    if [ "$ALL_WF_DEAD" = true ]; then
+      if check_dedup "wf_active" "orphan_cleanup"; then
+        WF_ORPHAN_CONTENT=$(cat "$WF_ACTIVE_FILE" 2>/dev/null | tr '\n' ' ' | head -c 100)
+        send_telegram_alert "[secretary] .wf-active 고아 감지 (${WF_ORPHAN_AGE}초 경과, 세션: ${WF_ORPHAN_CONTENT}). 삭제합니다."
+        rm -f "$WF_ACTIVE_FILE"
+        log_event WARN "" "wf_active_orphan_cleaned" "age=${WF_ORPHAN_AGE}s sessions=${WF_ORPHAN_CONTENT}" "cleanup"
+      fi
+    fi
+  fi
 fi
 
 # =============================================
