@@ -82,7 +82,7 @@ check_dedup() {
 SONNET_SESSION=$(jq -r '.sonnet_session // "secretary-sonnet"' "$CONFIG" 2>/dev/null)
 WF_ACTIVE_FILE="$SECRETARY_DIR/../.wf-active"
 # btn-* 세션 (대화형 Claude Code 메인 세션) 제외 — Enter 자동 전송 등이 채팅 입력 방해
-SESSIONS=$("$PSMUX" ls -F '#{session_name}' 2>/dev/null | \
+SESSIONS=$("$PSMUX" ls 2>/dev/null | cut -d: -f1 | \
   grep -v "^${SELF_SESSION}$" | grep -v "^task-" | grep -v "^${SONNET_SESSION}$" | \
   grep -v "^btn-")
 
@@ -501,7 +501,7 @@ fi
 if [ -f "$WF_ACTIVE_FILE" ] && [ -f "$REGISTRY" ]; then
   KNOWN_NAMES=$(cut -d'|' -f1 "$REGISTRY" 2>/dev/null)
 
-  ALL_CANDIDATE_SESSIONS=$("$PSMUX" ls -F '#{session_name}' 2>/dev/null | \
+  ALL_CANDIDATE_SESSIONS=$("$PSMUX" ls 2>/dev/null | cut -d: -f1 | \
     grep -v "^task-" | grep -v "^secretary" | grep -v "^${SONNET_SESSION}$")
 
   for CAND_SESSION in $ALL_CANDIDATE_SESSIONS; do
