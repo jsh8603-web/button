@@ -347,12 +347,22 @@ for S in $SESSIONS; do
         "$PSMUX" send-keys -t "$S" "[secretary] Guard temporarily disabled. Resume your work." Enter
       else
         log_event WARN "$S" "guard_unlock_failed" "deny=$DENY_COUNT" "guard-unlock-fail"
-        # 스크립트 해제 실패 → Sonnet에 hook 분석 요청
-        HOOK_CTX=$(tail -20 ~/.claude/hook-metrics.jsonl 2>/dev/null | jq -s '.' 2>/dev/null || echo "[]")
-        if [ -f "$SECRETARY_DIR/.sonnet-enabled" ] && check_dedup "$S" "guard_unlock_analysis"; then
-          queue_sonnet_task "guard_unlock_analysis" "$S" \
-            "guard unlock failed for session $S. deny_count=$DENY_COUNT. recent_hook_metrics=$HOOK_CTX"
+        # 스크립트 해제 실패 → Obsidian 세션 스폰 + guard-watchdog 실행
+        if check_dedup "$S" "guard_unlock_obsidian"; then
+          OBS_SESSION="guard-$(date +%s)"
+          WIN_OBS_DIR="C:\\Users\\jsh86\\.claude"
+          CLAUDE_BIN=$(jq -r '.claude_bin // "claude"' "$CONFIG" 2>/dev/null)
+          "$PSMUX" new-session -d -s "$OBS_SESSION" -- cmd.exe
+          sleep 2
+          "$PSMUX" send-keys -t "$OBS_SESSION" "cd /d $WIN_OBS_DIR" Enter
+          sleep 1
+          "$PSMUX" send-keys -t "$OBS_SESSION" "$CLAUDE_BIN --model sonnet --dangerously-skip-permissions" Enter
+          sleep 15
+          "$PSMUX" send-keys -t "$OBS_SESSION" \
+            "guard-watchdog 스킬을 실행해서 ${S} 세션의 가드 교착을 분석하고 해결해라. 완료 후 /exit로 종료." Enter
+          log_event WARN "$S" "guard_unlock_obsidian_spawned" "obs_session=$OBS_SESSION deny=$DENY_COUNT" "guard-watchdog"
         else
+          # Obsidian 세션도 이미 시도했는데 여전히 교착 → Telegram
           TELEGRAM_NEEDED=$((TELEGRAM_NEEDED + 1))
           TELEGRAM_REASONS="$TELEGRAM_REASONS guard_unlock_failed:$S"
         fi

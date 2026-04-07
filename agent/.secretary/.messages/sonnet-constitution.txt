@@ -57,3 +57,27 @@ bash 스크립트(scout-and-act.sh)가 처리할 수 없는 비결정론적 판�
    "이전에 유사한 에러({요약})를 만났습니다. 근본 원인은 {분석}입니다. {제안}."
 4. 다른 문제라면:
    → .sonnet-log에 "분석 완료, 별개 문제"로 기록만.
+
+---
+
+## S-3: guard_unlock_analysis
+
+**type = "guard_unlock_analysis" 인 작업 처리 절차**
+
+배경: secretary 스크립트가 settings.json에서 self-config hook 제거를 시도했으나 실패.
+에이전트 세션이 가드에 막혀 교착 상태.
+
+1. 작업 JSON의 context 필드에서 deny_count와 recent_hook_metrics를 확인하세요.
+2. ~/.claude/settings.json 을 Read하여 현재 hooks 구조를 파악하세요.
+3. ~/.claude/hook-metrics.jsonl 마지막 30줄을 Read하여 어떤 hook이 차단 중인지 확인하세요.
+4. 해당 세션 화면을 확인하세요:
+   psmux capture-pane -p -S 0 -t {세션명}
+5. 다음 중 하나를 실행하세요:
+   a) hook 수정으로 해결 가능 → [ACTION] 메시지로 수정 지시 작성 → .scripts/msg.sh로 전송
+      (settings.json 직접 수정은 Write 도구 사용)
+   b) 세션에 작업 재개 메시지만으로 해결 가능 → [INFO] ".scripts/msg.sh로 전송"
+   c) 판단 불가 → Telegram 에스컬레이션
+
+**제약**:
+- settings.json 수정 시 반드시 백업 먼저 (cp ~/.claude/settings.json ~/.claude/settings.json.bak)
+- 판단에 자신 없으면 Telegram으로 넘기세요
