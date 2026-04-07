@@ -1,0 +1,41 @@
+
+● 원인 발견: flock 명령어가 MSYS2에 없어서 scout-and-act.sh가매번"Alreadyrunning"으로즉시종료됩니다.
+
+  PID 파일 방식으로 교체합니다.
+
+  Read 1 file (ctrl+o to expand)
+
+●Update(agent\.secretary\.scripts\scout-and-act.sh)
+  ⎿  Added9lines,removed3lines
+      14  SNAP_MAX=5
+      15  RESTORE_MARKER="$SECRETARY_DIR/.guard-restore"
+      16
+      17 -# flock 단일 인스턴스 강제
+      17 +# PID 파일 기반 단일 인스턴스 강제 (flock 미지원 환경 대응)
+    18  LOCKFILE="$SECRETARY_DIR/.scout-lock"
+ 19 -exec 9>"$LOCKFILE"
+      20 -flock -n 9 || { echo "Already running"; exit 0; }
+      19 +if [ -f "$LOCKFILE" ]; then
+      20 +  OLD_PID=$(cat "$LOCKFILE" 2>/dev/null)
+      21 +  if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
+      22 +    echo "Already running (PID $OLD_PID)"; exit 0
+      23 +  fi
+      24 +fi
+      25 +echo $$ > "$LOCKFILE"
+      26 +trap "rm -f '$LOCKFILE'" EXIT
+      27
+      28  # 감사 로그 설정
+      29  AUDIT_LOG_DIR="$HOME/.claude/audit-log"
+
+● Bash(bash -n /d/projects/button/agent/.secretary/.scripts/scout-and-act.sh&&echo"syntaxOK"
+bash/d/projects/button/agent/.secretary/.scripts/scout-and-act.shsec…)
+  ⎿  syntax OK
+  (6s)
+  (ctrl+b to run in background)
+
+● Finagling… (2m 19s · ↓ 855 tokens · thinking)
+
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+⏵⏵bypasspermissionson (shift+tabtocycle)·esctointerruptRemoteControlactive

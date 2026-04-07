@@ -48,7 +48,7 @@ FIRST_LINE=$(head -1 "$MSG_FILE")
 MSG_CONTENT=$(cat "$MSG_FILE")
 
 if echo "$FIRST_LINE" | grep -q "^\[ACTION\]"; then
-  send_telegram "[승인 필요] $MSG_CONTENT"
+  send_telegram "[approval needed] $MSG_CONTENT"
   log_action "$FIRST_LINE"
   exit 0
 fi

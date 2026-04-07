@@ -14,10 +14,16 @@ SNAP_DIR="$SECRETARY_DIR/.snapshots"
 SNAP_MAX=5
 RESTORE_MARKER="$SECRETARY_DIR/.guard-restore"
 
-# flock 단일 인스턴스 강제
+# PID 파일 기반 단일 인스턴스 강제 (flock 미지원 환경 대응)
 LOCKFILE="$SECRETARY_DIR/.scout-lock"
-exec 9>"$LOCKFILE"
-flock -n 9 || { echo "Already running"; exit 0; }
+if [ -f "$LOCKFILE" ]; then
+  OLD_PID=$(cat "$LOCKFILE" 2>/dev/null)
+  if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
+    echo "Already running (PID $OLD_PID)"; exit 0
+  fi
+fi
+echo $$ > "$LOCKFILE"
+trap "rm -f '$LOCKFILE'" EXIT
 
 # 감사 로그 설정
 AUDIT_LOG_DIR="$HOME/.claude/audit-log"
@@ -93,17 +99,30 @@ fi
 IDLE_SEC=$(powershell.exe -NoProfile -File "$SECRETARY_DIR/.scripts/get-idle-time.ps1" 2>/dev/null | tr -d '\r')
 [ -z "$IDLE_SEC" ] && IDLE_SEC=0
 
-# === 가드 자동 복원 (15분 경과 시) ===
+# === 가드 자동 복원 (agent 화면 활성화 감지 시) ===
 if [ -f "$RESTORE_MARKER" ]; then
   BACKUP_FILE=$(cat "$RESTORE_MARKER")
-  MARKER_TS=$(stat -c %Y "$RESTORE_MARKER" 2>/dev/null || echo 0)
-  NOW_TS=$(date +%s)
-  if [ $((NOW_TS - MARKER_TS)) -gt 900 ]; then
-    if [ -f "$BACKUP_FILE" ]; then
-      cp "$BACKUP_FILE" "$HOME/.claude/settings.json"
-      rm -f "$RESTORE_MARKER" "$BACKUP_FILE"
-      log_event INFO "secretary" "guard_restored" "15min auto-restore" "guard-restore"
+  UNLOCK_SESSION=$(cat "${RESTORE_MARKER}.session" 2>/dev/null)
+  RESTORE_NOW=false
+  if [ -n "$UNLOCK_SESSION" ] && [ -f "$SNAP_DIR/$UNLOCK_SESSION/.idx" ]; then
+    IDX_R=$(cat "$SNAP_DIR/$UNLOCK_SESSION/.idx")
+    PREV_IDX_R=$(( (IDX_R - 1 + SNAP_MAX) % SNAP_MAX ))
+    CUR_SNAP="$SNAP_DIR/$UNLOCK_SESSION/snap_${IDX_R}.txt"
+    PREV_SNAP_R="$SNAP_DIR/$UNLOCK_SESSION/snap_${PREV_IDX_R}.txt"
+    # 화면이 변화했으면 agent가 재개한 것 → 즉시 복원
+    if [ -f "$CUR_SNAP" ] && [ -f "$PREV_SNAP_R" ] && \
+       ! diff -q "$PREV_SNAP_R" "$CUR_SNAP" >/dev/null 2>&1; then
+      RESTORE_NOW=true
     fi
+  else
+    # 세션 정보 없으면 fallback: 5분 후 복원
+    MARKER_TS=$(stat -c %Y "$RESTORE_MARKER" 2>/dev/null || echo 0)
+    [ $(( $(date +%s) - MARKER_TS )) -gt 300 ] && RESTORE_NOW=true
+  fi
+  if [ "$RESTORE_NOW" = true ] && [ -f "$BACKUP_FILE" ]; then
+    cp "$BACKUP_FILE" "$HOME/.claude/settings.json"
+    rm -f "$RESTORE_MARKER" "${RESTORE_MARKER}.session" "$BACKUP_FILE"
+    log_event INFO "secretary" "guard_restored" "agent resumed, guard restored" "guard-restore"
   fi
 fi
 
@@ -282,6 +301,7 @@ for S in $SESSIONS; do
       BACKUP=$(disable_blocking_guard)
       if [ "$BACKUP" != "FAIL" ] && [ -n "$BACKUP" ]; then
         echo "$BACKUP" > "$RESTORE_MARKER"
+        echo "$S" > "${RESTORE_MARKER}.session"
         log_event WARN "$S" "guard_unlocked" "backup=$BACKUP deny=$DENY_COUNT" "guard-unlock"
         "$PSMUX" send-keys -t "$S" "[secretary] 가드 임시 해제됨 (15분 후 자동 복원). 작업을 재개하세요." Enter
       else
@@ -336,7 +356,8 @@ for S in $SESSIONS; do
   tail -5 "$ERR_WINDOW_FILE" > "${ERR_WINDOW_FILE}.tmp" && mv "${ERR_WINDOW_FILE}.tmp" "$ERR_WINDOW_FILE"
 
   ERR_COUNT=$(grep -c "^1$" "$ERR_WINDOW_FILE" 2>/dev/null || echo 0)
-  if [ "$ERR_COUNT" -ge 3 ] && [ -f "$SECRETARY_DIR/.sonnet-enabled" ] && check_dedup "$S" "semantic_error_analysis"; then
+  ERR_COUNT=$(echo "$ERR_COUNT" | tr -d '\r\n' | grep -oE '[0-9]+' || echo 0)
+  if [ "${ERR_COUNT:-0}" -ge 3 ] && [ -f "$SECRETARY_DIR/.sonnet-enabled" ] && check_dedup "$S" "semantic_error_analysis"; then
     RIDX=$(cat "$SNAP_IDX_FILE" 2>/dev/null || echo 0)
     IDX0=$(( (RIDX - 1 + SNAP_MAX) % SNAP_MAX ))
     IDX1=$(( (RIDX - 2 + SNAP_MAX) % SNAP_MAX ))
@@ -478,7 +499,7 @@ if [ "$TOTAL_ISSUES" -gt "$HANDLED_COUNT" ]; then
     printf 'header = "Authorization: Bearer %s"\n' "$AGENT_SECRET" > "$_CURL_CFG"
     curl -s -K "$_CURL_CFG" "http://localhost:9876/telegram" \
       -H 'Content-Type: application/json' \
-      -d '{"message":"[비서] 미처리 이상 감지. 확인 필요."}'
+      -d '{"message":"[secretary] Unhandled anomaly detected. Please check."}'
     rm -f "$_CURL_CFG"
   fi
 fi
@@ -538,7 +559,7 @@ if [ "$DOW" -eq 7 ] && [ "$LAST_AUDIT_WEEK" != "$THIS_WEEK" ]; then
   printf 'header = "Authorization: Bearer %s"\n' "$AGENT_SECRET" > "$_CURL_CFG"
   if curl -s -K "$_CURL_CFG" "http://localhost:9876/telegram" \
     -H 'Content-Type: application/json' \
-    -d '{"message":"[비서] 주간 감사 시간입니다. claude '\''감사 wf'\'' 또는 '\''세션 감사'\'' 실행을 권장합니다."}'; then
+    -d '{"message":"[secretary] Weekly audit reminder. Run: claude audit-wf or session-audit."}'; then
     echo "$THIS_WEEK" > "$SECRETARY_DIR/.last-audit-week"
     log_event INFO "" "weekly_reminder_sent" "week=$THIS_WEEK" "telegram"
   else

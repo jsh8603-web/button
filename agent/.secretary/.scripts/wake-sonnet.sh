@@ -19,8 +19,14 @@ AUDIT_LOG="$AUDIT_LOG_DIR/$(date +%Y-%m-%d).jsonl"
 # === flock (이중 호출 방지) ===
 mkdir -p "$QUEUE_DIR"
 WAKE_LOCK="$QUEUE_DIR/.wake-lock"
-exec 8>"$WAKE_LOCK"
-flock -n 8 || { echo "wake-sonnet already running"; exit 0; }
+if [ -f "$WAKE_LOCK" ]; then
+  OLD_PID=$(cat "$WAKE_LOCK" 2>/dev/null)
+  if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
+    echo "wake-sonnet already running (PID $OLD_PID)"; exit 0
+  fi
+fi
+echo $$ > "$WAKE_LOCK"
+trap "rm -f '$WAKE_LOCK'" EXIT
 
 log_event() {
   local TYPE="$1" EVENT="$2" CONTEXT="$3" ACTION="$4"
@@ -51,7 +57,7 @@ TODAY=$(date +%Y%m%d)
 CURRENT=$(grep "^$TODAY:" "$CAP_FILE" 2>/dev/null | cut -d: -f2 || echo 0)
 
 if [ "$CURRENT" -ge "$DAILY_CAP" ]; then
-  send_telegram "[비서] Sonnet 일일 호출 상한(${DAILY_CAP}회) 초과. Telegram 폴백."
+  send_telegram "[secretary] Sonnet daily cap (${DAILY_CAP}) reached. Using Telegram fallback."
   log_event WARN "sonnet_daily_cap_exceeded" "count=$CURRENT" "telegram_fallback"
   exit 0
 fi

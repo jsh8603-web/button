@@ -1,0 +1,41 @@
+  ⎿  PreToolUse:Bash hook error
+  ⎿  THIS_WEEK=$(date +%Y-W%V)
+     if [ "$DOW" -eq 7 ] && [ "$LAST_AUDIT_WEEK" != "$THIS_WEEK" ]; then
+       AGENT_SECRET=$(jq -r '.agent_secret // ""' "$CONFIG" 2>/dev/null)
+     … +11 lines (ctrl+o to expand)
+
+● 두 곳 모두 영어로 변경합니다.
+
+● Update(agent\.secretary\.scripts\scout-and-act.sh)
+  ⎿  Added1line,removed1line
+      499      printf 'header = "Authorization: Bearer %s"\n' "$AGENT_SECRET" > "$_CURL_CFG"
+    500      curl -s -K "$_CURL_CFG" "http://localhost:9876/telegram" \
+      501        -H 'Content-Type: application/json' \
+    502 -      -d '{"message":"[비서] 미처리 이상 감지. 확인 필요."}'
+      502 +      -d '{"message":"[secretary] Unhandled anomaly detected. Please check."}'
+      503      rm -f "$_CURL_CFG"
+ 504 fi
+      505  fi
+
+● Update(agent\.secretary\.scripts\scout-and-act.sh)
+  ⎿  Added1line,removed1line
+      559    printf 'header = "Authorization: Bearer %s"\n' "$AGENT_SECRET" > "$_CURL_CFG"
+    560    if curl -s -K "$_CURL_CFG" "http://localhost:9876/telegram" \
+      561      -H 'Content-Type: application/json' \
+    562 -    -d '{"message":"[비서] 주간 감사 시간입니다. claude '\''감사 wf'\'' 또는 '\''세션 감사'\'' 실행을 권장합니다."}'; then
+      562 +    -d '{"message":"[secretary] Weekly audit reminder. Run: claude audit-wf or session-audit."}'; then
+      563      echo "$THIS_WEEK" > "$SECRETARY_DIR/.last-audit-week"
+ 564 log_eventINFO"" "weekly_reminder_sent" "week=$THIS_WEEK" "telegram"
+      565    else
+
+● 다른 메시지 파일들도 확인합니다.
+
+● Searching for 1 pattern… (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+
+● Finagling… (9m 54s · ↑3.0k tokens · thinking)
+
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt                                                                                                                                  ⧉ In harness.md Remote Control active
