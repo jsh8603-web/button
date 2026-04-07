@@ -58,7 +58,7 @@ bash elif 체인을 벗어난 미처리 이상 — 화면 확인 후 빠른 판�
 
 **type = "guard_unlock_analysis" 인 작업 처리 절차**
 
-배경: agent 스크립트가 settings.json hook 제거 실패. 에이전트 교착 상태.
+배경: secretary 스크립트가 settings.json hook 제거 실패. 에이전트 교착 상태.
 
 1. 작업 JSON의 context 필드에서 deny_count 확인
 2. `~/.claude/settings.json` Read → hooks 구조 파악
