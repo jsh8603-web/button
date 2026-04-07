@@ -32,10 +32,14 @@ else
   MEMORY=$(ls -t ~/.claude/memory/session_${PROJECT}_*.md 2>/dev/null | head -1)
   if [ -z "$MEMORY" ]; then
     MSG="$SECRETARY_DIR/.messages/revive-git-fallback.txt"
-  elif [ $(( $(date +%s) - $(stat -c %Y "$MEMORY") )) -gt 10800 ]; then
-    MSG="$SECRETARY_DIR/.messages/revive-stale-memory.txt"
   else
-    MSG="$SECRETARY_DIR/.messages/revive-context.txt"
+    PYTHON="/c/Users/jsh86/AppData/Local/Programs/Python/Python312/python.exe"
+    MEMORY_AGE=$("$PYTHON" -c "import os,time; print(int(time.time()-os.path.getmtime('$MEMORY')))" 2>/dev/null || echo 99999)
+    if [ "${MEMORY_AGE:-99999}" -gt 10800 ]; then
+      MSG="$SECRETARY_DIR/.messages/revive-stale-memory.txt"
+    else
+      MSG="$SECRETARY_DIR/.messages/revive-context.txt"
+    fi
   fi
   bash "$(dirname "$0")/msg.sh" "$SESSION_NAME" "$MSG"
   echo "REVIVE_REQUESTED: $SESSION_NAME (model=$MODEL, dir=$DIR, msg=$MSG)"

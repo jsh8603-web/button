@@ -1,0 +1,2 @@
+btn-Obsidian|sonnet|C:\msys64\home\jsh86|2026-04-07T15:19:40+09:00|58e8e638-148d-4699-bc31-94d03c321cd4
+button|sonnet|D:\projects\button|2026-04-07T15:19:41+09:00|3b7e69ed-6d30-499d-ac2c-07311db91c12

@@ -80,25 +80,43 @@ check_dedup() {
 }
 
 SONNET_SESSION=$(jq -r '.sonnet_session // "secretary-sonnet"' "$CONFIG" 2>/dev/null)
+REGISTRY="$SECRETARY_DIR/.session-registry.txt"
 WF_ACTIVE_FILE="$SECRETARY_DIR/../.wf-active"
-# btn-* 세션 (대화형 Claude Code 메인 세션) 제외 — Enter 자동 전송 등이 채팅 입력 방해
-SESSIONS=$("$PSMUX" ls 2>/dev/null | cut -d: -f1 | \
-  grep -v "^${SELF_SESSION}$" | grep -v "^task-" | grep -v "^${SONNET_SESSION}$" | \
-  grep -v "^btn-")
+touch "$REGISTRY" 2>/dev/null  # 레지스트리 파일 보장
 
-# WF 활성 시 harness 세션 모니터링 제외 (충돌 방지)
-# .wf-active에 세션명 목록이 있으면 그것을 사용, 없으면 기본 4개 prefix 매칭
+# 기능 6종 지원 디렉토리
+CTX_WARN_TS_DIR="$SECRETARY_DIR/.ctx-warn-ts"   # Feature 3: 메모리 저장 검증
+SOLUTIONS_FILE="$SECRETARY_DIR/.error-solutions.json"  # Feature 5: 솔루션 캐시
+PYTHON="/c/Users/jsh86/AppData/Local/Programs/Python/Python312/python.exe"
+TMPDIR="$SECRETARY_DIR/.tmp"
+mkdir -p "$CTX_WARN_TS_DIR" "$TMPDIR"
+[ -f "$SOLUTIONS_FILE" ] || echo "[]" > "$SOLUTIONS_FILE"
+
+# 모니터링 대상: 비서 자신만 제외, 나머지 전체 풀 모니터링
+ALL_PSMUX=$("$PSMUX" ls 2>/dev/null | cut -d: -f1)
+SESSIONS=$(echo "$ALL_PSMUX" | grep -v "^${SELF_SESSION}$")
+
+# WF 세션 목록 (autonomous-proceed + revive만 제외, 나머지는 모니터링)
+WF_SESSION_LIST=""
 if [ -f "$WF_ACTIVE_FILE" ]; then
-  WF_SESSIONS=$(cat "$WF_ACTIVE_FILE" 2>/dev/null | tr '\n' '|' | sed 's/|$//')
-  if [ -n "$WF_SESSIONS" ]; then
-    SESSIONS=$(echo "$SESSIONS" | grep -vE "^(${WF_SESSIONS})")
-  else
-    SESSIONS=$(echo "$SESSIONS" | grep -vE '^(worker|verifier|healer|strategic)')
-  fi
+  WF_SESSION_LIST=$(cat "$WF_ACTIVE_FILE" 2>/dev/null)
+  [ -z "$WF_SESSION_LIST" ] && WF_SESSION_LIST="worker verifier healer strategic"
 fi
+
+# DEAD_SESSIONS: 레지스트리 등록됐지만 psmux에 없는 세션 → revive 대상
+# WF 세션은 Supervisor가 관리하므로 제외
+REGISTERED=$(cut -d'|' -f1 "$REGISTRY" 2>/dev/null)
+DEAD_SESSIONS=""
+for _S in $REGISTERED; do
+  [ "$_S" = "$SELF_SESSION" ] && continue
+  echo "$ALL_PSMUX" | grep -qxF "$_S" && continue  # alive
+  echo "$WF_SESSION_LIST" | tr ' ' '\n' | grep -qxF "$_S" && continue  # WF — skip
+  DEAD_SESSIONS="$DEAD_SESSIONS $_S"
+done
 
 # === 사용자 부재 체크 ===
 IDLE_SEC=$(powershell.exe -NoProfile -File "$SECRETARY_DIR/.scripts/get-idle-time.ps1" 2>/dev/null | tr -d '\r')
+IDLE_SEC=$(echo "$IDLE_SEC" | grep -oE '^[0-9]+$' || echo 0)
 [ -z "$IDLE_SEC" ] && IDLE_SEC=0
 
 # === 가드 자동 복원 (agent 화면 활성화 감지 시) ===
@@ -118,7 +136,8 @@ if [ -f "$RESTORE_MARKER" ]; then
     fi
   else
     # 세션 정보 없으면 fallback: 5분 후 복원
-    MARKER_TS=$(stat -c %Y "$RESTORE_MARKER" 2>/dev/null || echo 0)
+    MARKER_TS=$("C:/Users/jsh86/AppData/Local/Programs/Python/Python312/python.exe" \
+      -c "import os,time; print(int(os.path.getmtime('$RESTORE_MARKER')))" 2>/dev/null || echo 0)
     [ $(( $(date +%s) - MARKER_TS )) -gt 300 ] && RESTORE_NOW=true
   fi
   if [ "$RESTORE_NOW" = true ] && [ -f "$BACKUP_FILE" ]; then
@@ -177,6 +196,13 @@ fi
   echo "GUARD_DENY_3MIN: $DENY_COUNT"
   echo ""
 
+  # 레지스트리 등록됐지만 psmux에서 사라진 세션 → SESSION_DEAD
+  for S in $DEAD_SESSIONS; do
+    echo "--- $S ---"
+    echo "STATUS: SESSION_DEAD"
+    echo ""
+  done
+
   for S in $SESSIONS; do
     echo "--- $S ---"
 
@@ -188,8 +214,15 @@ fi
     fi
 
     LAST_LINES=$(echo "$CAP" | tail -5)
-    if echo "$LAST_LINES" | grep -qE '^\$\s*$|^>\s*$|^bash-|^C:\\'; then
+    if echo "$LAST_LINES" | grep -qE '^\$\s*$|^bash-|^[A-Z]:[/\\]|^PS '; then
       echo "STATUS: AGENT_DEAD"
+    elif echo "$LAST_LINES" | grep -qE '^>\s*$'; then
+      # '>'는 Claude Code 대기 프롬프트이기도 함 — 전체 pane에 Claude 컨텍스트 있으면 ALIVE
+      if echo "$CAP" | grep -qE '(Claude Code|claude-opus|claude-sonnet|claude-haiku|Opus|Sonnet|Haiku)'; then
+        echo "STATUS: ALIVE"
+      else
+        echo "STATUS: AGENT_DEAD"
+      fi
     else
       echo "STATUS: ALIVE"
     fi
@@ -200,8 +233,8 @@ fi
       echo "COMPRESSED: NO"
     fi
 
-    # "X% until auto-compact" 패턴에서 남은 비율 추출
-    AUTO_COMPACT_REMAIN=$(echo "$CAP" | grep -oP '[0-9]+(?=%.{0,5}until.{0,5}auto.{0,5}compact)' | head -1)
+    # "X% until auto-compact" 패턴에서 남은 비율 추출 — 상태바는 하단에 고정되므로 마지막 3줄만 스캔
+    AUTO_COMPACT_REMAIN=$(echo "$CAP" | tail -3 | grep -oP '[0-9]+(?=%.{0,5}until.{0,5}auto.{0,5}compact)' | head -1)
     echo "AUTO_COMPACT_REMAIN: ${AUTO_COMPACT_REMAIN:-NONE}"
 
     if echo "$LAST_LINES" | grep -qE '(진행할까요|번호를 입력|어떤 방향|선택해)'; then
@@ -214,7 +247,10 @@ fi
       grep -oP '\S+\.(ts|js|md|py|json|tsx|jsx|css)' | sort -u | tr '\n' ',')
     echo "EDITING: ${EDITING:-NONE}"
 
-    ERRORS=$(echo "$CAP" | grep -E '(Error:|FATAL|Traceback|ENOENT|ECONNREFUSED|failed|rate limit)' | tail -3)
+    # 마지막 30줄만 스캔 (Claude 응답 텍스트 오탐 방지) + 구체적 에러 패턴만
+    ERRORS=$(echo "$CAP" | tail -30 | \
+      grep -E '(^Error:|^ERROR:|FATAL|Traceback \(most recent|ENOENT|ECONNREFUSED|ETIMEDOUT|exit code [1-9]|npm ERR!|SyntaxError:|TypeError:|ReferenceError:|rate limit exceeded)' | \
+      grep -v '^\s*#' | grep -v 'revive failed\|unlock_failed\|revival_failed' | tail -3)
     if [ -n "$ERRORS" ]; then
       echo "ERRORS:"
       echo "$ERRORS" | sed 's/^/  /'
@@ -229,6 +265,27 @@ fi
     echo "$CAP" > "$SNAP_DIR/$S/snap_${IDX}.txt"
     NEXT_IDX=$(( (IDX + 1) % SNAP_MAX ))
     echo "$NEXT_IDX" > "$SNAP_IDX_FILE"
+
+    # Feature 2: N-gram 진전 추적 — 5사이클 내용 해시 비교
+    CONTENT_HASH=$(echo "$CAP" | tail -20 | grep -vE '^\s*$|^[─╭╰│╮╯┤├]' | md5sum | cut -c1-8)
+    PROGRESS_FILE="$SNAP_DIR/$S/.progress"
+    echo "$CONTENT_HASH" >> "$PROGRESS_FILE"
+    tail -5 "$PROGRESS_FILE" > "${PROGRESS_FILE}.tmp" && mv "${PROGRESS_FILE}.tmp" "$PROGRESS_FILE"
+    UNIQUE_P=$(sort -u "$PROGRESS_FILE" | wc -l | tr -d ' \r\n')
+    LINES_P=$(wc -l < "$PROGRESS_FILE" | tr -d ' \r\n')
+    if [ "${UNIQUE_P:-2}" -eq 1 ] && [ "${LINES_P:-0}" -ge 5 ]; then
+      echo "STUCK: YES"
+    else
+      echo "STUCK: NO"
+    fi
+
+    # 세션이 idle 상태인지 감지 (일 없이 대기 중 = 정상, stuck 아님)
+    IDLE_PROMPT="NO"
+    if echo "$LAST_LINES" | grep -qE '^>\s*$' && \
+       echo "$CAP" | grep -qE '(Claude Code|claude-opus|claude-sonnet|claude-haiku|Opus|Sonnet|Haiku)'; then
+      IDLE_PROMPT="YES"
+    fi
+    echo "IDLE_PROMPT: $IDLE_PROMPT"
 
     # 가드 차단 + 화면 미변화 감지 (교착 판정)
     GUARD_BLOCKED="NO"
@@ -275,14 +332,39 @@ TELEGRAM_REASONS=""
 # === 헬퍼 함수 ===
 queue_sonnet_task() {
   local TYPE="$1" SESSION="$2" CONTEXT="$3"
-  local QUEUE_DIR="$SECRETARY_DIR/$(jq -r '.queue_dir // ".sonnet-queue"' "$CONFIG" 2>/dev/null)"
+
+  # S-2(semantic_error_analysis)는 Opus, 나머지(S-1, S-3)는 Sonnet
+  local WAKE_SCRIPT QUEUE_KEY MODEL_TAG
+  if [ "$TYPE" = "semantic_error_analysis" ]; then
+    QUEUE_KEY="opus_queue_dir"
+    WAKE_SCRIPT="wake-opus.sh"
+    MODEL_TAG="opus"
+  else
+    QUEUE_KEY="queue_dir"
+    WAKE_SCRIPT="wake-sonnet.sh"
+    MODEL_TAG="sonnet"
+  fi
+
+  local QUEUE_DIR="$SECRETARY_DIR/$(jq -r ".${QUEUE_KEY} // \".sonnet-queue\"" "$CONFIG" 2>/dev/null)"
   mkdir -p "$QUEUE_DIR"
+
+  # 레지스트리에서 JSONL 경로 계산
+  local SID DIR JSONL_PATH
+  SID=$(grep "^${SESSION}|" "$REGISTRY" | cut -d'|' -f5)
+  DIR=$(grep "^${SESSION}|" "$REGISTRY" | cut -d'|' -f3)
+  local JSONL_BASE="$HOME/.claude/projects"
+  local JSONL_DIR="$JSONL_BASE/$(echo "$DIR" | sed 's|:|--|; s|/|--|g; s|\\|--|g')"
+  JSONL_PATH="$JSONL_DIR/${SID}.jsonl"
+  [ ! -f "$JSONL_PATH" ] && JSONL_PATH=""
+
   jq -n --arg type "$TYPE" --arg session "$SESSION" \
     --arg context "$CONTEXT" --arg timestamp "$(date -Iseconds)" \
-    '{type:$type,session:$session,context:$context,timestamp:$timestamp}' \
+    --arg jsonl_path "$JSONL_PATH" --arg dir "$DIR" --arg sid "$SID" \
+    '{type:$type,session:$session,context:$context,timestamp:$timestamp,
+      jsonl_path:$jsonl_path,dir:$dir,sid:$sid}' \
     > "$QUEUE_DIR/$(date +%s).json"
-  bash "$SECRETARY_DIR/.scripts/wake-sonnet.sh"
-  log_event SONNET "$SESSION" "sonnet_invoked" "type=$TYPE" "wake-sonnet.sh"
+  bash "$SECRETARY_DIR/.scripts/$WAKE_SCRIPT"
+  log_event SONNET "$SESSION" "sonnet_invoked" "type=$TYPE model=$MODEL_TAG" "$WAKE_SCRIPT"
 }
 
 send_telegram_alert() {
@@ -298,20 +380,76 @@ send_telegram_alert() {
   rm -f "$_CFG"
 }
 
-for S in $SESSIONS; do
+for S in $SESSIONS $DEAD_SESSIONS; do
   BLOCK=$(sed -n "/^--- $S ---$/,/^--- /p" "$REPORT" | head -n -1)
   STATUS=$(echo "$BLOCK" | grep "^STATUS:" | awk '{print $2}')
-  PCT=$(echo "$BLOCK" | grep "^CONTEXT_PCT:" | awk '{print $2}')
   ERRORS=$(echo "$BLOCK" | grep -A3 "^ERRORS:" | grep "^  " | sed 's/^  //')
   FIRST_ERR=$(echo "$ERRORS" | head -1 | sed 's/[0-9]\+/N/g')
 
-  if [ "$STATUS" = "SESSION_DEAD" ] || [ "$STATUS" = "AGENT_DEAD" ]; then
-    # 우선순위 1: 사망 → 1차: revive / 2차: Telegram
-    if check_dedup "$S" "session_dead"; then
+  # Feature 3: 메모리 저장 검증 (elif 체인과 독립)
+  CTX_WARN_TS_FILE="$CTX_WARN_TS_DIR/${S}.ts"
+  if [ -f "$CTX_WARN_TS_FILE" ]; then
+    WARN_INFO=$(cat "$CTX_WARN_TS_FILE")
+    WARN_TS="${WARN_INFO%%|*}"
+    WARN_DIR="${WARN_INFO##*|}"
+    WARN_AGE=$(( $(date +%s) - ${WARN_TS:-0} ))
+    if [ "$WARN_AGE" -gt 90 ] && [ "$WARN_AGE" -lt 600 ]; then
+      PROJ_KEY=$(echo "$WARN_DIR" | sed 's|:|--|; s|/|--|g; s|\\|--|g')
+      NEW_MEM=$("$PYTHON" -c "
+import os, glob
+path = os.path.expanduser('~/.claude/projects/$PROJ_KEY/memory/')
+ts = $WARN_TS
+files = glob.glob(path + '*.md') if os.path.exists(path) else []
+print(len([f for f in files if os.path.getmtime(f) > ts]))
+" 2>/dev/null || echo 0)
+      if [ "${NEW_MEM:-0}" -eq 0 ]; then
+        if check_dedup "$S" "memory_save_remind"; then
+          echo "컨텍스트 압축이 임박해. 현재 작업 상태와 핵심 결정사항을 지금 바로 memory 파일에 저장해." > "$TMPDIR/mem-remind-${S}.txt"
+          bash "$SECRETARY_DIR/.scripts/msg.sh" "$S" "$TMPDIR/mem-remind-${S}.txt"
+          log_event WARN "$S" "memory_save_reminded" "age=${WARN_AGE}s no_new_files" "memory-remind"
+        fi
+      else
+        rm -f "$CTX_WARN_TS_FILE"
+      fi
+    elif [ "$WARN_AGE" -ge 600 ]; then
+      rm -f "$CTX_WARN_TS_FILE"
+    fi
+  fi
+
+  if [ "$STATUS" = "AGENT_DEAD" ]; then
+    # 우선순위 1a: psmux 살아있지만 Claude만 종료 → claude 재실행 (proj 불필요)
+    echo "$WF_SESSION_LIST" | tr ' ' '\n' | grep -qxF "$S" 2>/dev/null && IS_WF=1 || IS_WF=0
+    case "$S" in task-*) IS_TASK=1 ;; *) IS_TASK=0 ;; esac
+    [ "$S" = "$SONNET_SESSION" ] && IS_SONNET=1 || IS_SONNET=0
+    if [ "$IS_WF" -eq 1 ] || [ "$IS_TASK" -eq 1 ] || [ "$IS_SONNET" -eq 1 ]; then
+      log_event WARN "$S" "agent_dead_skip" "status=AGENT_DEAD reason=wf/task/sonnet" "skip"
+    elif check_dedup "$S" "agent_dead"; then
+      CLAUDE_BIN=$(jq -r '.claude_bin // "claude"' "$CONFIG" 2>/dev/null)
+      log_event WARN "$S" "agent_dead_restart" "status=AGENT_DEAD" "restart-claude"
+      "$PSMUX" send-keys -t "$S" "$CLAUDE_BIN --dangerously-skip-permissions" Enter
+      # 시작 대기 후 resume 주입 (백그라운드)
+      _S="$S" _SDIR="$SECRETARY_DIR" _TMPDIR="$TMPDIR" _PSMUX="$PSMUX" bash -c '
+        sleep 12
+        bash "$_SDIR/.scripts/generate-session-resume.sh" "$_S" >/dev/null 2>&1
+        if [ -f "$_TMPDIR/session-resume-${_S}.txt" ]; then
+          bash "$_SDIR/.scripts/msg.sh" "$_S" "$_TMPDIR/session-resume-${_S}.txt"
+        fi
+      ' &
+    fi
+    HANDLED_COUNT=$((HANDLED_COUNT + 1))
+
+  elif [ "$STATUS" = "SESSION_DEAD" ]; then
+    # 우선순위 1b: psmux 세션 자체 사망 → revive.sh (API 통한 완전 재생성)
+    echo "$WF_SESSION_LIST" | tr ' ' '\n' | grep -qxF "$S" 2>/dev/null && IS_WF=1 || IS_WF=0
+    case "$S" in task-*) IS_TASK=1 ;; *) IS_TASK=0 ;; esac
+    [ "$S" = "$SONNET_SESSION" ] && IS_SONNET=1 || IS_SONNET=0
+    if [ "$IS_WF" -eq 1 ] || [ "$IS_TASK" -eq 1 ] || [ "$IS_SONNET" -eq 1 ]; then
+      log_event WARN "$S" "session_dead_no_revive" "status=$STATUS reason=wf/task/sonnet" "skip"
+    elif check_dedup "$S" "session_dead"; then
       log_event ERROR "$S" "session_dead" "status=$STATUS" "revive.sh"
       bash "$SECRETARY_DIR/.scripts/revive.sh" "$S"
-    else
-      # 이미 revive 시도했는데 다음 사이클도 사망 → 자율 복구 실패
+    elif check_dedup "$S" "revival_failed"; then
+      # revive 이미 시도했는데 다음 사이클도 사망 → 1회만 Telegram
       TELEGRAM_NEEDED=$((TELEGRAM_NEEDED + 1))
       TELEGRAM_REASONS="$TELEGRAM_REASONS revival_failed:$S"
       log_event ERROR "$S" "revival_failed" "status=$STATUS" "telegram"
@@ -320,23 +458,25 @@ for S in $SESSIONS; do
 
   elif echo "$BLOCK" | grep -q "COMPRESSED: YES"; then
     # 우선순위 2: 압축 감지 → JSONL 리줌 주입
-    log_event WARN "$S" "context_compressed" "PCT=$PCT" "session-resume-injected"
+    log_event WARN "$S" "context_compressed" "session=$S" "session-resume-injected"
     bash "$SECRETARY_DIR/.scripts/generate-session-resume.sh" "$S"
-    if [ -f "/tmp/session-resume-${S}.txt" ]; then
-      bash "$SECRETARY_DIR/.scripts/msg.sh" "$S" "/tmp/session-resume-${S}.txt"
+    if [ -f "$TMPDIR/session-resume-${S}.txt" ]; then
+      bash "$SECRETARY_DIR/.scripts/msg.sh" "$S" "$TMPDIR/session-resume-${S}.txt"
     fi
     HANDLED_COUNT=$((HANDLED_COUNT + 1))
 
-  elif [ "$(echo "$BLOCK" | grep "^AUTO_COMPACT_REMAIN:" | awk '{print $2}')" != "NONE" ] && \
-       [ -n "$(echo "$BLOCK" | grep "^AUTO_COMPACT_REMAIN:" | awk '{print $2}')" ] && \
-       [ "$(echo "$BLOCK" | grep "^AUTO_COMPACT_REMAIN:" | awk '{print $2}')" -le 20 ] 2>/dev/null; then
+  elif REMAIN=$(echo "$BLOCK" | grep "^AUTO_COMPACT_REMAIN:" | awk '{print $2}'); \
+       [ -n "$REMAIN" ] && [ "$REMAIN" != "NONE" ] && [ "${REMAIN}" -le 20 ] 2>/dev/null; then
     # 우선순위 2.5: "X% until auto-compact" 20% 이하 → 메모리 저장 요청
-    REMAIN=$(echo "$BLOCK" | grep "^AUTO_COMPACT_REMAIN:" | awk '{print $2}')
     if check_dedup "$S" "context_near_limit"; then
-      CTX_WARN_FILE="/tmp/ctx-warn-${S}.txt"
-      echo "[secretary] Context ${REMAIN}% until auto-compact. Save current task state, decisions, and next steps to memory files now." > "$CTX_WARN_FILE"
+      CTX_WARN_FILE="$TMPDIR/ctx-warn-${S}.txt"
+      TMPL="$SECRETARY_DIR/.messages/memory-save-template.md"
+      echo "컨텍스트 압축까지 ${REMAIN}% 남았어. 당장 ${TMPL} 읽고 memory 파일에 저장해." > "$CTX_WARN_FILE"
       bash "$SECRETARY_DIR/.scripts/msg.sh" "$S" "$CTX_WARN_FILE"
       log_event WARN "$S" "context_near_limit" "remain=${REMAIN}%" "pre-compression-warn"
+      # Feature 3: 메모리 저장 검증용 타임스탬프 기록
+      CTX_WARN_DIR_VAL=$(grep "^${S}|" "$REGISTRY" | cut -d'|' -f3)
+      echo "$(date +%s)|${CTX_WARN_DIR_VAL:-unknown}" > "$CTX_WARN_TS_DIR/${S}.ts"
     fi
     HANDLED_COUNT=$((HANDLED_COUNT + 1))
 
@@ -348,7 +488,7 @@ for S in $SESSIONS; do
         echo "$BACKUP" > "$RESTORE_MARKER"
         echo "$S" > "${RESTORE_MARKER}.session"
         log_event WARN "$S" "guard_unlocked" "backup=$BACKUP deny=$DENY_COUNT" "guard-unlock"
-        "$PSMUX" send-keys -t "$S" "[secretary] Guard temporarily disabled. Resume your work." Enter
+        "$PSMUX" send-keys -t "$S" "Guard 잠깐 해제했어. 작업 계속해." Enter
       else
         log_event WARN "$S" "guard_unlock_failed" "deny=$DENY_COUNT" "guard-unlock-fail"
         # 스크립트 해제 실패 → Obsidian 세션 스폰 + guard-watchdog 실행
@@ -374,6 +514,15 @@ for S in $SESSIONS; do
     fi
     HANDLED_COUNT=$((HANDLED_COUNT + 1))
 
+  elif echo "$BLOCK" | grep -q "STUCK: YES" && ! echo "$BLOCK" | grep -q "IDLE_PROMPT: YES"; then
+    # Feature 2: 5사이클+ 무진전 → 넛지 (idle 대기 중인 세션은 제외)
+    if check_dedup "$S" "stuck_warn"; then
+      echo "5사이클 넘게 진전이 없어. 지금 접근 방식 안 되는 거야. 다른 방법으로 바꿔서 다시 해봐." > "$TMPDIR/stuck-warn-${S}.txt"
+      bash "$SECRETARY_DIR/.scripts/msg.sh" "$S" "$TMPDIR/stuck-warn-${S}.txt"
+      log_event WARN "$S" "stuck_detected" "5+ cycles no progress" "stuck-warn"
+    fi
+    HANDLED_COUNT=$((HANDLED_COUNT + 1))
+
   elif echo "$BLOCK" | grep -q "REPEAT_ERROR: FOUND"; then
     # 우선순위 5: 반복 에러 → 1차: 경고 전송 / 2차(지속): Sonnet 에스컬레이션
     if check_dedup "$S" "repeat_error"; then
@@ -383,8 +532,8 @@ for S in $SESSIONS; do
       cat "$SECRETARY_DIR/.messages/repeat-warn-header.txt" /tmp/repeat-warn-${S}.txt > /tmp/repeat-warn-full-${S}.txt
       bash "$SECRETARY_DIR/.scripts/msg.sh" "$S" /tmp/repeat-warn-full-${S}.txt
     else
-      # 경고 보냈는데 다음 사이클도 동일 에러 → Sonnet 분석
-      if [ -f "$SECRETARY_DIR/.sonnet-enabled" ] && check_dedup "$S" "repeat_error_escalation"; then
+      # 경고 보냈는데 다음 사이클도 동일 에러 → Sonnet 분석 (S-2와 공유 키로 중복 방지)
+      if [ -f "$SECRETARY_DIR/.sonnet-enabled" ] && check_dedup "$S" "semantic_error_analysis"; then
         SNAP_CTX=$(cat "$SNAP_DIR/$S/snap_$(cat "$SNAP_DIR/$S/.idx" 2>/dev/null || echo 0).txt" 2>/dev/null | tail -30)
         queue_sonnet_task "semantic_error_analysis" "$S" \
           "session=$S persistent_error=$FIRST_ERR context=$SNAP_CTX"
@@ -394,16 +543,33 @@ for S in $SESSIONS; do
     HANDLED_COUNT=$((HANDLED_COUNT + 1))
 
   elif echo "$BLOCK" | grep -q "WAITING_FOR_USER: YES" && [ "$IDLE_SEC" -gt 600 ]; then
-    # 우선순위 6: 부재 + 질문 대기 → 자율 진행
-    log_event INFO "$S" "autonomous_proceed" "" "autonomous-proceed.txt"
-    bash "$SECRETARY_DIR/.scripts/msg.sh" "$S" "$SECRETARY_DIR/.messages/autonomous-proceed.txt"
-    touch "$SECRETARY_DIR/.user-absent"
+    # 우선순위 6: 부재 + 질문 대기 → 자율 진행 (WF 세션 제외 — Supervisor가 관리)
+    if echo "$WF_SESSION_LIST" | tr ' ' '\n' | grep -qxF "$S"; then
+      log_event INFO "$S" "autonomous_proceed_skipped" "wf_session" "skip"
+    else
+      log_event INFO "$S" "autonomous_proceed" "" "autonomous-proceed.txt"
+      bash "$SECRETARY_DIR/.scripts/msg.sh" "$S" "$SECRETARY_DIR/.messages/autonomous-proceed.txt"
+      touch "$SECRETARY_DIR/.user-absent"
+    fi
     HANDLED_COUNT=$((HANDLED_COUNT + 1))
 
   elif [ -n "$ERRORS" ]; then
-    # 에러 감지 (위 조건 미해당)
-    ACTION="monitored"
-    log_event ERROR "$S" "error_detected" "$ERRORS" "$ACTION"
+    # S-1: elif 미매칭 에러 → 모델별 분기
+    log_event ERROR "$S" "error_detected" "$ERRORS" "exception_analysis"
+    SESSION_MODEL=$(grep "^${S}|" "$REGISTRY" | cut -d'|' -f2)
+    if echo "$SESSION_MODEL" | grep -qi "opus"; then
+      # Opus 세션 → 직접 self-verify 메시지 (소환 없음)
+      if check_dedup "$S" "exception_analysis"; then
+        SELF_VERIFY="$SECRETARY_DIR/.messages/self-verify-opus.txt"
+        bash "$SECRETARY_DIR/.scripts/msg.sh" "$S" "$SELF_VERIFY"
+        log_event WARN "$S" "opus_self_verify_requested" "$ERRORS" "self-verify"
+      fi
+    elif [ -f "$SECRETARY_DIR/.sonnet-enabled" ] && check_dedup "$S" "exception_analysis"; then
+      # Sonnet 세션 → secretary-opus 소환
+      SNAP_CTX=$(cat "$SNAP_DIR/$S/snap_$(cat "$SNAP_DIR/$S/.idx" 2>/dev/null || echo 0).txt" 2>/dev/null | tail -30)
+      queue_sonnet_task "exception_analysis" "$S" "errors=$ERRORS context=$SNAP_CTX"
+    fi
+    HANDLED_COUNT=$((HANDLED_COUNT + 1))
 
   fi
 
@@ -425,60 +591,74 @@ for S in $SESSIONS; do
 
   ERR_COUNT=$(grep -c "^1$" "$ERR_WINDOW_FILE" 2>/dev/null || echo 0)
   ERR_COUNT=$(echo "$ERR_COUNT" | tr -d '\r\n' | grep -oE '[0-9]+' || echo 0)
-  if [ "${ERR_COUNT:-0}" -ge 3 ] && [ -f "$SECRETARY_DIR/.sonnet-enabled" ] && check_dedup "$S" "semantic_error_analysis"; then
-    RIDX=$(cat "$SNAP_IDX_FILE" 2>/dev/null || echo 0)
-    IDX0=$(( (RIDX - 1 + SNAP_MAX) % SNAP_MAX ))
-    IDX1=$(( (RIDX - 2 + SNAP_MAX) % SNAP_MAX ))
-    IDX2=$(( (RIDX - 3 + SNAP_MAX) % SNAP_MAX ))
-    SNAP0=$(cat "$SNAP_DIR/$S/snap_${IDX0}.txt" 2>/dev/null | tail -20)
-    SNAP1=$(cat "$SNAP_DIR/$S/snap_${IDX1}.txt" 2>/dev/null | tail -20)
-    SNAP2=$(cat "$SNAP_DIR/$S/snap_${IDX2}.txt" 2>/dev/null | tail -20)
-    QUEUE_DIR="$SECRETARY_DIR/$(jq -r '.queue_dir // ".sonnet-queue"' "$CONFIG" 2>/dev/null)"
-    mkdir -p "$QUEUE_DIR"
-    TASK_FILE="$QUEUE_DIR/$(date +%s).json"
-    jq -n \
-      --arg type "semantic_error_analysis" \
-      --arg session "$S" \
-      --arg errors "$ERRORS" \
-      --arg snap0 "$SNAP0" \
-      --arg snap1 "$SNAP1" \
-      --arg snap2 "$SNAP2" \
-      '{type:$type, session:$session, current_errors:$errors, snapshots:[$snap0,$snap1,$snap2]}' \
-      > "$TASK_FILE"
-    bash "$SECRETARY_DIR/.scripts/wake-sonnet.sh"
-    log_event SONNET "$S" "sonnet_invoked" "type=semantic_error window=$ERR_COUNT/5" "wake-sonnet.sh"
-  fi
+  if [ "${ERR_COUNT:-0}" -ge 3 ] && [ -f "$SECRETARY_DIR/.sonnet-enabled" ]; then
+    # Feature 5: 솔루션 캐시 확인 (Opus 호출 전)
+    NORM_ERR=$(echo "$FIRST_ERR" | sed 's|/[^/]*/|/.../|g')
+    CACHED_SOL=$(jq -r --arg p "$NORM_ERR" \
+      '.[] | select(.normalized_pattern == $p) | .solution' \
+      "$SOLUTIONS_FILE" 2>/dev/null | head -1)
 
-done
+    if [ -n "$CACHED_SOL" ]; then
+      # 캐시 히트 → Opus 없이 바로 전송
+      echo "이 에러 전에 해결한 적 있어. 아래 방법 먼저 써봐:
+$CACHED_SOL" > "$TMPDIR/cached-sol-${S}.txt"
+      bash "$SECRETARY_DIR/.scripts/msg.sh" "$S" "$TMPDIR/cached-sol-${S}.txt"
+      log_event INFO "$S" "solution_cache_hit" "pattern=$NORM_ERR" "cached-solution"
+      jq --arg p "$NORM_ERR" \
+        '(.[] | select(.normalized_pattern == $p) | .hit_count) += 1' \
+        "$SOLUTIONS_FILE" > "$TMPDIR/sol-tmp.json" && mv "$TMPDIR/sol-tmp.json" "$SOLUTIONS_FILE"
 
-# === btn-* 세션 PCT 전용 모니터링 (사전 압축 경고, 전체 elif 체인 제외) ===
-# === btn-* 세션: 압축 감지 + resume 주입 / 사전 경고 ===
-BTN_SESSIONS=$("$PSMUX" ls 2>/dev/null | cut -d: -f1 | grep "^btn-")
-for BS in $BTN_SESSIONS; do
-  BTN_CAP=$("$PSMUX" capture-pane -p -S 0 -t "$BS" 2>/dev/null)
-  [ -z "$BTN_CAP" ] && continue
+    elif check_dedup "$S" "semantic_error_analysis"; then
+      S2_MODEL=$(grep "^${S}|" "$REGISTRY" | cut -d'|' -f2)
+      if echo "$S2_MODEL" | grep -qi "opus"; then
+        # Opus 세션 → self-verify 메시지 직접 전송
+        bash "$SECRETARY_DIR/.scripts/msg.sh" "$S" "$SECRETARY_DIR/.messages/self-verify-opus.txt"
+        log_event WARN "$S" "opus_self_verify_s2" "window=$ERR_COUNT/5" "self-verify"
+      else
+        # Sonnet 세션 → secretary-opus 소환
+        RIDX=$(cat "$SNAP_IDX_FILE" 2>/dev/null || echo 0)
+        IDX0=$(( (RIDX - 1 + SNAP_MAX) % SNAP_MAX ))
+        IDX1=$(( (RIDX - 2 + SNAP_MAX) % SNAP_MAX ))
+        IDX2=$(( (RIDX - 3 + SNAP_MAX) % SNAP_MAX ))
+        SNAP0=$(cat "$SNAP_DIR/$S/snap_${IDX0}.txt" 2>/dev/null | tail -20)
+        SNAP1=$(cat "$SNAP_DIR/$S/snap_${IDX1}.txt" 2>/dev/null | tail -20)
+        SNAP2=$(cat "$SNAP_DIR/$S/snap_${IDX2}.txt" 2>/dev/null | tail -20)
+        OPUS_QDIR="$SECRETARY_DIR/$(jq -r '.opus_queue_dir // ".opus-queue"' "$CONFIG" 2>/dev/null)"
+        mkdir -p "$OPUS_QDIR"
+        S2_SID=$(grep "^${S}|" "$REGISTRY" | cut -d'|' -f5)
+        S2_DIR=$(grep "^${S}|" "$REGISTRY" | cut -d'|' -f3)
+        S2_JSONL_DIR="$HOME/.claude/projects/$(echo "$S2_DIR" | sed 's|:|--|; s|/|--|g; s|\\|--|g')"
+        S2_JSONL="$S2_JSONL_DIR/${S2_SID}.jsonl"
+        [ ! -f "$S2_JSONL" ] && S2_JSONL=""
+        jq -n \
+          --arg type "semantic_error_analysis" \
+          --arg session "$S" \
+          --arg errors "$ERRORS" \
+          --arg snap0 "$SNAP0" \
+          --arg snap1 "$SNAP1" \
+          --arg snap2 "$SNAP2" \
+          --arg jsonl_path "$S2_JSONL" \
+          --arg dir "$S2_DIR" \
+          --arg sid "$S2_SID" \
+          '{type:$type, session:$session, current_errors:$errors, snapshots:[$snap0,$snap1,$snap2],
+            jsonl_path:$jsonl_path, dir:$dir, sid:$sid}' \
+          > "$OPUS_QDIR/$(date +%s).json"
+        bash "$SECRETARY_DIR/.scripts/wake-opus.sh"
+        log_event SONNET "$S" "opus_invoked" "type=semantic_error window=$ERR_COUNT/5" "wake-opus.sh"
+      fi
 
-  # 압축 완료 감지 → resume 주입
-  if echo "$BTN_CAP" | grep -qE '(Compacted|PostCompact|compaction)'; then
-    if check_dedup "$BS" "btn_compressed"; then
-      log_event WARN "$BS" "context_compressed" "" "session-resume-injected"
-      bash "$SECRETARY_DIR/.scripts/generate-session-resume.sh" "$BS"
-      if [ -f "/tmp/session-resume-${BS}.txt" ]; then
-        bash "$SECRETARY_DIR/.scripts/msg.sh" "$BS" "/tmp/session-resume-${BS}.txt"
+    else
+      # Feature 1: Opus 이미 시도했는데 에러 지속 → Feature 6 에스컬레이션 체인 4단계: Telegram
+      if check_dedup "$S" "opus_no_effect"; then
+        TELEGRAM_NEEDED=$((TELEGRAM_NEEDED + 1))
+        TELEGRAM_REASONS="$TELEGRAM_REASONS opus_no_effect:$S"
+        log_event ESCALATION "$S" "opus_no_effect" "error persists after opus analysis" "telegram"
       fi
     fi
   fi
 
-  # 사전 경고: "X% until auto-compact" 20% 이하
-  BTN_REMAIN=$(echo "$BTN_CAP" | grep -oP '[0-9]+(?=%.{0,5}until.{0,5}auto.{0,5}compact)' | head -1)
-  if [ -n "$BTN_REMAIN" ] && [ "${BTN_REMAIN}" -le 20 ] 2>/dev/null && \
-     check_dedup "$BS" "context_near_limit"; then
-    BTN_WARN_FILE="/tmp/ctx-warn-${BS}.txt"
-    echo "[secretary] Context ${BTN_REMAIN}% until auto-compact. Save current task state, decisions, and next steps to memory files now." > "$BTN_WARN_FILE"
-    bash "$SECRETARY_DIR/.scripts/msg.sh" "$BS" "$BTN_WARN_FILE"
-    log_event WARN "$BS" "context_near_limit" "remain=${BTN_REMAIN}%" "pre-compression-warn-btn"
-  fi
 done
+
 
 # =============================================
 # Phase 3: 파일 충돌 감지
@@ -508,7 +688,6 @@ fi
 # Phase 4: 변경 전파 (git diff 브로드캐스트)
 # =============================================
 
-REGISTRY="$SECRETARY_DIR/.session-registry.txt"
 if [ -f "$REGISTRY" ]; then
   # 감사소스수집: git log
   cut -d'|' -f3 "$REGISTRY" | sort -u | while read DIR; do
@@ -519,6 +698,8 @@ if [ -f "$REGISTRY" ]; then
   done
 
   cut -d'|' -f3 "$REGISTRY" | sort -u | while read DIR; do
+    RECENT=$(git -C "$DIR" log --oneline --since="3 minutes ago" 2>/dev/null)
+    [ -z "$RECENT" ] && continue  # 3분 내 새 커밋 없으면 브로드캐스트 스킵
     DIFF_STAT=$(git -C "$DIR" diff --stat HEAD~1 2>/dev/null)
     if [ -n "$DIFF_STAT" ]; then
       echo "$DIFF_STAT" > /tmp/git-changes.txt
@@ -527,6 +708,33 @@ if [ -f "$REGISTRY" ]; then
       done
     fi
   done
+fi
+
+# Feature 4: Git 커밋 빈도 모니터링 (세션 등록 2시간+ && 최근 2시간 커밋 없음)
+if [ -f "$REGISTRY" ]; then
+  while IFS='|' read -r FS FM FD FT FSID; do
+    echo "$SESSIONS" | grep -qxF "$FS" || continue  # alive 세션만
+    [ "$FD" = "unknown" ] && continue
+    SESSION_AGE=$("$PYTHON" -c "
+import time
+from datetime import datetime
+try:
+    ts = datetime.fromisoformat('$FT'.replace('+09:00','+0900'))
+    print(int(time.time() - ts.timestamp()))
+except:
+    print(0)
+" 2>/dev/null || echo 0)
+    if [ "${SESSION_AGE:-0}" -gt 7200 ]; then
+      RECENT_COMMITS=$(git -C "$FD" log --oneline --since="2 hours ago" 2>/dev/null | wc -l | tr -d ' \r\n')
+      if [ "${RECENT_COMMITS:-0}" -eq 0 ]; then
+        if check_dedup "$FS" "no_commit_warn"; then
+          echo "2시간 넘게 커밋이 없어. 지금 진행 상황 커밋해줘." > "$TMPDIR/commit-warn-${FS}.txt"
+          bash "$SECRETARY_DIR/.scripts/msg.sh" "$FS" "$TMPDIR/commit-warn-${FS}.txt"
+          log_event WARN "$FS" "no_commit_warn" "age=${SESSION_AGE}s no_recent_commits" "commit-frequency"
+        fi
+      fi
+    fi
+  done < <(cat "$REGISTRY")
 fi
 
 # =============================================
@@ -571,30 +779,49 @@ fi
 # =============================================
 # 조건: revive 후에도 사망 지속 / 가드 해제 스크립트+Sonnet 모두 실패
 if [ "$TELEGRAM_NEEDED" -gt 0 ]; then
-  send_telegram_alert "[secretary] Human intervention needed: ${TELEGRAM_REASONS}"
+  # TELEGRAM_REASONS format: "revival_failed:sess1 guard_unlock_failed:sess2"
+  # Build human-readable message with session names
+  TG_MSG="[secretary] Intervention needed ($(date '+%H:%M')):"
+  for REASON_ENTRY in $TELEGRAM_REASONS; do
+    REASON_TYPE="${REASON_ENTRY%%:*}"
+    REASON_SESSION="${REASON_ENTRY##*:}"
+    case "$REASON_TYPE" in
+      revival_failed)   TG_MSG="$TG_MSG  - Session '$REASON_SESSION': revive failed (still dead)" ;;
+      guard_unlock_failed) TG_MSG="$TG_MSG  - Session '$REASON_SESSION': guard deadlock unresolvable" ;;
+      opus_no_effect)   TG_MSG="$TG_MSG  - Session '$REASON_SESSION': Opus analysis sent but error persists" ;;
+      *) TG_MSG="$TG_MSG  - Session '$REASON_SESSION': $REASON_TYPE" ;;
+    esac
+  done
+  send_telegram_alert "$TG_MSG"
 fi
 
 # =============================================
-# Phase 4.6: 미등록 psmux 세션 자동 등록 (harness-wf 세션)
+# Phase 4.6: 미등록 psmux 세션 자동 등록
+# 제외: secretary(자기자신), task-*(task queue 관리), sonnet(온디맨드), WF 세션(Supervisor 관리)
+# 나머지 전부 자동 등록 → revive 포함 전체 기능 적용
 # =============================================
 
-if [ -f "$WF_ACTIVE_FILE" ] && [ -f "$REGISTRY" ]; then
+if [ -f "$REGISTRY" ]; then
   KNOWN_NAMES=$(cut -d'|' -f1 "$REGISTRY" 2>/dev/null)
 
-  ALL_CANDIDATE_SESSIONS=$("$PSMUX" ls 2>/dev/null | cut -d: -f1 | \
-    grep -v "^task-" | grep -v "^secretary" | grep -v "^${SONNET_SESSION}$")
+  for CAND_SESSION in $ALL_PSMUX; do
+    [ "$CAND_SESSION" = "$SELF_SESSION" ] && continue
+    [ "$CAND_SESSION" = "$SONNET_SESSION" ] && continue
+    [[ "$CAND_SESSION" == task-* ]] && continue
+    echo "$WF_SESSION_LIST" | tr ' ' '\n' | grep -qxF "$CAND_SESSION" && continue
+    echo "$KNOWN_NAMES" | grep -qxF "$CAND_SESSION" && continue  # 이미 등록됨
 
-  for CAND_SESSION in $ALL_CANDIDATE_SESSIONS; do
-    echo "$KNOWN_NAMES" | grep -qF "$CAND_SESSION" && continue  # already registered
+    # 현재 작업 디렉토리 — psmux에서 직접 읽기
+    CAND_DIR=$("$PSMUX" display-message -p "#{pane_current_path}" -t "$CAND_SESSION" 2>/dev/null)
+    [ -z "$CAND_DIR" ] && CAND_DIR="unknown"
 
-    # Determine model by convention
+    # 모델: strategic=opus, 나머지=sonnet (기본값)
     CAND_MODEL="sonnet"
     [ "$CAND_SESSION" = "strategic" ] && CAND_MODEL="opus"
 
-    # Re-read registered SIDs each iteration so previous registrations are excluded
+    # SID: 최근 120분 내 JSONL 중 미등록 것
     REGISTERED_SIDS=$(cut -d'|' -f5 "$REGISTRY" 2>/dev/null | grep -v '^$')
     CAND_SID=""
-    # Use /usr/bin/find (GNU find) to avoid Windows find.exe; -printf requires GNU find
     while IFS= read -r JSONL_FILE; do
       SID_C=$(basename "$JSONL_FILE" .jsonl)
       [[ "$SID_C" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || continue
@@ -604,15 +831,61 @@ if [ -f "$WF_ACTIVE_FILE" ] && [ -f "$REGISTRY" ]; then
     done < <(/usr/bin/find "$HOME/.claude/projects" -name "*.jsonl" -mmin -120 \
                -printf '%T@ %p\n' 2>/dev/null | sort -rn | awk '{print $2}')
 
-    if [ -n "$CAND_SID" ]; then
-      # Use "unknown" for DIR — cannot reliably decode Claude's project path encoding
-      echo "${CAND_SESSION}|${CAND_MODEL}|unknown|$(date -Iseconds)|${CAND_SID}" >> "$REGISTRY"
-      # Update KNOWN_NAMES so next iteration doesn't re-process same session
-      KNOWN_NAMES=$(printf '%s\n%s' "$KNOWN_NAMES" "$CAND_SESSION")
+    echo "${CAND_SESSION}|${CAND_MODEL}|${CAND_DIR}|$(date -Iseconds)|${CAND_SID}" >> "$REGISTRY"
+    KNOWN_NAMES=$(printf '%s\n%s' "$KNOWN_NAMES" "$CAND_SESSION")
+    if [ -z "$CAND_SID" ]; then
+      log_event WARN "$CAND_SESSION" "session_auto_registered_no_sid" \
+        "dir=${CAND_DIR} model=${CAND_MODEL} — resume unavailable" "registry"
+    else
       log_event INFO "$CAND_SESSION" "session_auto_registered" \
-        "sid=${CAND_SID:0:8} model=${CAND_MODEL}" "registry"
+        "dir=${CAND_DIR} sid=${CAND_SID:0:8} model=${CAND_MODEL}" "registry"
     fi
   done
+fi
+
+# =============================================
+# Phase 4.7: request/pattern 기록 강제 nudge
+# 세션 JSONL에서 docs/ Read(request) 또는 Edit/Write 3건+(pattern) 감지
+# promotion-log.md 편집 없이 threshold 도달 시 → 에이전트에 기록 요청
+# =============================================
+
+if [ -f "$REGISTRY" ]; then
+  TODAY=$(date +%Y%m%d)
+  while IFS='|' read -r FS FM FD FC FSID; do
+    [ -z "$FS" ] || [[ "$FS" == \#* ]] && continue
+    [ -z "$FSID" ] && continue
+
+    # JSONL 경로 탐색
+    PRJ_KEY=$(echo "$FD" | sed 's|.*[/\\]||; s|[^a-zA-Z0-9_-]|-|g')
+    JSONL_FILE=$(/usr/bin/find "$HOME/.claude/projects" -name "${FSID}.jsonl" 2>/dev/null | head -1)
+    [ -z "$JSONL_FILE" ] || [ ! -f "$JSONL_FILE" ] && continue
+
+    # promotion-log.md 이미 수정했는지 확인 → 했으면 skip
+    PROMO_EDIT=$(grep -c '"name":"Edit"' "$JSONL_FILE" 2>/dev/null | head -1 || echo 0)
+    PROMO_LOGGED=$(grep '"file_path"' "$JSONL_FILE" 2>/dev/null | grep -c "promotion-log" || echo 0)
+    [ "${PROMO_LOGGED:-0}" -gt 0 ] && continue
+
+    # request 감지: docs/ 경로 Read
+    DOCS_READ_COUNT=$(grep -o '"file_path":"[^"]*"' "$JSONL_FILE" 2>/dev/null \
+      | grep -c '/docs/' || echo 0)
+
+    # pattern 감지: Edit + Write 합산
+    EDIT_COUNT=$(grep -o '"name":"Edit"\|"name":"Write"' "$JSONL_FILE" 2>/dev/null | wc -l | tr -d ' ')
+
+    if [ "${DOCS_READ_COUNT:-0}" -gt 0 ] && check_dedup "$FS" "request_remind_${TODAY}"; then
+      echo "docs/ 파일 읽으면서 작업했어. 반복 가능한 작업이면 promotion-log.md에 R{번호}로 기록해줘." \
+        > "$TMPDIR/request-remind-${FS}.txt"
+      bash "$SECRETARY_DIR/.scripts/msg.sh" "$FS" "$TMPDIR/request-remind-${FS}.txt"
+      log_event INFO "$FS" "request_remind_sent" "docs_reads=${DOCS_READ_COUNT}" "request-remind"
+    fi
+
+    if [ "${EDIT_COUNT:-0}" -ge 3 ] && check_dedup "$FS" "pattern_remind_${TODAY}"; then
+      echo "이번 세션에서 파일 ${EDIT_COUNT}개 수정했어. 여러 단계 조합한 작업이면 promotion-log.md에 P{번호}로 기록해줘." \
+        > "$TMPDIR/pattern-remind-${FS}.txt"
+      bash "$SECRETARY_DIR/.scripts/msg.sh" "$FS" "$TMPDIR/pattern-remind-${FS}.txt"
+      log_event INFO "$FS" "pattern_remind_sent" "edit_count=${EDIT_COUNT}" "pattern-remind"
+    fi
+  done < <(cat "$REGISTRY")
 fi
 
 # =============================================
