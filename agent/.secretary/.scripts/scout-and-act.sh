@@ -363,7 +363,7 @@ for S in $SESSIONS; do
           "$PSMUX" send-keys -t "$OBS_SESSION" "$CLAUDE_BIN --model sonnet --dangerously-skip-permissions" Enter
           sleep 15
           "$PSMUX" send-keys -t "$OBS_SESSION" \
-            "guard-watchdog 스킬을 실행해서 ${S} 세션의 가드 교착을 분석하고 해결해라. 완료 후 /exit로 종료." Enter
+            "Read ~/.claude/skills/guard-unlock/skill.md and follow all instructions. TARGET_SESSION=${S}" Enter
           log_event WARN "$S" "guard_unlock_obsidian_spawned" "obs_session=$OBS_SESSION deny=$DENY_COUNT" "guard-watchdog"
         else
           # Obsidian 세션도 이미 시도했는데 여전히 교착 → Telegram
