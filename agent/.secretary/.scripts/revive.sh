@@ -17,19 +17,26 @@ curl -s -X POST http://localhost:9876/tasks \
   -H 'Content-Type: application/json' \
   -d "{\"type\":\"ai\",\"model\":\"$MODEL\",\"dir\":\"$DIR\",\"name\":\"$SESSION_NAME\"}"
 
-# 부활 후 컨텍스트 주입 (3종 분기)
+# 부활 후 컨텍스트 주입
 sleep 10  # 세션 시작 대기
 
-PROJECT=$(basename "$DIR")
-MEMORY=$(ls -t ~/.claude/memory/session_${PROJECT}_*.md 2>/dev/null | head -1)
+# generate-session-resume.sh로 JSONL 기반 맥락 복원 시도
+RESUME=$(bash "$(dirname "$0")/generate-session-resume.sh" "$SESSION_NAME" 2>/dev/null)
 
-if [ -z "$MEMORY" ]; then
-  MSG="$SECRETARY_DIR/.messages/revive-git-fallback.txt"
-elif [ $(( $(date +%s) - $(stat -c %Y "$MEMORY") )) -gt 10800 ]; then
-  MSG="$SECRETARY_DIR/.messages/revive-stale-memory.txt"
+if [ -f "$RESUME" ]; then
+  bash "$(dirname "$0")/msg.sh" "$SESSION_NAME" "$RESUME"
+  echo "REVIVE_REQUESTED: $SESSION_NAME (model=$MODEL, dir=$DIR, msg=resume)"
 else
-  MSG="$SECRETARY_DIR/.messages/revive-context.txt"
+  # JSONL 없거나 실패 시 정적 메시지 폴백
+  PROJECT=$(basename "$DIR")
+  MEMORY=$(ls -t ~/.claude/memory/session_${PROJECT}_*.md 2>/dev/null | head -1)
+  if [ -z "$MEMORY" ]; then
+    MSG="$SECRETARY_DIR/.messages/revive-git-fallback.txt"
+  elif [ $(( $(date +%s) - $(stat -c %Y "$MEMORY") )) -gt 10800 ]; then
+    MSG="$SECRETARY_DIR/.messages/revive-stale-memory.txt"
+  else
+    MSG="$SECRETARY_DIR/.messages/revive-context.txt"
+  fi
+  bash "$(dirname "$0")/msg.sh" "$SESSION_NAME" "$MSG"
+  echo "REVIVE_REQUESTED: $SESSION_NAME (model=$MODEL, dir=$DIR, msg=$MSG)"
 fi
-
-bash "$(dirname "$0")/msg.sh" "$SESSION_NAME" "$MSG"
-echo "REVIVE_REQUESTED: $SESSION_NAME (model=$MODEL, dir=$DIR, msg=$MSG)"
