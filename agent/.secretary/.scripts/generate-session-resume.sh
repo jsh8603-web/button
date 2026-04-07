@@ -141,13 +141,23 @@ echo "### Screen State Before Compression" >> "$RESUME_FILE"
 "$PSMUX_PATH" capture-pane -p -S -200 -t "$SESSION" 2>/dev/null | tail -50 >> "$RESUME_FILE" || echo "(snapshot unavailable)" >> "$RESUME_FILE"
 echo "" >> "$RESUME_FILE"
 
-# 2. 미완료 TODO (plan.md - [ ] 항목만)
+# 2. 미완료 TODO (plan.md + progress.md - [ ] 항목)
 PLAN_FILE="$DIR/plan.md"
 if [ -f "$PLAN_FILE" ]; then
   TODOS=$(grep '^\- \[ \]' "$PLAN_FILE" | head -15)
   if [ -n "$TODOS" ]; then
     echo "### Pending TODOs (from plan.md)" >> "$RESUME_FILE"
     echo "$TODOS" >> "$RESUME_FILE"
+    echo "" >> "$RESUME_FILE"
+  fi
+fi
+
+PROGRESS_FILE="$DIR/progress.md"
+if [ -f "$PROGRESS_FILE" ]; then
+  PROG_TODOS=$(grep '^\- \[ \]' "$PROGRESS_FILE" | head -15)
+  if [ -n "$PROG_TODOS" ]; then
+    echo "### Pending TODOs (from progress.md)" >> "$RESUME_FILE"
+    echo "$PROG_TODOS" >> "$RESUME_FILE"
     echo "" >> "$RESUME_FILE"
   fi
 fi

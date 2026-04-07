@@ -56,7 +56,7 @@ TODAY=$(date +%Y%m%d)
 CURRENT=$(grep "^$TODAY:" "$CAP_FILE" 2>/dev/null | cut -d: -f2 || echo 0)
 
 if [ "$CURRENT" -ge "$OPUS_DAILY_CAP" ]; then
-  send_telegram "[secretary] Opus daily cap (${OPUS_DAILY_CAP}) reached. Using Telegram fallback."
+  send_telegram "[scriptagent] Opus daily cap (${OPUS_DAILY_CAP}) reached. Using Telegram fallback."
   log_event WARN "opus_daily_cap_exceeded" "count=$CURRENT" "telegram_fallback"
   exit 0
 fi
@@ -72,7 +72,7 @@ mkdir -p "$LOG_DIR" "$OPUS_QUEUE_DIR/done" "$OPUS_QUEUE_DIR/locks" "$DEAD_LETTER
 # === 세션 생성/작업 전달 ===
 if "$PSMUX" has-session -t "$OPUS_SESSION" 2>/dev/null; then
   "$PSMUX" send-keys -t "$OPUS_SESSION" \
-    "Read $OPUS_QUEUE_DIR/ 의 새 작업을 처리하세요." Enter
+    "Read $OPUS_QUEUE_DIR/ 의 새 작업을 처리해." Enter
   log_event INFO "opus_wakeup" "session=existing" "send-keys"
 else
   "$PSMUX" new-session -d -s "$OPUS_SESSION" -x 200 -y 50
@@ -91,7 +91,7 @@ else
   sleep 1
 
   "$PSMUX" send-keys -t "$OPUS_SESSION" \
-    "Read $SECRETARY_DIR/.messages/opus-constitution.txt 의 규칙을 숙지하고 $OPUS_QUEUE_DIR/ 의 작업을 처리하세요." Enter
+    "Read $SECRETARY_DIR/.messages/opus-constitution.txt 의 규칙을 숙지하고 $OPUS_QUEUE_DIR/ 의 작업을 처리해." Enter
 
   log_event INFO "opus_wakeup" "session=new" "new-session"
   bash "$SECRETARY_DIR/.scripts/sonnet-idle-monitor.sh" "$OPUS_SESSION" &

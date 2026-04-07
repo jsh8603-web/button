@@ -61,4 +61,4 @@ if echo "$_CAP_CHECK" | grep -qE '^[>❯]\s+\S'; then
 fi
 
 # [INFO] 또는 접두사 없음 → 세션 직접 전송
-"$PSMUX" send-keys -t "$SESSION" "Read $(realpath "$MSG_FILE") 의 내용을 참고하세요." Enter
+"$PSMUX" send-keys -t "$SESSION" "Read $(realpath "$MSG_FILE") 의 내용을 참고해." Enter
