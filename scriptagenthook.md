@@ -1,5 +1,111 @@
 # 비서 → 에이전트 메시지 카탈로그
 
+---
+
+## 전역 Hook/Guard 다이어트 결정 (2026-04-07 논의)
+
+기존 전역 settings.json 훅/가드를 scriptagent 메시지로 대체하는 방향으로 결정.
+
+### 결정 원칙
+
+1. **scriptagent 메시지로 대체**: 사용자 말로 인식 → 준수율 높고 작업 차단 없음
+2. **가드 유지 조건**: ① 행동 전에 막아야 하고 ② scriptagent이 사전 감지 불가인 경우만
+3. **문서**: 전역 자동 로드 최소화 → on-demand 포인터만 CLAUDE.md에
+4. **다른 에이전트는 시스템 존재를 모름**: scriptagent만 알면 됨
+
+---
+
+### 각 Hook/Guard 결정 상세
+
+#### PreToolUse
+
+| ID | 기능 | 결정 | 이유 |
+|----|------|------|------|
+| `safe.rm-block` | `rm -rf /~` 차단 | **KEEP** | 복구 불가, scriptagent 사전 감지 불가 |
+| `research.scrape-block` | Playwright 스크래핑 감지 → Gemini 안내 (inject) | **REMOVE** | 차단 아님, scriptagent JSONL로 대체 가능 |
+| `pending-promotion 가드` | 미완료 항목 있으면 거의 모든 도구 차단 | **REMOVE** | 가장 방해됨. scriptagent이 이벤트 감지 후 "promotion-log.md 기록해줘" 메시지로 대체. 작성 규칙은 promotion-log.md 내부에 |
+| `research.block` | WebSearch/WebFetch 완전 차단 → Gemini 강제 | **KEEP** | 환경에서 실제 불가, 비용 발생, 에러 메시지에 대안 명시 |
+| `remote.plan-block` | psmux에서 EnterPlanMode 차단 | **KEEP** | GUI 렌더링 불가, 실행 시 세션 교착, scriptagent 사전 감지 불가 |
+| `remote.ask-block` | psmux에서 AskUserQuestion 차단 | **KEEP** | 동일: 사용자가 질문 못 보면 세션 교착 |
+| `psmux.spawn-guard` | psmux new-session 직접 호출 차단 | **KEEP** | spawn-session.sh 강제 (역할 주입/레지스트리 누락 방지) |
+
+#### PostToolUse
+
+| ID | 기능 | 결정 | 이유 |
+|----|------|------|------|
+| `bash-post` | Bash 후 시그널 수집 | **REMOVE** | pending 체인 소비처 없어짐, scriptagent JSONL로 감지 |
+| `request` | Read 후 시그널 수집 | **REMOVE** | 동일 |
+| `output` | Write/Edit 후 코드품질·cv·changelog inject | **REMOVE** | 매 Edit마다 발동, 가장 무거운 hook. scriptagent 대체 가능 |
+| `unlock` | Edit 후 pending 플래그 삭제 | **REMOVE** | pending 가드 제거하면 불필요 |
+| `knowledge` | WebSearch 후 시그널 수집 | **REMOVE** | research.block으로 WebSearch 차단되어 실질 발동 없음 |
+| `agent-review` | Agent 결과 파싱 inject | **REMOVE** | pending 체인 일부, 10초 timeout 부담 |
+
+#### 기타
+
+| ID | 기능 | 결정 | 이유 |
+|----|------|------|------|
+| `UserPromptSubmit inject` | 매 메시지마다 pending 체크리스트 표시 | **REMOVE** | 가장 빈번, pending 가드 제거하면 불필요 |
+| `PostToolUseFailure error` | 도구 실패 시 시그널 수집 | **REMOVE** | pending 체인 일부 |
+| `perm-allow` (PermissionRequest) | 모든 도구 권한 자동승인 | **KEEP** | 차단이 아닌 허용, 편의 기능 |
+| `remote.detect` (SessionStart) | PSMUX_TARGET_SESSION → .remote-session | **KEEP** | remote 가드들이 이 플래그 의존 |
+| SessionStart progress.md 감지 | .progress-detected 플래그 | **REMOVE** | progress.md 훅 체계 제거 시 불필요 |
+| SessionStart signal-orphan | 이전 시그널 체크 | **REMOVE** | 시그널 체계 제거 |
+| SessionStart 플래그 삭제 | 세션 시작 시 플래그 일괄 삭제 | **슬림화** | 유지 항목 관련 플래그만 남김 |
+| PostCompact resume 주입 | 압축 후 generate-session-resume.sh | **KEEP** | psmux 세션 체크 추가 완료 (false positive 수정) |
+| PostCompact compact-restore | progress.md 관련 | **REMOVE** | progress.md 체계 제거 |
+| `sys.tts-notify` (Stop) | 작업 완료 TTS | **KEEP** | 사용자 편의, 부작용 없음 |
+| `analyze` (Stop) | 세션 종료 시 git diff/log 아카이브 | **KEEP** | 감사 wf 활용, 조용히 실행 |
+
+---
+
+### progress.md / pipeline 훅 결정 (미정)
+
+**기존 기능**:
+- `pipe.progress-inject`: progress.md 생성 시 작업 지침 inject
+- `pipe.issue-gate`: 미완료 항목 있으면 타 파일 수정 차단
+- `pipe.session-start`: 세션 시작 시 progress.md 복원 안내
+- `pipe.post-compact`: 압축 후 progress.md 복원 강제
+- `pipe.checklist-prior`: 에러 있는데 체크리스트 없으면 경고
+- `pipe.changelog-guard`: 규칙/코드 수정 후 change-log 미기록 시 차단
+
+**논의 결과**:
+- progress.md는 Claude 네이티브 기능이 아닌 커스텀 파일
+- Claude 네이티브 TodoWrite가 동일 역할 (단, 압축 시 소멸)
+- 단일 에이전트: plan.md + TodoWrite로 대체 가능
+- harness-wf: execution-log.md가 이미 담당
+- **압축 후 복원 문제**: generate-session-resume.sh가 progress.md/plan.md 미완료 항목을 resume에 포함하면 해결 가능
+
+**내 의견 (미정)**:
+- progress.md 개념 폐기 → plan.md로 통합 (계획 + 체크리스트 겸용)
+- generate-session-resume.sh에 plan.md 미완료 항목 포함 추가
+- pipe.issue-gate는 scriptagent 넛지로 대체 (하드 블록 제거)
+- pipe.changelog-guard도 scriptagent이 git diff 브로드캐스트 시 "변경 기록해줘" 메시지로 대체 가능
+- → **세션 압축 후 추가 논의 예정**
+
+---
+
+### 문서 변경 계획
+
+| 문서 | 변경 |
+|------|------|
+| `CLAUDE.md` | "file-standards.md 자동 로드" 언급 제거, on-demand 포인터로 |
+| `rules/file-standards.md` | frontmatter `load/always` → `load/on-demand` |
+| `rules/remote-session.md` | 동일, on-demand 전환 |
+| `promotion-log.md` | 파일 상단에 작성 템플릿 직접 추가 (inject hook 제거 보완) |
+
+---
+
+### 이미 완료된 수정
+
+| 커밋/변경 | 내용 |
+|-----------|------|
+| `2bfa902` | IDLE_PROMPT `^[>❯]\s*$` 수정 (STUCK 오탐 방지) |
+| `796fca4` | COMPRESSED 오탐 수정 (라인 시작 앵커) |
+| settings.json PostCompact | `PSMUX_TARGET_SESSION` 체크 추가 (resume 오탐 방지) |
+
+---
+
+
 비서 스크립트(scout-and-act.sh)가 에이전트 세션에 전송하는 모든 메시지 목록.
 
 ---
