@@ -1351,6 +1351,18 @@ function persistRunnerMap() {
   fs.writeFileSync(SESSION_RUNNER_FILE, JSON.stringify(Object.fromEntries(sessionRunnerMap)));
 }
 
+const SECRETARY_REGISTRY = path.join(__dirname, '.secretary', '.session-registry.txt');
+function removeFromSecretaryRegistry(psmuxName) {
+  try {
+    const lines = fs.readFileSync(SECRETARY_REGISTRY, 'utf8').split('\n');
+    const filtered = lines.filter(l => l && l.split('|')[0] !== psmuxName);
+    if (filtered.length !== lines.filter(Boolean).length) {
+      fs.writeFileSync(SECRETARY_REGISTRY, filtered.join('\n') + (filtered.length ? '\n' : ''));
+      console.log(`[kill-session] Removed ${psmuxName} from secretary registry`);
+    }
+  } catch {}
+}
+
 function buildTasksJson(sessionOrName) {
   // If already a full session name (schedule- or btn-), use as-is; otherwise prepend SESSION_PREFIX
   const session = sessionOrName.startsWith(AI_TASK_PREFIX) ? sessionOrName : `${SESSION_PREFIX}${sessionOrName}`;
@@ -1388,6 +1400,9 @@ function setProtectedSessions(list) {
 }
 
 // Returns array of { name, psmuxName, type } where type is 'btn' | 'schedule' | 'user'
+// Sessions that are always protected from killUnprotectedSessions
+const ALWAYS_PROTECTED = ['secretary', 'vaultvoice'];
+
 async function getActiveSessionObjects() {
   return new Promise((resolve) => {
     exec(`"${PSMUX_BIN}" list-sessions`, { encoding: 'utf8' }, (err, stdout) => {
@@ -1419,13 +1434,14 @@ function killUnprotectedSessions() {
     const protectedList = getProtectedSessions();
     // Kill unprotected btn- and user sessions; never schedule- sessions
     const killable = sessionObjects.filter(s => s.type !== 'schedule');
-    const toKill = killable.filter(s => !protectedList.includes(s.name));
+    const toKill = killable.filter(s => !protectedList.includes(s.name) && !ALWAYS_PROTECTED.includes(s.name));
 
     if (toKill.length === 0) return;
 
     console.log(`[kill] Killing unprotected sessions: ${toKill.map(s => s.name).join(', ')} (protected: ${protectedList.join(', ') || 'none'})`);
 
     for (const s of toKill) {
+      removeFromSecretaryRegistry(s.psmuxName);
       gracefulKillSession(s.psmuxName).then(() => {
         const titleQuery = EDITOR_TITLE ? `${s.name} - ${EDITOR_TITLE}` : s.name;
         exec(`powershell.exe -ExecutionPolicy Bypass -File "${closeScript}" -TitlePrefix "${titleQuery}"`, (err) => {
@@ -1668,7 +1684,7 @@ function openProjectInEditor(name, runner = 'claude') {
       exec(`"${PSMUX_BIN}" has-session -t ${secretarySession}`, (hasErr) => {
         if (!hasErr) {
           console.log('[secretary] session already running, opening wt.exe');
-          exec(`wt.exe new-tab --title "secretary" -- "${PSMUX_BIN}" attach-session -t ${secretarySession}`, () => {});
+          openSecretaryWindow();
           return;
         }
         // Create new psmux session for secretary loop
@@ -1682,9 +1698,7 @@ function openProjectInEditor(name, runner = 'claude') {
             });
           }, 1500);
           // Open visible wt.exe window so user can monitor secretary activity
-          exec(`wt.exe new-tab --title "secretary" -- "${PSMUX_BIN}" attach-session -t ${secretarySession}`, (err) => {
-            if (err) console.error('[secretary] wt.exe error:', err.message);
-          });
+          openSecretaryWindow();
         });
       });
     }
@@ -1787,6 +1801,8 @@ app.post('/run', verifySecret, async (req, res) => {
         if (err) console.error(`[close-window] Error:`, err.message);
       });
     });
+    // Remove from secretary registry so it won't try to revive
+    removeFromSecretaryRegistry(psmuxSession);
     return res.json({ ok: true, action });
   }
 
@@ -2089,13 +2105,25 @@ app.listen(PORT, async () => {
   startTaskRunner();
   startRemoteControlWatchdog();
 
+  // Helper: open secretary in a separate WT window (UWP app needs Start-Process)
+  function openSecretaryWindow() {
+    const psmuxWin = PSMUX_BIN.replace(/\//g, '\\');
+    const cmd = `powershell.exe -WindowStyle Hidden -Command "Start-Process wt.exe -ArgumentList '-w','_new','--title','secretary','${psmuxWin}','attach-session','-t','secretary'"`;
+    exec(cmd, (err) => {
+      if (err) console.error('[secretary] wt.exe open error:', err.message);
+      else console.log('[secretary] wt.exe window opened');
+    });
+  }
+
   // Secretary heartbeat — revive session+loop if dead or stale
   const SECRETARY_TS_FILE = path.join(__dirname, '.secretary', '.self-wake-ts');
   const SECRETARY_LOOP_STALE_MS = 3 * 60 * 1000;
   const secretaryLoopScript = toMsys(path.join(__dirname, '.secretary', 'secretary-loop.sh'));
   const secretaryDir = path.join(__dirname, '.secretary');
   const EXEC_TIMEOUT = 10_000; // 10s timeout for all psmux exec calls
+  let secretaryWindowOpened = false;
   const createSecretarySession = (cb) => {
+    secretaryWindowOpened = false;
     const winDir = secretaryDir.replace(/\//g, '\\');
     exec(`"${PSMUX_BIN}" new-session -d -s secretary -c "${winDir}" -- "${BASH_PATH}" -l`, { timeout: EXEC_TIMEOUT }, (err) => {
       if (err) { console.error('[secretary] heartbeat session create error:', err.message); return cb && cb(err); }
@@ -2132,6 +2160,19 @@ app.listen(PORT, async () => {
         console.log(`[secretary] heartbeat: loop stale (${Math.round(staleness / 1000)}s), recreating session`);
         exec(`"${PSMUX_BIN}" kill-session -t secretary`, { timeout: EXEC_TIMEOUT }, () => {
           createSecretarySession();
+        });
+        return;
+      }
+      // Session alive — open WT window once if not attached
+      if (!secretaryWindowOpened) {
+        exec(`"${PSMUX_BIN}" ls`, { encoding: 'utf8', timeout: EXEC_TIMEOUT }, (lsErr, lsOut) => {
+          if (lsErr) return;
+          const secLine = (lsOut || '').split('\n').find(l => l.startsWith('secretary:'));
+          if (secLine && !secLine.includes('(attached)')) {
+            console.log('[secretary] heartbeat: no WT window attached, opening');
+            openSecretaryWindow();
+            secretaryWindowOpened = true;
+          }
         });
       }
     });

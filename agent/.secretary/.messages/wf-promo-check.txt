@@ -1,0 +1,7 @@
+WF 끝나고 execution-log.md 삭제했는데, promotion-log.md에 기록은 했어?
+
+에러→해결, 새 발견, 반복 패턴 있었으면 기록해야 해.
+파일: ~/.claude/memory/promotion-log.md
+방법: grep "^### " ~/.claude/memory/promotion-log.md | tail -3
+
+기록할 게 없었으면 스킵해도 돼.

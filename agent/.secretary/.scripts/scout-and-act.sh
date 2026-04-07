@@ -81,7 +81,12 @@ check_dedup() {
 
 SONNET_SESSION=$(jq -r '.sonnet_session // "secretary-sonnet"' "$CONFIG" 2>/dev/null)
 REGISTRY="$SECRETARY_DIR/.session-registry.txt"
-WF_ACTIVE_FILE="$SECRETARY_DIR/../.wf-active"
+# .wf-active는 프로젝트 루트 또는 agent/ 하위에 있을 수 있음
+# 레지스트리에서 세션 디렉토리를 읽어 프로젝트 루트 추정
+_FIRST_DIR=$(head -1 "$SECRETARY_DIR/.session-registry.txt" 2>/dev/null | cut -d'|' -f3)
+_PROJECT_ROOT=$(cd "$SECRETARY_DIR/.." && pwd)
+# agent/ 하위 → 프로젝트 루트는 한 단계 위
+[ -f "$_PROJECT_ROOT/../.wf-active" ] && WF_ACTIVE_FILE="$_PROJECT_ROOT/../.wf-active" || WF_ACTIVE_FILE="$_PROJECT_ROOT/.wf-active"
 touch "$REGISTRY" 2>/dev/null  # 레지스트리 파일 보장
 
 # 기능 6종 지원 디렉토리
@@ -97,10 +102,16 @@ ALL_PSMUX=$("$PSMUX" ls 2>/dev/null | cut -d: -f1)
 SESSIONS=$(echo "$ALL_PSMUX" | grep -v "^${SELF_SESSION}$")
 
 # WF 세션 목록 (autonomous-proceed + revive만 제외, 나머지는 모니터링)
+# .wf-active는 JSON: {"type":"harness"|"lightweight",...} → 타입별 세션 목록 구성
 WF_SESSION_LIST=""
 if [ -f "$WF_ACTIVE_FILE" ]; then
-  WF_SESSION_LIST=$(cat "$WF_ACTIVE_FILE" 2>/dev/null)
-  [ -z "$WF_SESSION_LIST" ] && WF_SESSION_LIST="worker verifier healer strategic"
+  _WF_TYPE=$(jq -r '.type // ""' "$WF_ACTIVE_FILE" 2>/dev/null)
+  [ -z "$_WF_TYPE" ] && _WF_TYPE=$(grep -o '"type"[[:space:]]*:[[:space:]]*"[^"]*"' "$WF_ACTIVE_FILE" | sed 's/.*"type"[[:space:]]*:[[:space:]]*"//;s/"$//')
+  case "$_WF_TYPE" in
+    harness)     WF_SESSION_LIST="worker verifier healer strategic" ;;
+    lightweight) WF_SESSION_LIST="worker" ;;
+    *)           WF_SESSION_LIST="worker verifier healer strategic" ;;
+  esac
 fi
 
 # DEAD_SESSIONS: 레지스트리 등록됐지만 psmux에 없는 세션 → revive 대상
@@ -631,6 +642,55 @@ print(len([f for f in files if os.path.getmtime(f) > ts]))
 
   fi
 
+  # Phase 2.5: 삽질 감지 — Fix-Fail 루프 (JSONL 기반, elif 체인과 독립)
+  # 같은 파일 Edit→Bash fail 3회+ = 삽질 확정 → 기존 모델별 분기 합류
+  S_SID=$(grep "^${S}|" "$REGISTRY" 2>/dev/null | cut -d'|' -f5)
+  if [ -n "$S_SID" ] && [ "$STATUS" = "ACTIVE" ]; then
+    S_JSONL=$(/usr/bin/find "$HOME/.claude/projects" -name "${S_SID}.jsonl" 2>/dev/null | head -1)
+    if [ -n "$S_JSONL" ] && [ -f "$S_JSONL" ]; then
+      STRUGGLE_OUT=$("$PYTHON" "$SECRETARY_DIR/.scripts/detect-struggle.py" "$S_JSONL" 10 2>/dev/null)
+      STRUGGLE_EXIT=$?
+      if [ "$STRUGGLE_EXIT" -eq 1 ] && check_dedup "$S" "struggle_fix_fail"; then
+        # 동적 메시지 생성 (파일명, 횟수 포함)
+        STRUGGLE_FILE=$(echo "$STRUGGLE_OUT" | "$PYTHON" -c "import sys,json; d=json.load(sys.stdin); print(d.get('file','?'))" 2>/dev/null)
+        STRUGGLE_CYCLES=$(echo "$STRUGGLE_OUT" | "$PYTHON" -c "import sys,json; d=json.load(sys.stdin); print(d.get('cycles',3))" 2>/dev/null)
+        STRUGGLE_MSG=$(cat <<EOFMSG
+${STRUGGLE_FILE} 수정 → 테스트 실패를 ${STRUGGLE_CYCLES}회 반복 중.
+
+다음 수정 전에 먼저 정리해:
+1. 마지막 에러 메시지가 정확히 뭐야?
+2. ${STRUGGLE_CYCLES}번 시도에서 각각 뭘 바꿨고 왜 안 됐어?
+3. 근본 원인이 네가 고치는 곳이 아니라 다른 데 있을 수 있어?
+
+정리 후에도 모르겠으면 현재 상황을 그대로 보고해.
+EOFMSG
+)
+        log_event WARN "$S" "struggle_fix_fail" "$STRUGGLE_OUT" "exception_analysis"
+        SESSION_MODEL=$(grep "^${S}|" "$REGISTRY" | cut -d'|' -f2)
+        if echo "$SESSION_MODEL" | grep -qi "opus"; then
+          # Opus → 구체적 삽질 컨텍스트 + self-verify 절차
+          STRUGGLE_TMPFILE="$TMPDIR/struggle-msg-${S}.txt"
+          printf '%s\n\n' "$STRUGGLE_MSG" > "$STRUGGLE_TMPFILE"
+          cat "$SECRETARY_DIR/.messages/self-verify-opus.txt" >> "$STRUGGLE_TMPFILE"
+          bash "$SECRETARY_DIR/.scripts/msg.sh" "$S" "$STRUGGLE_TMPFILE"
+          rm -f "$STRUGGLE_TMPFILE"
+          log_event WARN "$S" "opus_struggle_self_verify" "file=$STRUGGLE_FILE cycles=$STRUGGLE_CYCLES" "self-verify"
+        elif [ -f "$SECRETARY_DIR/.sonnet-enabled" ]; then
+          # Sonnet → 삽질 컨텍스트 포함 Opus 소환
+          SNAP_CTX=$(cat "$SNAP_DIR/$S/snap_$(cat "$SNAP_DIR/$S/.idx" 2>/dev/null || echo 0).txt" 2>/dev/null | tail -30)
+          queue_sonnet_task "exception_analysis" "$S" "struggle: file=$STRUGGLE_FILE cycles=$STRUGGLE_CYCLES context=$SNAP_CTX"
+          log_event WARN "$S" "sonnet_struggle_escalation" "file=$STRUGGLE_FILE cycles=$STRUGGLE_CYCLES" "opus-escalation"
+        else
+          # Sonnet disabled → 넛지 메시지만
+          STRUGGLE_TMPFILE="$TMPDIR/struggle-msg-${S}.txt"
+          echo "$STRUGGLE_MSG" > "$STRUGGLE_TMPFILE"
+          bash "$SECRETARY_DIR/.scripts/msg.sh" "$S" "$STRUGGLE_TMPFILE"
+          rm -f "$STRUGGLE_TMPFILE"
+        fi
+      fi
+    fi
+  fi
+
   # 사용자 복귀 감지 (elif 체인과 독립)
   if [ "$IDLE_SEC" -lt 60 ] && [ -f "$SECRETARY_DIR/.user-absent" ]; then
     bash "$SECRETARY_DIR/.scripts/msg.sh" "$S" "$SECRETARY_DIR/.messages/user-returned.txt"
@@ -813,6 +873,8 @@ if [ -f "$REGISTRY" ]; then
   while IFS='|' read -r FS FM FD FT FSID; do
     echo "$SESSIONS" | grep -qxF "$FS" || continue  # alive 세션만
     [ "$FD" = "unknown" ] && continue
+    # git repo가 아닌 디렉토리는 스킵 (홈 디렉토리 등)
+    git -C "$FD" rev-parse --is-inside-work-tree >/dev/null 2>&1 || continue
     SESSION_AGE=$("$PYTHON" -c "
 import time
 from datetime import datetime
@@ -830,6 +892,9 @@ except:
           bash "$SECRETARY_DIR/.scripts/msg.sh" "$FS" "$TMPDIR/commit-warn-${FS}.txt"
           log_event WARN "$FS" "no_commit_warn" "age=${SESSION_AGE}s no_recent_commits" "commit-frequency"
         fi
+      else
+        # 커밋 있으면 stale 경고 파일 정리
+        rm -f "$TMPDIR/commit-warn-${FS}.txt"
       fi
     fi
   done < <(cat "$REGISTRY")
@@ -963,6 +1028,45 @@ if [ -f "$WF_ACTIVE_FILE" ]; then
         send_telegram_alert "[agent] .wf-active orphan (${WF_ORPHAN_AGE}s, sessions: ${WF_ORPHAN_CONTENT}). Cleaning up."
         rm -f "$WF_ACTIVE_FILE"
         log_event WARN "" "wf_active_orphan_cleaned" "age=${WF_ORPHAN_AGE}s sessions=${WF_ORPHAN_CONTENT}" "cleanup"
+      fi
+    fi
+  fi
+fi
+
+# =============================================
+# Phase 4.76: WF 종료 후 promotion-log 기록 넛지
+# .wf-active가 이전 사이클에 있었는데 지금 없으면 WF 종료
+# → execution-log.md도 삭제됐으면 promotion-log 기록 여부 확인
+# =============================================
+
+WF_WAS_ACTIVE_MARKER="$TMPDIR/.wf-was-active"
+if [ -f "$WF_ACTIVE_FILE" ]; then
+  touch "$WF_WAS_ACTIVE_MARKER"
+elif [ -f "$WF_WAS_ACTIVE_MARKER" ]; then
+  # WF just ended — check if execution-log was deleted without promotion-log update
+  rm -f "$WF_WAS_ACTIVE_MARKER"
+  # Find the supervisor session (btn-* sessions that are still alive)
+  WF_SUPERVISOR=""
+  for _S in $SESSIONS; do
+    echo "$_S" | grep -q "^btn-" || continue
+    echo "$WF_SESSION_LIST" | tr ' ' '\n' | grep -qxF "$_S" && continue
+    WF_SUPERVISOR="$_S"
+    break
+  done
+  if [ -n "$WF_SUPERVISOR" ]; then
+    # Check: execution-log.md gone + promotion-log not recently modified
+    WF_REG_DIR=$(grep "^${WF_SUPERVISOR}|" "$REGISTRY" 2>/dev/null | cut -d'|' -f3)
+    if [ -n "$WF_REG_DIR" ] && [ ! -f "$WF_REG_DIR/execution-log.md" ]; then
+      PROMO_FILE="$HOME/.claude/memory/promotion-log.md"
+      PROMO_AGE=9999
+      if [ -f "$PROMO_FILE" ]; then
+        PROMO_AGE=$("$PYTHON" -c \
+          "import os,time; print(int(time.time()-os.path.getmtime('$PROMO_FILE')))" 2>/dev/null || echo 9999)
+      fi
+      # promotion-log가 5분 이내 수정되지 않았으면 넛지
+      if [ "$PROMO_AGE" -gt 300 ] && check_dedup "$WF_SUPERVISOR" "wf_promo_check"; then
+        bash "$SECRETARY_DIR/.scripts/msg.sh" "$WF_SUPERVISOR" "$SECRETARY_DIR/.messages/wf-promo-check.txt"
+        log_event INFO "$WF_SUPERVISOR" "wf_promo_check_sent" "promo_age=${PROMO_AGE}s" "wf-promo-nudge"
       fi
     fi
   fi
