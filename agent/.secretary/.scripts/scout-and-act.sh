@@ -291,6 +291,16 @@ for S in $SESSIONS; do
     fi
     HANDLED_COUNT=$((HANDLED_COUNT + 1))
 
+  elif [ "$(echo "$PCT" | grep -oE '[0-9]+')" -ge 85 ] 2>/dev/null; then
+    # 우선순위 2.5: 컨텍스트 85%+ 임박 → 에이전트에게 메모리 저장 요청 (사전 경고)
+    if check_dedup "$S" "context_near_limit"; then
+      CTX_WARN_FILE="/tmp/ctx-warn-${S}.txt"
+      echo "[secretary] Context at ~${PCT}. Save current task state, decisions, and next steps to memory files now before compression." > "$CTX_WARN_FILE"
+      bash "$SECRETARY_DIR/.scripts/msg.sh" "$S" "$CTX_WARN_FILE"
+      log_event WARN "$S" "context_near_limit" "PCT=$PCT" "pre-compression-warn"
+    fi
+    HANDLED_COUNT=$((HANDLED_COUNT + 1))
+
   elif echo "$BLOCK" | grep -q "GUARD_BLOCKED: YES" || [ "$DENY_COUNT" -ge 5 ]; then
     # 우선순위 3: Guard 교착 → 가드 임시 비활성화
     if [ ! -f "$RESTORE_MARKER" ]; then
@@ -371,6 +381,21 @@ for S in $SESSIONS; do
     log_event SONNET "$S" "sonnet_invoked" "type=semantic_error window=$ERR_COUNT/5" "wake-sonnet.sh"
   fi
 
+done
+
+# === btn-* 세션 PCT 전용 모니터링 (사전 압축 경고, 전체 elif 체인 제외) ===
+BTN_SESSIONS=$("$PSMUX" ls 2>/dev/null | cut -d: -f1 | grep "^btn-")
+for BS in $BTN_SESSIONS; do
+  BTN_CAP=$("$PSMUX" capture-pane -p -S 0 -t "$BS" 2>/dev/null)
+  [ -z "$BTN_CAP" ] && continue
+  BTN_PCT=$(echo "$BTN_CAP" | grep -oP '\d+%' | tail -1)
+  BTN_PCT_NUM=$(echo "$BTN_PCT" | grep -oE '[0-9]+' || echo 0)
+  if [ "${BTN_PCT_NUM:-0}" -ge 85 ] && check_dedup "$BS" "context_near_limit"; then
+    BTN_WARN_FILE="/tmp/ctx-warn-${BS}.txt"
+    echo "[secretary] Context at ~${BTN_PCT}. Save current task state, decisions, and next steps to memory files now before compression." > "$BTN_WARN_FILE"
+    bash "$SECRETARY_DIR/.scripts/msg.sh" "$BS" "$BTN_WARN_FILE"
+    log_event WARN "$BS" "context_near_limit" "PCT=$BTN_PCT" "pre-compression-warn-btn"
+  fi
 done
 
 # =============================================
