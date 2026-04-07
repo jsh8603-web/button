@@ -25,9 +25,12 @@ type TaskInfo = {
   status: "pending" | "running" | "completed" | "failed";
   inputNeeded?: string | null;
   waitingForInput?: boolean;
+  runner?: "claude" | "gemini" | null;
   result?: string | null;
   log: string | null;
   completedAt: string | null;
+  lastRunStatus?: "completed" | "failed" | null;
+  lastRunAt?: string | null;
 };
 type MetricsData = {
   cpu: number | null;
@@ -265,6 +268,17 @@ function MonitorOffIcon({ size = 20, className }: { size?: number; className?: s
   );
 }
 
+function RefreshIcon({ size = 20, className }: { size?: number; className?: string }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"
+      className={className}>
+      <polyline points="23 4 23 10 17 10" />
+      <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+    </svg>
+  );
+}
+
 function ClockIcon({ size = 20, className }: { size?: number; className?: string }) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none"
@@ -337,6 +351,22 @@ function TrashIcon({ size = 16, className }: { size?: number; className?: string
       className={className}>
       <polyline points="3 6 5 6 21 6" />
       <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+    </svg>
+  );
+}
+
+function ClaudeIcon({ size = 14 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" className="shrink-0">
+      <path d="M15.058 5.572l-3.202 8.089L8.478 5.572H5.089L10.22 18.428h3.282L18.911 5.572h-3.853z" fill="#D97757"/>
+    </svg>
+  );
+}
+
+function GeminiIcon({ size = 14 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" className="shrink-0">
+      <path d="M12 2C12 2 14.5 7.5 17.5 10.5S22 12 22 12s-5.5 2.5-8.5 5.5S12 22 12 22s-2.5-5.5-5.5-8.5S2 12 2 12s5.5-2.5 8.5-5.5S12 2 12 2z" fill="#4285F4"/>
     </svg>
   );
 }
@@ -452,23 +482,31 @@ function formatTaskTime(iso: string): string {
   return `${pad(d.getMonth() + 1)}/${pad(d.getDate())} ${time}`;
 }
 
-function TaskStatusBadge({ status }: { status: string }) {
-  const styles = {
-    pending: "bg-amber-500/20 text-amber-300",
-    running: "bg-blue-500/20 text-blue-300",
-    completed: "bg-green-500/20 text-green-300",
-    failed: "bg-red-500/20 text-red-300",
-  }[status] || "bg-white/10 text-white/40";
-  const labels = {
-    pending: "Scheduled",
-    running: "Running",
-    completed: "Done",
-    failed: "Failed",
-  } as Record<string, string>;
+function formatCron(cron: string): string {
+  const parts = cron.split(" ");
+  if (parts.length < 5) return cron;
+  const [min, hour, dom, , dow] = parts;
+  const dayNames = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  // Convert UTC cron time to KST (+9)
+  let kstHour = (parseInt(hour) + 9) % 24;
+  const time = `${String(kstHour).padStart(2, "0")}:${min.padStart(2, "0")}`;
+  if (dom === "*" && dow === "*") return `Daily ${time}`;
+  if (dom === "*" && dow !== "*") {
+    const days = dow.split(",").map(d => dayNames[+d] || d).join(",");
+    return `${days} ${time}`;
+  }
+  return `${cron}`;
+}
+
+function TaskStatusDot({ status }: { status: string }) {
+  const color = {
+    pending: "bg-green-400/60",
+    running: "bg-white/80",
+    completed: "bg-white/40",
+    failed: "bg-red-400/80",
+  }[status] || "bg-white/20";
   return (
-    <span className={`px-2 py-0.5 rounded-full text-[10px] font-medium ${styles}`}>
-      {labels[status] || status}
-    </span>
+    <span className={`inline-block w-1.5 h-1.5 rounded-full shrink-0 ${color} ${status === "running" ? "animate-pulse" : ""}`} />
   );
 }
 
@@ -745,48 +783,74 @@ function ScheduleTab() {
             <div className="h-px flex-1 bg-white/10" />
           </div>
 
-          {tasks.map(t => {
+          {[...tasks].sort((a, b) => (a.repeat ? 0 : 1) - (b.repeat ? 0 : 1)).map(t => {
             const label = t.name || (t.command && t.command.length > 40 ? t.command.slice(0, 40) + "..." : t.command) || "Task";
             const expanded = expandedTask === t.id;
+            const isFailed = t.status === "failed";
             return (
               <div key={t.id} className="mb-2">
                 <div
                   className={`flex items-center gap-3 px-4 py-3 rounded-xl border transition-colors cursor-pointer
-                    ${t.status === "running" ? "bg-blue-500/5 border-blue-500/20" :
-                      t.status === "completed" ? "bg-green-500/5 border-green-500/10" :
-                      t.status === "failed" ? "bg-red-500/5 border-red-500/20" :
-                      "bg-white/[0.03] border-white/10"}`}
+                    ${isFailed ? "bg-red-500/5 border-red-500/15" : "bg-white/[0.03] border-white/10"}`}
                   onClick={() => setExpandedTask(expanded ? null : t.id)}
                 >
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2 mb-0.5">
-                      <TaskStatusBadge status={t.status} />
-                      {t.type === "ai" && (
-                        <span className="px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-purple-500/20 text-purple-300">AI</span>
-                      )}
-                      {t.status === "running" && !t.waitingForInput && (
-                        <div className="w-3 h-3 border border-blue-400 border-t-transparent rounded-full animate-spin" />
-                      )}
-                      {t.status === "running" && t.waitingForInput && (
-                        <span className="px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-amber-500/20 text-amber-300 animate-pulse">Needs Input</span>
-                      )}
+                  {/* Runner icon on the left side of the card */}
+                  {t.type === "ai" ? (
+                    <div className="shrink-0 w-7 h-7 rounded-lg flex items-center justify-center bg-white/5">
+                      {t.runner === "gemini" ? <GeminiIcon size={16} /> : <ClaudeIcon size={16} />}
                     </div>
-                    <p className="text-sm text-white/80 truncate">{label}</p>
+                  ) : (
+                    <div className="shrink-0 w-7 h-7 rounded-lg flex items-center justify-center bg-white/5">
+                      <TerminalIcon size={14} className="text-white/30" />
+                    </div>
+                  )}
+                  <div className="flex-1 min-w-0">
+                    <div className="flex flex-col gap-0.5 mb-0.5">
+                      {/* Show last run result for repeat tasks that are now queued */}
+                      {t.repeat && t.status === "pending" && t.lastRunStatus && t.lastRunAt && (
+                        <div className="flex items-center gap-1.5">
+                          <span className={`inline-block w-1.5 h-1.5 rounded-full shrink-0 ${t.lastRunStatus === "failed" ? "bg-red-400/80" : "bg-white/40"}`} />
+                          <span className={`text-[10px] ${t.lastRunStatus === "failed" ? "text-red-400/60" : "text-white/30"}`}>
+                            {t.lastRunStatus === "failed" ? "Failed" : "Done"}({formatTaskTime(t.lastRunAt)})
+                          </span>
+                        </div>
+                      )}
+                      <div className="flex items-center gap-1.5">
+                        {t.repeat && t.status === "pending" ? (
+                          <>
+                            <span className="inline-block w-1.5 h-1.5 rounded-full shrink-0 bg-blue-400/80" />
+                            <span className="text-[10px] text-blue-400/60">Queued</span>
+                          </>
+                        ) : (
+                          <>
+                            <TaskStatusDot status={t.status} />
+                            <span className="text-[10px] text-white/40">
+                              {t.status === "running" ? (t.waitingForInput ? "Input" : "Running") :
+                               t.status === "completed" ? "Done" :
+                               t.status === "failed" ? "Failed" : "Scheduled"}
+                            </span>
+                          </>
+                        )}
+                        {t.repeat && (
+                          <span className="text-[9px] text-white/20">repeat</span>
+                        )}
+                      </div>
+                    </div>
+                    <p className={`text-sm truncate ${isFailed ? "text-white/60" : "text-white/80"}`}>{label}</p>
                     {t.inputNeeded && (t.status === "pending" || t.status === "running") && (
-                      <p className="text-[10px] mt-0.5 truncate text-amber-400/80">
-                        ⚠ {t.inputNeeded}
-                      </p>
+                      <p className="text-[10px] mt-0.5 truncate text-white/40">{t.inputNeeded}</p>
                     )}
                     {t.result && (
-                      <p className={`text-[10px] mt-0.5 truncate ${t.status === "failed" ? "text-red-400/70" : "text-green-400/70"}`}>
+                      <p className={`text-[10px] mt-0.5 truncate ${isFailed ? "text-red-400/60" : "text-white/35"}`}>
                         {t.result}
                       </p>
                     )}
-                    <p className="text-[10px] text-white/30 mt-0.5">
-                      {t.status === "pending" && <>Scheduled: {formatTaskTime(t.scheduledAt)}</>}
-                      {t.status === "running" && <>Started at {formatTaskTime(t.scheduledAt)}</>}
-                      {(t.status === "completed" || t.status === "failed") && t.completedAt && <>Finished {formatTaskTime(t.completedAt)}</>}
-                      {t.onComplete && <span className="ml-2 text-amber-400/50">then {t.onComplete}</span>}
+                    <p className="text-[10px] text-white/25 mt-0.5">
+                      {t.repeat && <span className="mr-1">{formatCron(t.repeat)}</span>}
+                      {t.status === "pending" && <>{t.repeat ? "Next " : ""}{formatTaskTime(t.scheduledAt)}</>}
+                      {t.status === "running" && <>{formatTaskTime(t.scheduledAt)}</>}
+                      {(t.status === "completed" || t.status === "failed") && t.completedAt && <>{formatTaskTime(t.completedAt)}</>}
+                      {t.onComplete && <span className="ml-2">then {t.onComplete}</span>}
                     </p>
                   </div>
                   {t.status === "pending" && (
@@ -799,7 +863,6 @@ function ScheduleTab() {
                     </button>
                   )}
                 </div>
-                {/* Expanded log */}
                 {expanded && t.log && (
                   <div className="mx-2 mt-1 p-3 bg-black/40 border border-white/5 rounded-lg
                     text-[10px] text-white/40 font-mono max-h-32 overflow-y-auto whitespace-pre-wrap break-all">
@@ -817,7 +880,7 @@ function ScheduleTab() {
 
 // ─── Dashboard ───────────────────────────────────────────────
 
-type SessionInfo = { name: string; protected: boolean };
+type SessionInfo = { name: string; protected: boolean; runner?: "claude" | "gemini" | null };
 
 function Dashboard() {
   const [status, setStatus] = useState<PcStatus>("offline");
@@ -829,6 +892,12 @@ function Dashboard() {
   const [newProjName, setNewProjName] = useState("");
   const [showNewProjInput, setShowNewProjInput] = useState(false);
   const [lastProject, setLastProject] = useState("");
+  const [projRunner, setProjRunner] = useState<"claude" | "gemini">(() => {
+    if (typeof window !== "undefined") {
+      return (localStorage.getItem("proj-runner") as "claude" | "gemini") || "claude";
+    }
+    return "claude";
+  });
   const [showLogs, setShowLogs] = useState(false);
   const [wakeLogs, setWakeLogs] = useState<Record<string, unknown>[]>([]);
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
@@ -1000,17 +1069,17 @@ function Dashboard() {
     } catch { /* ignore */ }
   }, []);
 
-  const handleQuickAction = async (action: string, name?: string) => {
+  const handleQuickAction = async (action: string, name?: string, extra?: Record<string, string>) => {
     try {
       setActionFeedback(`Starting ${action}...`);
       const res = await api("/api/run", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action, ...(name ? { name } : {}) }),
+        body: JSON.stringify({ action, ...(name ? { name } : {}), ...extra }),
       });
       const data = await res.json();
-      if (data.error) {
-        setActionFeedback(data.error);
+      if (!data.ok) {
+        setActionFeedback(data.error || data.message || `${action} failed`);
       } else {
         setActionFeedback(`${action} started`);
       }
@@ -1026,7 +1095,7 @@ function Dashboard() {
     setNewProjName("");
     setLastProject(name);
     try { localStorage.setItem("last-project", name); } catch {}
-    await handleQuickAction("proj", name);
+    await handleQuickAction("proj", name, { runner: projRunner });
   };
 
   const handleSessionAction = async (action: string, name: string) => {
@@ -1302,6 +1371,31 @@ function Dashboard() {
                   <span>Cancel ({scheduledAction.label})</span>
                 </button>
               )}
+
+              {/* Restart Agent */}
+              <button
+                onClick={async () => {
+                  if (!window.confirm("Restart Agent?")) return;
+                  setShowPowerMenu(false);
+                  setActionFeedback("Restarting agent...");
+                  try {
+                    await api("/api/run", {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({ action: "restart-agent" }),
+                    });
+                    setStatus("offline");
+                    setTimeout(() => checkStatus(), 5000);
+                  } catch {}
+                  setTimeout(() => setActionFeedback(""), 5000);
+                }}
+                className="w-full px-4 py-3 text-left text-sm text-amber-400/80
+                  hover:bg-amber-500/10 hover:text-amber-400 transition-colors flex items-center gap-3
+                  border-t border-white/10"
+              >
+                <RefreshIcon size={16} className="text-amber-400" />
+                <span>Restart Agent</span>
+              </button>
             </div>
           </div>
 
@@ -1321,7 +1415,10 @@ function Dashboard() {
                     key={s.name}
                     className="flex items-center px-4 py-2.5 hover:bg-white/5 transition-colors"
                   >
-                    <span className="flex-1 text-sm text-white/70 truncate">{s.name}</span>
+                    <span className="flex-1 flex items-center gap-1.5 text-sm text-white/70 truncate">
+                      {s.runner === "gemini" ? <GeminiIcon size={12} /> : <ClaudeIcon size={12} />}
+                      <span className="truncate">{s.name}</span>
+                    </span>
                     <button
                       onClick={() => handleSessionAction(
                         s.protected ? "unprotect-session" : "protect-session",
@@ -1394,6 +1491,30 @@ function Dashboard() {
                 </form>
               )}
 
+              {/* Runner Toggle */}
+              <div className="flex items-center justify-center gap-1 px-3 py-2 border-b border-white/10">
+                <button
+                  onClick={() => { setProjRunner("claude"); localStorage.setItem("proj-runner", "claude"); }}
+                  className={`px-3 py-1 rounded-l-full text-xs font-medium transition-colors ${
+                    projRunner === "claude"
+                      ? "bg-amber-500/20 text-amber-400 border border-amber-500/40"
+                      : "bg-white/5 text-white/40 border border-white/10 hover:text-white/60"
+                  }`}
+                >
+                  Claude
+                </button>
+                <button
+                  onClick={() => { setProjRunner("gemini"); localStorage.setItem("proj-runner", "gemini"); }}
+                  className={`px-3 py-1 rounded-r-full text-xs font-medium transition-colors ${
+                    projRunner === "gemini"
+                      ? "bg-blue-500/20 text-blue-400 border border-blue-500/40"
+                      : "bg-white/5 text-white/40 border border-white/10 hover:text-white/60"
+                  }`}
+                >
+                  Gemini
+                </button>
+              </div>
+
               {/* Project List */}
               <div className="max-h-52 overflow-y-auto">
                 {projects.map((proj) => {
@@ -1455,6 +1576,14 @@ function Dashboard() {
                   <div className="flex items-start gap-2">
                     <TerminalIcon size={14} className="text-blue-400 shrink-0 mt-0.5" />
                     <div><span className="text-white/70">Sessions</span> — Manage active tmux sessions</div>
+                  </div>
+                  <div className="flex items-start gap-2 pl-5">
+                    <ClaudeIcon size={12} />
+                    <div><span className="text-white/50">Claude</span> — Claude Code session</div>
+                  </div>
+                  <div className="flex items-start gap-2 pl-5">
+                    <GeminiIcon size={12} />
+                    <div><span className="text-white/50">Gemini</span> — Gemini CLI session</div>
                   </div>
                   <div className="flex items-start gap-2 pl-5">
                     <ShieldIcon active size={12} />

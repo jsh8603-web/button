@@ -44,7 +44,7 @@ pi/                           → Raspberry Pi (웹 + API + WOL + 스케줄러)
   caddy-setup.sh              → Caddy HTTPS 리버스 프록시 설정
 
 agent/                        → PC Agent (Express, Windows 서비스)
-  server.js                   → Express 서버 (상태/명령/메트릭/태스크 큐)
+  server.js                   → Express 서버 (상태/명령/메트릭/태스크 큐 + 비서 자동 스폰)
   .task-queue.json            → 태스크 큐 (영속 파일)
   .protected-sessions         → 보호된 세션 목록 (JSON, 재시작 시에도 유지)
   .hibernate-schedule         → 예약 hibernate 영속 파일 (재부팅 시 복원)
@@ -54,7 +54,29 @@ agent/                        → PC Agent (Express, Windows 서비스)
   add-firewall.bat            → Agent 포트 방화벽 규칙 추가
   install.bat                 → Task Scheduler 등록
   enable-autologin.bat        → Windows 자동 로그인 레지스트리 설정
+  .secretary/                 → 비서 시스템 (bash-only 상시 감시 루프)
+    secretary-loop.sh         → self-wake 루프 (3분 주기, .self-wake-ts 갱신)
+    .sonnet-config.json       → psmux 경로, Sonnet 설정, agent_secret
+    .sonnet-enabled           → 존재 시 S-1/S-2 Sonnet 트리거 활성화
+    .session-registry.txt     → 감시 세션 목록 (SESSION|MODEL|DIR|CREATED|SID)
+    .scripts/
+      scout-and-act.sh        → 수집+판단+실행 (3분 루프 본체)
+      collect-jsonl-audit.sh  → JSONL 증분 파싱 (Phase1:등록세션 / Phase2:서브에이전트)
+      wake-sonnet.sh          → Sonnet psmux 세션 깨우기
+      msg.sh                  → INFO/ACTION 등급 메시지 전송
+      revive.sh               → 죽은 세션 부활
+      generate-session-resume.sh → 컨텍스트 압축 후 리줌 메시지 생성
+      sonnet-idle-monitor.sh  → Sonnet 세션 idle 자동 종료
 ```
+
+rf/                           → 실링팬 RF 제어 (ESP32 + nRF24L01+ + Matter)
+  scanner/scanner.ino         → 125채널 스캔 (리모컨 주파수 탐색)
+  sniffer/sniffer.ino         → 패킷 캡처 (promiscuous 수신)
+  replay/replay.ino           → 패킷 재전송 (팬 제어 검증)
+  controller/controller.ino   → Matter Fan 디바이스 (구글홈 직접 연동)
+  controller/config.h         → WiFi + RF 설정
+  controller/packets.h        → 캡처한 패킷 데이터
+  README.md                   → 프로젝트 문서 + 구현 현황
 
 CAPTCHA 관련 파일 → §CAPTCHA 시스템 참조 (dormant, 삭제 금지)
 
@@ -124,7 +146,7 @@ cd agent && node server.js &
 | GET | /status | Bearer | 세션+프로젝트+metrics+uptime 전체 상태 |
 | POST | /verify-pin | - | PIN bcrypt 검증 (Pi용) |
 | POST | /shutdown | Bearer | 10초 후 shutdown |
-| POST | /run | Bearer | 명령 실행 (proj, sleep, hibernate, task-add/list/cancel/log 등) |
+| POST | /run | Bearer | 명령 실행 (proj, sleep, hibernate, task-add/list/cancel/log 등). AI task-add: runner="claude"(기본) 또는 "gemini" |
 | GET | /projects | Bearer | 프로젝트 목록 |
 
 ## CAPTCHA 시스템 (dormant)
@@ -134,11 +156,36 @@ cd agent && node server.js &
 - 레슨/포인터: `.claude/rules/captcha-lessons.md`
 - 솔버 규칙: `.claude/rules/captcha-solver.md`
 
+## 비서 시스템 (Secretary)
+
+`proj` action(claude runner) 실행 시 `server.js`가 자동으로 `secretary` psmux 세션을 스폰하고 wt.exe 탭을 열어 사용자에게 표시한다.
+
+```
+proj action (claude) → killUnprotectedSessions + 에디터 오픈
+                     → psmux secretary 세션 생성 (이미 존재 시 wt.exe만 열기)
+                     → secretary-loop.sh 실행 (3분 주기)
+                       ↓ scout-and-act.sh 매 사이클
+                         Phase 1: psmux 세션 상태 수집 → .scout-report.txt
+                         Phase 2: elif 체인 (사망/압축/교착/미전송/삽질/부재) 처리
+                         Phase 3: 파일 충돌 감지
+                         Phase 4: git diff 브로드캐스트
+                         Phase 4.5: JSONL 감사수집 + 의존성 체크 + rate limit 조율
+                         Phase 4.6: 미등록 psmux 세션 자동 등록 (harness-wf 세션)
+                         S-1: 미처리 이상 → Sonnet 예외분석 (또는 Telegram 폴백)
+                         S-2: 5사이클 중 3+ 새 에러 → Sonnet 의미적 분석
+                         Phase 5: 주간 리마인더 + audit-log rotation
+```
+
+**WF 충돌 방지**: `.wf-active` 존재 시 `worker/verifier/healer/strategic` 세션을 모니터링에서 제외.
+**Heartbeat**: server.js 5분마다 `.self-wake-ts` 확인 → 6분+ stale 시 루프 자동 재시작.
+**JSONL 감사**: 등록 세션(Phase 1) + 서브에이전트 자동 탐지(Phase 2) → `~/.claude/audit-log/YYYY-MM-DD.jsonl`.
+
 ## Critical Rules
 - Agent Bearer 토큰 = `AGENT_SECRET` (Pi↔Agent 인증)
 - `.env` 파일 커밋 금지
 - 세션 보호 optimistic UI: action 후 35초간 서버 sessions 폴링 무시
 - CAPTCHA 코드 삭제 금지 — dormant 보존
+- `.wf-active` 파일: harness-wf 활성 여부 플래그 (`agent/` 하위, WF 시작/종료 시 생성/삭제)
 
 ## UI 아이콘 인덱스 (모두 SVG)
 

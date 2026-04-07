@@ -2094,10 +2094,23 @@ app.listen(PORT, async () => {
   const SECRETARY_LOOP_STALE_MS = 3 * 60 * 1000;
   const secretaryLoopScript = toMsys(path.join(__dirname, '.secretary', 'secretary-loop.sh'));
   const secretaryDir = path.join(__dirname, '.secretary');
-  const reviveSecretaryLoop = () => {
-    exec(`"${PSMUX_BIN}" send-keys -t secretary 'bash ${secretaryLoopScript}' Enter`, (err) => {
-      if (err) console.error('[secretary] heartbeat restart error:', err.message);
-      else console.log('[secretary] heartbeat: loop restarted');
+  const EXEC_TIMEOUT = 10_000; // 10s timeout for all psmux exec calls
+  const createSecretarySession = (cb) => {
+    const winDir = secretaryDir.replace(/\//g, '\\');
+    exec(`"${PSMUX_BIN}" new-session -d -s secretary -c "${winDir}" -- "${BASH_PATH}" -l`, { timeout: EXEC_TIMEOUT }, (err) => {
+      if (err) { console.error('[secretary] heartbeat session create error:', err.message); return cb && cb(err); }
+      setTimeout(() => {
+        // Kill any leftover process and restart loop cleanly
+        exec(`"${PSMUX_BIN}" send-keys -t secretary C-c`, { timeout: EXEC_TIMEOUT }, () => {
+          setTimeout(() => {
+            exec(`"${PSMUX_BIN}" send-keys -t secretary 'bash ${secretaryLoopScript}' Enter`, { timeout: EXEC_TIMEOUT }, (err2) => {
+              if (err2) console.error('[secretary] heartbeat restart error:', err2.message);
+              else console.log('[secretary] heartbeat: loop restarted');
+              cb && cb(err2);
+            });
+          }, 500);
+        });
+      }, 1000);
     });
   };
   setInterval(() => {
@@ -2107,30 +2120,19 @@ app.listen(PORT, async () => {
       if (!isNaN(parsed)) tsMs = parsed;
     } catch {}
     const staleness = Date.now() - tsMs;
-    exec(`"${PSMUX_BIN}" has-session -t secretary`, (hasErr) => {
-      if (hasErr && hasErr.code !== 1) {
-        console.warn('[secretary] heartbeat: psmux error', hasErr.message);
-        return;
-      }
+    exec(`"${PSMUX_BIN}" has-session -t secretary`, { timeout: EXEC_TIMEOUT }, (hasErr) => {
       if (hasErr) {
-        // 세션 자체가 없음 → 재생성 + 루프 시작
-        console.log('[secretary] heartbeat: session gone, recreating');
-        const winDir = secretaryDir.replace(/\//g, '\\');
-        exec(`"${PSMUX_BIN}" new-session -d -s secretary -c "${winDir}" -- "${BASH_PATH}" -l`, (err) => {
-          if (err) return console.error('[secretary] heartbeat session create error:', err.message);
-          setTimeout(() => {
-            reviveSecretaryLoop();
-            exec(`wt.exe new-tab --title "secretary" -- "${PSMUX_BIN}" attach-session -t secretary`, (e) => {
-              if (e) console.error('[secretary] heartbeat wt.exe error:', e.message);
-            });
-          }, 1000);
-        });
+        // Session doesn't exist → always recreate
+        console.log(`[secretary] heartbeat: session gone (code=${hasErr.code}), recreating`);
+        createSecretarySession();
         return;
       }
-      // 세션은 있지만 루프가 stale
+      // Session exists — only act if loop is stale
       if (staleness >= SECRETARY_LOOP_STALE_MS) {
-        console.log(`[secretary] heartbeat: loop stale (${Math.round(staleness / 1000)}s), restarting`);
-        reviveSecretaryLoop();
+        console.log(`[secretary] heartbeat: loop stale (${Math.round(staleness / 1000)}s), recreating session`);
+        exec(`"${PSMUX_BIN}" kill-session -t secretary`, { timeout: EXEC_TIMEOUT }, () => {
+          createSecretarySession();
+        });
       }
     });
   }, 1 * 60 * 1000);

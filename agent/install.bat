@@ -22,7 +22,7 @@ if not exist "%SERVER_PATH%" (
 
 :: Create task that runs at user logon (interactive session, can open GUI apps)
 :: /ru with current user = runs in user session (can open VS Code, psmux visible)
-schtasks /create /tn "ButtonAgent" /tr "\"%NODE_PATH%\" \"%SERVER_PATH%\"" /sc onlogon /ru "%USERNAME%" /rl highest /f
+schtasks /create /tn "ButtonAgent" /tr "\"%NODE_PATH%\" \"%SERVER_PATH%\"" /sc onlogon /ru "%USERNAME%" /rl highest /it /f
 
 echo ButtonAgent registered as logon startup task (runs in user session).
 echo   node: %NODE_PATH%

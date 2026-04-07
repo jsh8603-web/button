@@ -11,15 +11,17 @@ TS_FILE="$SECRETARY_DIR/.self-wake-ts"
 STOP_FILE="$SECRETARY_DIR/.watchdog-stop"
 ALIVE_FILE="$SECRETARY_DIR/.secretary-alive"
 
-# 중복 구동 방지
-if [ -f "$TS_FILE" ]; then
-  _TS=$(cat "$TS_FILE"); _NOW=$(date +%s%3N)
-  _DIFF=$(( (_NOW - _TS) / 1000 ))
-  if [ "$_DIFF" -lt 360 ]; then
-    echo "[secretary-loop] 루프 이미 동작 중 (${_DIFF}s ago)"
+# 중복 구동 방지 — PID 기반 (타임스탬프 기반은 stale TS에 의한 오탈지 발생)
+PIDFILE="$SECRETARY_DIR/.secretary-loop.pid"
+if [ -f "$PIDFILE" ]; then
+  _OLD_PID=$(cat "$PIDFILE" 2>/dev/null)
+  if [ -n "$_OLD_PID" ] && kill -0 "$_OLD_PID" 2>/dev/null; then
+    echo "[secretary-loop] 루프 이미 동작 중 (PID $_OLD_PID)"
     exit 0
   fi
 fi
+echo $$ > "$PIDFILE"
+trap 'rm -f "$PIDFILE" "$ALIVE_FILE"' EXIT
 
 touch "$ALIVE_FILE"
 echo "[secretary-loop] 시작 (interval=${INTERVAL}s, $(date '+%H:%M'))"

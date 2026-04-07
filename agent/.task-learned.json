@@ -151,5 +151,40 @@
     "approach": "stress test echo v2 완료",
     "lastUsed": "2026-03-24T07:27:47.437Z",
     "successCount": 1
+  },
+  "gemini-test-v3": {
+    "approach": "gemini-test-v3 테스트 완료 (Step 2 성공)",
+    "lastUsed": "2026-03-28T16:47:09.621Z",
+    "successCount": 1
+  },
+  "gemini-final-test": {
+    "approach": "gemini-final-test 작업이 성공적으로 완료되었습니다. (STEP 2 programmatic method 사용)",
+    "lastUsed": "2026-03-28T16:53:13.298Z",
+    "successCount": 1
+  },
+  "gemini-editor-test": {
+    "approach": "editor test passed. STEP 2 프로그래밍 방식을 통해 인사 메시지와 성공 결과 출력",
+    "lastUsed": "2026-03-28T16:58:30.431Z",
+    "successCount": 1
+  },
+  "gemini-screen-test": {
+    "approach": "screen test passed",
+    "lastUsed": "2026-03-28T17:02:27.677Z",
+    "successCount": 1
+  },
+  "gemini-test-hello": {
+    "approach": "STEP 2 (Programmatic approach)를 통해 태스크를 성공적으로 완료했습니다.",
+    "lastUsed": "2026-03-28T17:09:44.129Z",
+    "successCount": 1
+  },
+  "babyplace-audit-test": {
+    "approach": "CLI (tsx)]",
+    "lastUsed": "2026-03-28T17:49:43.373Z",
+    "successCount": 1
+  },
+  "Babyplace place audit workflow": {
+    "approach": "31분간의 장소 감사 워크플로우를 성공적으로 수행하였습니다 (STEP 2 방식). 분류, 중복, 승격 후보, 포스터 감사를 전수 직접 검토하여 오탐을 제거하였으며, 포스터 도메인 필터 강화(4단계) 조치를 완료하였습니다. 최종 보고서는",
+    "lastUsed": "2026-03-31T13:54:38.601Z",
+    "successCount": 1
   }
 }

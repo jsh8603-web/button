@@ -3,7 +3,7 @@
 ## 동작 원리
 - `proj` action 실행 시: 미보호 btn-* 세션 전부 kill → 새 세션 생성
 - 보호된 세션은 kill에서 제외 (`.protected-sessions` 파일로 영속화)
-- 데스크탑에서 직접 연 tmux 세션 (btn- 접두사 없음)은 영향 없음
+- 데스크탑에서 직접 연 psmux 세션 (btn- 접두사 없음)은 영향 없음
 
 ## Agent actions (Pi relay → Agent /run)
 - `protect-session`: `.protected-sessions`에 추가

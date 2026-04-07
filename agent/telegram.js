@@ -1,7 +1,11 @@
 const TelegramBot = require('node-telegram-bot-api');
-const { exec } = require('child_process');
+const { exec, execSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
+
+const PYTHON_BIN = 'C:\\Users\\jsh86\\AppData\\Local\\Programs\\Python\\Python312\\python.exe';
+const RENDER_SCRIPT = path.join(__dirname, 'render-terminal.py');
+const SCREENSHOT_DIR = path.join(require('os').tmpdir(), 'btn-screenshots');
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
@@ -67,22 +71,23 @@ function init(deps) {
 async function handleMessage(msg) {
   const text = (msg.text || '').trim();
 
-  if (text === '/start' || text === '/help') {
+  if (text === '/start' || text === '/help' || text === '/h') {
     return send(
       '*Clauni Bot*\n\n' +
-      '/sessions — 세션 목록 + 선택\n' +
-      '/tasks — 태스크 큐\n' +
-      '/view — 현재 세션 화면 캡처\n' +
-      '/disconnect — 세션 연결 해제\n\n' +
-      '세션 선택 후 메시지 → 프롬프트 전달 → 완료 시 결과 보고',
+      '`/s` (sessions) 활성 세션 목록 + 선택\n' +
+      '`/v` (view) 선택된 세션 텍스트 출력\n' +
+      '`/ss` (screenshot) 선택된 세션 터미널 스크린샷\n' +
+      '`/d` (disconnect) 세션 연결 해제\n' +
+      '`/h` (help) 이 도움말\n\n' +
+      '세션 선택 후 메시지 입력 → 프롬프트 전달 → 완료 시 자동 보고',
       { parse_mode: 'Markdown' }
     );
   }
 
-  if (text === '/sessions') return showSessions();
-  if (text === '/tasks') return showTasks();
-  if (text === '/view') return viewSession();
-  if (text === '/disconnect') return disconnect();
+  if (text === '/sessions' || text === '/s') return showSessions();
+  if (text === '/view' || text === '/v') return viewSession();
+  if (text === '/screenshot' || text === '/ss') return screenshotSession();
+  if (text === '/disconnect' || text === '/d') return disconnect();
 
   // Send to selected session
   if (selectedSession) {
@@ -113,6 +118,9 @@ async function handleCallback(query) {
     const psmuxName = data.slice('capture:'.length);
     const output = await capturePane(psmuxName);
     send(`\`\`\`\n${truncate(output, 3800)}\n\`\`\``, { parse_mode: 'Markdown' });
+  } else if (data.startsWith('shot:')) {
+    const psmuxName = data.slice('shot:'.length);
+    screenshotSession(psmuxName);
   }
 }
 
@@ -132,8 +140,7 @@ async function showSessions() {
     const shield = protectedList.includes(s.name) ? '\u{1F6E1}' : '';
     let runner = '';
     if (s.type === 'btn') {
-      const projName = s.name.slice(SESSION_PREFIX.length);
-      runner = sessionRunnerMap.get(projName) || 'claude';
+      runner = sessionRunnerMap.get(s.name) || 'claude';
     } else if (s.type === 'schedule') {
       runner = 'ai-task';
     }
@@ -148,25 +155,18 @@ async function showSessions() {
   });
 }
 
-async function showTasks() {
-  try {
-    const tasks = JSON.parse(fs.readFileSync(path.join(__dirname, '.task-queue.json'), 'utf8'));
-    const active = tasks.filter(t => ['pending', 'running'].includes(t.status));
-    if (active.length === 0) return send('대기/실행 중인 태스크가 없습니다.');
-    const lines = active.map(t => {
-      const icon = t.status === 'running' ? '\u{1F7E2}' : '\u{1F7E1}';
-      return `${icon} \`${t.id.slice(0,8)}\` ${t.name || t.command || 'ai-task'} — ${t.status}`;
-    });
-    send(lines.join('\n'), { parse_mode: 'Markdown' });
-  } catch {
-    send('태스크 큐를 읽을 수 없습니다.');
-  }
-}
-
 async function viewSession() {
-  if (!selectedSession) return send('연결된 세션이 없습니다. /sessions 로 선택하세요.');
+  if (!selectedSession) return send('연결된 세션이 없습니다. /s 로 선택하세요.');
   const output = await capturePane(selectedSession);
   send(`\`\`\`\n${truncate(output, 3800)}\n\`\`\``, { parse_mode: 'Markdown' });
+}
+
+async function screenshotSession(psmuxName) {
+  const target = psmuxName || selectedSession;
+  if (!target) return send('연결된 세션이 없습니다. /s 로 선택하세요.');
+  const output = await capturePane(target);
+  if (output.startsWith('(capture error')) return send(output);
+  sendScreenshot(target, output);
 }
 
 function disconnect() {
@@ -177,10 +177,26 @@ function disconnect() {
   else send('연결된 세션이 없습니다.');
 }
 
+function sendScreenshot(label, text) {
+  if (!fs.existsSync(SCREENSHOT_DIR)) fs.mkdirSync(SCREENSHOT_DIR, { recursive: true });
+  const imgPath = path.join(SCREENSHOT_DIR, `${label}-${Date.now()}.png`);
+  try {
+    execSync(`"${PYTHON_BIN}" "${RENDER_SCRIPT}" "${imgPath}"`, {
+      input: text, encoding: 'utf8', timeout: 10000,
+    });
+    bot.sendPhoto(chatId, imgPath, { caption: label }).then(() => {
+      try { fs.unlinkSync(imgPath); } catch {}
+    }).catch(err => send(`스크린샷 전송 실패: ${err.message}`));
+  } catch (err) {
+    send(`스크린샷 렌더링 실패: ${err.message}`);
+  }
+}
+
 function buildSessionKeyboard(sessions) {
   const buttons = sessions.map(s => ([
     { text: `\u{1F4AC} ${s.name}`, callback_data: `select:${s.psmuxName}` },
     { text: `\u{1F4CB} 출력`, callback_data: `capture:${s.psmuxName}` },
+    { text: `\u{1F4F8} 캡처`, callback_data: `shot:${s.psmuxName}` },
   ]));
   return { inline_keyboard: buttons };
 }
