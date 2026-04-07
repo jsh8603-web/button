@@ -287,6 +287,14 @@ fi
     fi
     echo "IDLE_PROMPT: $IDLE_PROMPT"
 
+    # promotion-signal 교착 감지 (pending-promotion.txt 미완료 항목 있으면 모든 tool 차단)
+    if [ -f "$HOME/.claude/pending-promotion.txt" ] && \
+       grep -q '^\[ \]' "$HOME/.claude/pending-promotion.txt"; then
+      echo "PROMO_BLOCKED: YES"
+    else
+      echo "PROMO_BLOCKED: NO"
+    fi
+
     # Circular work: 5사이클 unstaged diff 누적 추적 (net LOC ≈ 0 + 수정 > N)
     CIRC_DIR=$(grep "^${S}|" "$REGISTRY" | cut -d'|' -f3)
     if [ -n "$CIRC_DIR" ] && [ "$CIRC_DIR" != "unknown" ] && \
@@ -541,6 +549,16 @@ print(len([f for f in files if os.path.getmtime(f) > ts]))
           TELEGRAM_REASONS="$TELEGRAM_REASONS guard_unlock_failed:$S"
         fi
       fi
+    fi
+    HANDLED_COUNT=$((HANDLED_COUNT + 1))
+
+  elif echo "$BLOCK" | grep -q "PROMO_BLOCKED: YES"; then
+    # promotion-signal 교착 → promotion-log.md 기록 요청 (STUCK 오판 방지)
+    if check_dedup "$S" "promo_blocked"; then
+      echo "pending-promotion.txt에 미완료 항목 있어. tool이 전부 차단된 상태야. promotion-log.md 먼저 기록하고 나서 계속해." \
+        > "$TMPDIR/promo-blocked-${S}.txt"
+      bash "$SECRETARY_DIR/.scripts/msg.sh" "$S" "$TMPDIR/promo-blocked-${S}.txt"
+      log_event WARN "$S" "promo_blocked_detected" "pending-promotion.txt has unchecked items" "promo-blocked-warn"
     fi
     HANDLED_COUNT=$((HANDLED_COUNT + 1))
 
