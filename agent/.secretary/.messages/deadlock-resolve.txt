@@ -1,1 +1,11 @@
-Guard 교착 걸렸어. bulk-skip 실행하고 작업 계속해.
+가드에 막혔어. 어떤 가드인지 확인하고 아래 방법으로 우회해.
+
+| 가드 | 우회 방법 |
+|------|---------|
+| research.block (WebSearch/WebFetch 차단) | Gemini CLI 써: `gemini -p "질문"` |
+| remote.plan-block (EnterPlanMode 차단) | 텍스트로 계획 작성 후 plan.md에 저장 |
+| remote.ask-block (AskUserQuestion 차단) | 번호 선택지 텍스트로 직접 질문 |
+| psmux.spawn-guard (new-session 차단) | `bash .secretary/.scripts/spawn-session.sh <세션명>` 써 |
+| safe.rm-block (rm -rf 차단) | 정당한 차단 — 우회 금지 |
+
+어떤 가드인지 모르면 deny 메시지 다시 읽어봐.

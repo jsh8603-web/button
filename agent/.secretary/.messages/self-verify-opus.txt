@@ -8,6 +8,6 @@
    복잡도/함수3개+         → quality-reviewer Agent
    N+1/캐시/async과다      → performance-reviewer Agent
    조건 2개+              → 병렬 호출
-   ※ "직접 판단" 없음 — 반드시 specialist 거쳐서 검증
+   ※ 조건 미해당이면 직접 판단 가능
 4. Specialist 결과 바탕으로 직접 수정
 5. 수정 후 작업 재개

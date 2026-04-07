@@ -62,12 +62,11 @@ bash elif 체인을 벗어난 미처리 이상 — 화면 확인 후 빠른 판�
 
 1. 작업 JSON의 context 필드에서 deny_count 확인
 2. `~/.claude/settings.json` Read → hooks 구조 파악
-3. `~/.claude/hook-metrics.jsonl` 마지막 30줄 Read → 차단 hook 확인
-4. 해당 세션 화면 확인:
+3. 해당 세션 화면 확인:
    ```bash
    psmux capture-pane -p -S 0 -t {session}
    ```
-5. 판단:
+4. 판단:
    a) hook 수정으로 해결 가능
       → settings.json Write (반드시 백업 먼저: cp ~/.claude/settings.json ~/.claude/settings.json.bak)
       → [INFO] "가드 해제했어. 작업 재개해."
