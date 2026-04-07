@@ -81,8 +81,10 @@ check_dedup() {
 
 SONNET_SESSION=$(jq -r '.sonnet_session // "secretary-sonnet"' "$CONFIG" 2>/dev/null)
 WF_ACTIVE_FILE="$SECRETARY_DIR/../.wf-active"
+# btn-* 세션 (대화형 Claude Code 메인 세션) 제외 — Enter 자동 전송 등이 채팅 입력 방해
 SESSIONS=$("$PSMUX" ls -F '#{session_name}' 2>/dev/null | \
-  grep -v "^${SELF_SESSION}$" | grep -v "^task-" | grep -v "^${SONNET_SESSION}$")
+  grep -v "^${SELF_SESSION}$" | grep -v "^task-" | grep -v "^${SONNET_SESSION}$" | \
+  grep -v "^btn-")
 
 # WF 활성 시 harness 세션 모니터링 제외 (충돌 방지)
 # .wf-active에 세션명 목록이 있으면 그것을 사용, 없으면 기본 4개 prefix 매칭
