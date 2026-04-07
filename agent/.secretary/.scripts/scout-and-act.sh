@@ -206,7 +206,7 @@ fi
   for S in $SESSIONS; do
     echo "--- $S ---"
 
-    CAP=$("$PSMUX" capture-pane -p -S 0 -t "$S" 2>/dev/null)
+    CAP=$("$PSMUX" capture-pane -p -S -200 -t "$S" 2>/dev/null)
     if [ $? -ne 0 ] || [ -z "$CAP" ]; then
       echo "STATUS: SESSION_DEAD"
       echo ""

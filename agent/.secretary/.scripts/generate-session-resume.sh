@@ -23,8 +23,13 @@ DIR=$(grep "^${SESSION}|" "$REGISTRY" | cut -d'|' -f3)
 
 JSONL_DIR="$JSONL_BASE/$(echo "$DIR" | sed 's|:|--|; s|/|--|g; s|\\|--|g')"
 JSONL_FILE="$JSONL_DIR/${SID}.jsonl"
-[ ! -f "$JSONL_FILE" ] && exit 1
+if [ -f "$JSONL_FILE" ]; then
+  HAS_JSONL=1
+else
+  HAS_JSONL=0
+fi
 
+if [ "$HAS_JSONL" = "1" ]; then
 "$PYTHON" - "$JSONL_FILE" > "$RESUME_FILE" << 'PYEOF'
 import sys, json
 
@@ -125,10 +130,15 @@ if agents:
         print(f'- {a}')
     print()
 PYEOF
+else
+  # JSONL not found — generate minimal resume header
+  echo "## Session Resume (secretary — compression recovery, no JSONL)" > "$RESUME_FILE"
+  echo "" >> "$RESUME_FILE"
+fi
 
 # 1. 압축 직전 화면 스냅샷 (가장 고유한 정보)
 echo "### Screen State Before Compression" >> "$RESUME_FILE"
-"$PSMUX_PATH" capture-pane -p -S 0 -t "$SESSION" 2>/dev/null | tail -50 >> "$RESUME_FILE" || echo "(snapshot unavailable)" >> "$RESUME_FILE"
+"$PSMUX_PATH" capture-pane -p -S -200 -t "$SESSION" 2>/dev/null | tail -50 >> "$RESUME_FILE" || echo "(snapshot unavailable)" >> "$RESUME_FILE"
 echo "" >> "$RESUME_FILE"
 
 # 2. 미완료 TODO (plan.md - [ ] 항목만)
