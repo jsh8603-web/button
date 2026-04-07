@@ -58,9 +58,9 @@
 
 ---
 
-### progress.md / pipeline 훅 결정 (미정)
+### progress.md / pipeline 훅 결정 (확정)
 
-**기존 기능**:
+**기존 기능 → 전부 REMOVE**:
 - `pipe.progress-inject`: progress.md 생성 시 작업 지침 inject
 - `pipe.issue-gate`: 미완료 항목 있으면 타 파일 수정 차단
 - `pipe.session-start`: 세션 시작 시 progress.md 복원 안내
@@ -68,19 +68,27 @@
 - `pipe.checklist-prior`: 에러 있는데 체크리스트 없으면 경고
 - `pipe.changelog-guard`: 규칙/코드 수정 후 change-log 미기록 시 차단
 
-**논의 결과**:
-- progress.md는 Claude 네이티브 기능이 아닌 커스텀 파일
-- Claude 네이티브 TodoWrite가 동일 역할 (단, 압축 시 소멸)
-- 단일 에이전트: plan.md + TodoWrite로 대체 가능
-- harness-wf: execution-log.md가 이미 담당
-- **압축 후 복원 문제**: generate-session-resume.sh가 progress.md/plan.md 미완료 항목을 resume에 포함하면 해결 가능
+**결정**:
+- progress.md 개념 유지. 훅/가드 없이 아래 두 가지로 대체
+- pipe.issue-gate 등 하드 블록 전부 제거
 
-**내 의견 (미정)**:
-- progress.md 개념 폐기 → plan.md로 통합 (계획 + 체크리스트 겸용)
-- generate-session-resume.sh에 plan.md 미완료 항목 포함 추가
-- pipe.issue-gate는 scriptagent 넛지로 대체 (하드 블록 제거)
-- pipe.changelog-guard도 scriptagent이 git diff 브로드캐스트 시 "변경 기록해줘" 메시지로 대체 가능
-- → **세션 압축 후 추가 논의 예정**
+#### 대체 메커니즘
+
+**1. CLAUDE.md 규칙 (생성 안내)**:
+- "3단계+ 순차 작업 시 첫 수정 전 plan.md + progress.md 생성"
+- 형식 인라인: `# 작업명 / ## Phase 진행 (체크리스트) / ## 이슈 목록`
+- 에이전트가 사용자 말로 인식 → 자발적 생성
+
+**2. scriptagent 감지 (생성 넛지, 세션당 1회)**:
+- 트리거: `plan.md 존재 + progress.md 없음`
+  - plan.md 생성 = 에이전트가 이미 다단계 작업이라 판단한 증거
+- 전송 메시지: `"plan.md 작성한 거 봤어. progress.md도 같은 위치에 만들어줘. 형식: # 작업명 / ## Phase 진행 (체크리스트) / ## 이슈 목록"`
+- `check_dedup "$S" "progress_missing"` 으로 1회만 전송
+- 구현 위치: scout-and-act.sh Phase 3 (파일 충돌 감지 블록 근처)
+
+**3. generate-session-resume.sh 확장 (압축 후 복원)**:
+- 압축 후 resume 생성 시 progress.md 미완료 항목(`- [ ]`) 포함
+- `pipe.post-compact` 없어도 압축 후 에이전트가 남은 작업 파악 가능
 
 ---
 
