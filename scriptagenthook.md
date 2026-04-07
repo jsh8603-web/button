@@ -22,8 +22,8 @@
 | ID | 기능 | 결정 | 이유 |
 |----|------|------|------|
 | `safe.rm-block` | `rm -rf /~` 차단 | **KEEP** | 복구 불가, scriptagent 사전 감지 불가 |
-| `research.scrape-block` | Playwright 스크래핑 감지 → Gemini 안내 (inject) | **REMOVE** | 차단 아님, scriptagent JSONL로 대체 가능 |
-| `pending-promotion 가드` | 미완료 항목 있으면 거의 모든 도구 차단 | **REMOVE** | 가장 방해됨. scriptagent이 이벤트 감지 후 "promotion-log.md 기록해줘" 메시지로 대체. 작성 규칙은 promotion-log.md 내부에 |
+| `research.scrape-block` | Playwright 스크래핑 감지 → Gemini 안내 (inject) | **REMOVE** (단순 삭제) | `research.block` 가드 메시지에 Gemini/스킬 안내 이미 포함. 별도 대체 불필요 |
+| `pending-promotion 가드` | 미완료 항목 있으면 거의 모든 도구 차단 | **REMOVE** | scriptagent 커밋/에러/Stop 감지 시 promotion-log remind 메시지로 대체 |
 | `research.block` | WebSearch/WebFetch 완전 차단 → Gemini 강제 | **KEEP** | 환경에서 실제 불가, 비용 발생, 에러 메시지에 대안 명시 |
 | `remote.plan-block` | psmux에서 EnterPlanMode 차단 | **KEEP** | GUI 렌더링 불가, 실행 시 세션 교착, scriptagent 사전 감지 불가 |
 | `remote.ask-block` | psmux에서 AskUserQuestion 차단 | **KEEP** | 동일: 사용자가 질문 못 보면 세션 교착 |
@@ -33,62 +33,91 @@
 
 | ID | 기능 | 결정 | 이유 |
 |----|------|------|------|
-| `bash-post` | Bash 후 시그널 수집 | **REMOVE** | pending 체인 소비처 없어짐, scriptagent JSONL로 감지 |
+| `bash-post` | Bash 후 시그널 수집 | **REMOVE** | pending 체인 소비처 없어짐 |
 | `request` | Read 후 시그널 수집 | **REMOVE** | 동일 |
-| `output` | Write/Edit 후 코드품질·cv·changelog inject | **REMOVE** | 매 Edit마다 발동, 가장 무거운 hook. scriptagent 대체 가능 |
+| `output` | Write/Edit 후 코드품질·changelog inject | **REMOVE** | 커밋 감지 시 "simplify 검토해" 메시지로 대체 |
 | `unlock` | Edit 후 pending 플래그 삭제 | **REMOVE** | pending 가드 제거하면 불필요 |
 | `knowledge` | WebSearch 후 시그널 수집 | **REMOVE** | research.block으로 WebSearch 차단되어 실질 발동 없음 |
-| `agent-review` | Agent 결과 파싱 inject | **REMOVE** | pending 체인 일부, 10초 timeout 부담 |
+| `agent-review` | Agent 결과 파싱 inject | **REMOVE** (대체 없음) | 트리거가 너무 broad (모든 Agent 사용 = 기록 대상 아님). 에러/커밋 remind로 충분히 커버 |
 
 #### 기타
 
 | ID | 기능 | 결정 | 이유 |
 |----|------|------|------|
-| `UserPromptSubmit inject` | 매 메시지마다 pending 체크리스트 표시 | **REMOVE** | 가장 빈번, pending 가드 제거하면 불필요 |
-| `PostToolUseFailure error` | 도구 실패 시 시그널 수집 | **REMOVE** | pending 체인 일부 |
+| `UserPromptSubmit inject` | 매 메시지마다 pending 체크리스트 표시 | **REMOVE** | pending 가드 제거하면 불필요 |
+| `PostToolUseFailure error` | 도구 실패 시 시그널 수집 | **REMOVE** | 감사 → scout audit-log 담당. 에러 remind → scout ERRORS 감지 시 메시지로 대체 |
 | `perm-allow` (PermissionRequest) | 모든 도구 권한 자동승인 | **KEEP** | 차단이 아닌 허용, 편의 기능 |
 | `remote.detect` (SessionStart) | PSMUX_TARGET_SESSION → .remote-session | **KEEP** | remote 가드들이 이 플래그 의존 |
 | SessionStart progress.md 감지 | .progress-detected 플래그 | **REMOVE** | progress.md 훅 체계 제거 시 불필요 |
 | SessionStart signal-orphan | 이전 시그널 체크 | **REMOVE** | 시그널 체계 제거 |
-| SessionStart 플래그 삭제 | 세션 시작 시 플래그 일괄 삭제 | **슬림화** | 유지 항목 관련 플래그만 남김 |
+| SessionStart 플래그 삭제 | 세션 시작 시 플래그 일괄 삭제 | **슬림화** | KEEP 항목 관련 플래그만 남김 |
 | PostCompact resume 주입 | 압축 후 generate-session-resume.sh | **KEEP** | psmux 세션 체크 추가 완료 (false positive 수정) |
-| PostCompact compact-restore | progress.md 관련 | **REMOVE** | progress.md 체계 제거 |
+| PostCompact compact-restore | progress.md 관련 | **REMOVE** | generate-session-resume.sh 확장으로 대체 |
 | `sys.tts-notify` (Stop) | 작업 완료 TTS | **KEEP** | 사용자 편의, 부작용 없음 |
-| `analyze` (Stop) | 세션 종료 시 git diff/log 아카이브 | **KEEP** | 감사 wf 활용, 조용히 실행 |
+| `analyze` (Stop) | 세션 종료 시 git diff/log 아카이브 | **KEEP** + promotion remind 추가 | 커밋 없이 세션 종료 시에도 promotion-log remind 커버 |
 
 ---
 
 ### progress.md / pipeline 훅 결정 (확정)
 
 **기존 기능 → 전부 REMOVE**:
-- `pipe.progress-inject`: progress.md 생성 시 작업 지침 inject
-- `pipe.issue-gate`: 미완료 항목 있으면 타 파일 수정 차단
-- `pipe.session-start`: 세션 시작 시 progress.md 복원 안내
-- `pipe.post-compact`: 압축 후 progress.md 복원 강제
-- `pipe.checklist-prior`: 에러 있는데 체크리스트 없으면 경고
-- `pipe.changelog-guard`: 규칙/코드 수정 후 change-log 미기록 시 차단
 
-**결정**:
-- progress.md 개념 유지. 훅/가드 없이 아래 두 가지로 대체
-- pipe.issue-gate 등 하드 블록 전부 제거
+| 기존 훅 | 대체 방식 |
+|---------|---------|
+| `pipe.progress-inject` | CLAUDE.md 규칙 + scriptagent plan.md 감지 넛지 |
+| `pipe.issue-gate` | scout: progress.md `[ ]` + 코드파일 git diff 감지 → 소프트 넛지 메시지 |
+| `pipe.session-start` | generate-session-resume.sh 확장 (미완료 항목 포함) |
+| `pipe.post-compact` | 동일 |
+| `pipe.checklist-prior` | scout ERRORS 감지 + progress.md 없음 → "체크리스트 먼저 작성해 + Issue #N 형식" |
+| `pipe.changelog-guard` | 커밋 감지 시 promotion-log remind 메시지에 포함 |
 
 #### 대체 메커니즘
 
 **1. CLAUDE.md 규칙 (생성 안내)**:
 - "3단계+ 순차 작업 시 첫 수정 전 plan.md + progress.md 생성"
 - 형식 인라인: `# 작업명 / ## Phase 진행 (체크리스트) / ## 이슈 목록`
-- 에이전트가 사용자 말로 인식 → 자발적 생성
 
-**2. scriptagent 감지 (생성 넛지, 세션당 1회)**:
+**2. scriptagent 생성 넛지 (세션당 1회)**:
 - 트리거: `plan.md 존재 + progress.md 없음`
-  - plan.md 생성 = 에이전트가 이미 다단계 작업이라 판단한 증거
-- 전송 메시지: `"plan.md 작성한 거 봤어. progress.md도 같은 위치에 만들어줘. 형식: # 작업명 / ## Phase 진행 (체크리스트) / ## 이슈 목록"`
-- `check_dedup "$S" "progress_missing"` 으로 1회만 전송
-- 구현 위치: scout-and-act.sh Phase 3 (파일 충돌 감지 블록 근처)
+- 메시지: `"plan.md 작성한 거 봤어. progress.md도 만들어줘. 형식: # 작업명 / ## Phase 진행 (체크리스트) / ## 이슈 목록"`
+- `check_dedup "$S" "progress_missing"` 으로 1회만
 
-**3. generate-session-resume.sh 확장 (압축 후 복원)**:
-- 압축 후 resume 생성 시 progress.md 미완료 항목(`- [ ]`) 포함
-- `pipe.post-compact` 없어도 압축 후 에이전트가 남은 작업 파악 가능
+**3. generate-session-resume.sh 확장 (압축 후 복원)** ← 다이어트 실행 전 선행 구현 필수:
+- progress.md 미완료 항목(`- [ ]`) resume에 포함
+- pipe.post-compact/pipe.session-start 없어도 압축 후 복원 가능
+
+---
+
+### scriptagent 신규 구현 목록 (다이어트 실행과 병행)
+
+| 우선순위 | 구현 항목 | 트리거 | 메시지 내용 | 위치 |
+|---------|----------|--------|------------|------|
+| **선행 필수** | generate-session-resume.sh 확장 | PostCompact | progress.md `- [ ]` 항목 포함 | resume 스크립트 |
+| 1 | promotion-log remind (커밋) | Phase 4 커밋 감지 | "커밋됨. promotion-log.md 기록 검토. + 양식(B)" | Phase 4 브로드캐스트 |
+| 1 | promotion-log remind (에러) | ERRORS 감지 (REPEAT_ERROR: NONE) | "에러 발생. 지식부족/절차누락이면 promotion-log.md 기록. + 양식(B)" | elif ERRORS 처리 |
+| 1 | promotion-log remind (Stop) | analyze Stop hook | "세션 종료. 이번 작업 promotion-log.md 기록 검토. + 양식(B)" | analyze hook 수정 |
+| 2 | progress.md 생성 넛지 | plan.md 있고 progress.md 없음 | "plan.md 봤어. progress.md도 만들어줘. + 형식" | Phase 3 근처 |
+| 2 | pipe.issue-gate 대체 | progress.md `[ ]` + 코드파일 변경 | "미완료 항목 있어. 먼저 해결하고 수정해" | Phase 4 |
+| 2 | pipe.checklist-prior 대체 | ERRORS + progress.md 없음 | "에러 있어. progress.md 체크리스트 먼저. 형식: ### Issue #N" | ERRORS 처리 조건 추가 |
+| 3 | output simplify remind | 커밋 + LOC 50+ | "작업 완료. simplify 검토해봐" | 커밋 remind에 포함 |
+
+**양식(B)** — 메시지 파일에 인라인, 날짜 헤더 방식:
+```
+ID 확인: grep "^| E" ~/.claude/memory/promotion-log.md | tail -1
+(또는 날짜 기반: ### YYYY-MM-DD · {키워드})
+
+테이블 행 (error 섹션 끝에 append):
+| E{번호} | {오늘날짜} | {오늘날짜} | {키워드} | {한줄 요약} | 1 | ⏳ | |
+
+상세 섹션 (테이블 아래 append):
+### E{번호}. {키워드}
+**상황**: {20자+}
+**원인**: {20자+}
+**해결**: {20자+}
+**방지책**: {20자+}
+**규칙반영**: {파일명 또는 없음}
+**다음 감사 확인 기준**: {검증 지표}
+```
 
 ---
 
@@ -96,10 +125,10 @@
 
 | 문서 | 변경 |
 |------|------|
-| `CLAUDE.md` | "file-standards.md 자동 로드" 언급 제거, on-demand 포인터로 |
+| 전역 `CLAUDE.md` | "3단계+ 순차 작업 시 plan.md + progress.md 생성" 규칙 추가. on-demand 포인터 정리 |
 | `rules/file-standards.md` | frontmatter `load/always` → `load/on-demand` |
 | `rules/remote-session.md` | 동일, on-demand 전환 |
-| `promotion-log.md` | 파일 상단에 작성 템플릿 직접 추가 (inject hook 제거 보완) |
+| `promotion-log.md` | 상단 hooks 기반 설명 → scriptagent 기반으로 업데이트 |
 
 ---
 
@@ -109,6 +138,8 @@
 |-----------|------|
 | `2bfa902` | IDLE_PROMPT `^[>❯]\s*$` 수정 (STUCK 오탐 방지) |
 | `796fca4` | COMPRESSED 오탐 수정 (라인 시작 앵커) |
+| `0f0b9dc` | AGENT_DEAD 오탐 방지: 압축 후 flag + UI 패턴 추가 |
+| `9eaaf3a` | msg.sh 사용자 입력 중 전송 차단 + AGENT_DEAD 패턴 강화 |
 | settings.json PostCompact | `PSMUX_TARGET_SESSION` 체크 추가 (resume 오탐 방지) |
 
 ---
