@@ -5,7 +5,7 @@ SECRETARY_DIR="$(cd "$(dirname "$0")" && pwd)"
 CONFIG="$SECRETARY_DIR/.sonnet-config.json"
 PSMUX_PATH=$(jq -r '.psmux_path' "$CONFIG" 2>/dev/null)
 PSMUX="$PSMUX_PATH"
-INTERVAL=30  # 30초
+INTERVAL=15  # 15초
 
 TS_FILE="$SECRETARY_DIR/.self-wake-ts"
 STOP_FILE="$SECRETARY_DIR/.watchdog-stop"

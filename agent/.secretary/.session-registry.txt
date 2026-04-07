@@ -1,2 +1,3 @@
-btn-Obsidian|sonnet|C:\msys64\home\jsh86|2026-04-07T15:19:40+09:00|58e8e638-148d-4699-bc31-94d03c321cd4
-button|sonnet|D:\projects\button|2026-04-07T15:19:41+09:00|3b7e69ed-6d30-499d-ac2c-07311db91c12
+btn-button|sonnet|D:\projects\button|2026-04-08T00:50:07+09:00|31479d2e-d996-4249-ba5d-bb066a497417
+btn-vaultvoice|sonnet|D:\projects\vaultvoice|2026-04-08T00:50:10+09:00|e26c95f4-8bae-4623-aae5-437a3b174d20
+

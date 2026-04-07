@@ -44,12 +44,36 @@ PROJECT_NAME="$(basename "$PROJECT_DIR")"
 WIN_PROJECT_DIR=$(echo "$PROJECT_DIR" | sed 's|^/\([a-z]\)/|\1:/|; s|/|\\\\|g')
 WIN_PROJECT_DIR_SLASH=$(echo "$PROJECT_DIR" | sed 's|^/\([a-z]\)/|\1:/|')
 
-# role 파일
+# role 파일 (Supervisor가 작성하는 태스크 전용 파일)
 if [ -n "$ROLE_ARG" ]; then
   ROLE_FILE="$ROLE_ARG"
 else
   ROLE_FILE="$PROJECT_DIR/.harness/${SESSION}-role.md"
 fi
+
+# ── 프로토콜 파일 (고정, skills/ 보관) ──
+CLAUDE_DIR="/c/Users/jsh86/.claude"
+WF_ACTIVE="$PROJECT_DIR/.wf-active"
+
+# WF 타입 감지 (.wf-active → {"type":"lightweight"} 또는 {"type":"harness"})
+WF_TYPE="harness"
+if [ -f "$WF_ACTIVE" ]; then
+  if command -v jq &>/dev/null; then
+    WF_TYPE=$(jq -r '.type // "harness"' "$WF_ACTIVE" 2>/dev/null)
+  else
+    WF_TYPE=$(grep -o '"type"[[:space:]]*:[[:space:]]*"[^"]*"' "$WF_ACTIVE" | sed 's/.*"type"[[:space:]]*:[[:space:]]*"//;s/"$//')
+    [ -z "$WF_TYPE" ] && WF_TYPE="harness"
+  fi
+fi
+
+# 프로토콜 파일 매핑 (역할별, WF 타입별)
+case "$SESSION" in
+  worker)    PROTOCOL_FILE="$CLAUDE_DIR/skills/${WF_TYPE}-wf/protocols/worker.md";;
+  verifier)  PROTOCOL_FILE="$CLAUDE_DIR/skills/harness-wf/protocols/verifier.md";;
+  healer)    PROTOCOL_FILE="$CLAUDE_DIR/skills/harness-wf/protocols/healer.md";;
+  strategic) PROTOCOL_FILE="$CLAUDE_DIR/skills/harness-wf/protocols/sr.md";;
+  *)         PROTOCOL_FILE="";;
+esac
 
 # ACK 파일 (공유, 병렬 안전 — append는 atomic)
 HARNESS_DIR="$PROJECT_DIR/.harness"
@@ -141,7 +165,10 @@ if [ "$READY" = false ]; then
   echo "[spawn:${SESSION}] WARNING: bypasspermission not detected after 90s" >&2
 fi
 
-# ── 5. Trust Enter ──
+# ── 5. Trust: select "Yes, I accept" (option 2) — arrow Down then Enter ──
+sleep 2
+"$PSMUX" send-keys -t "$SESSION" Down
+sleep 1
 "$PSMUX" send-keys -t "$SESSION" Enter
 sleep 3
 
@@ -179,13 +206,41 @@ if [ "$ACK_OK" = false ]; then
   exit 2
 fi
 
-# ── 8. 역할 주입 ──
-if [ -f "$ROLE_FILE" ]; then
-  sleep 2
-  "$PSMUX" send-keys -t "$SESSION" "Read ${ROLE_FILE} and follow all instructions inside. This is your role assignment for the current harness workflow." Enter
-  echo "[spawn:${SESSION}] Role injected: ${ROLE_FILE}"
-else
-  echo "[spawn:${SESSION}] No role file at ${ROLE_FILE} — skipping"
+# ── 8. 프로토콜 + 태스크 조립 → 역할 주입 ──
+ASSEMBLED_FILE="$HARNESS_DIR/${SESSION}-assembled.md"
+INJECT_FILE=""
+
+if [ -n "$PROTOCOL_FILE" ] && [ -f "$PROTOCOL_FILE" ]; then
+  # 프로토콜 복사 + {SUPERVISOR_SESSION} 치환
+  sed "s/{SUPERVISOR_SESSION}/$SUPERVISOR_SESSION/g" "$PROTOCOL_FILE" > "$ASSEMBLED_FILE"
+
+  # 태스크 파일 있으면 append
+  if [ -f "$ROLE_FILE" ]; then
+    {
+      echo ""
+      echo "---"
+      echo ""
+      echo "# Task (Supervisor 지시)"
+      echo ""
+      cat "$ROLE_FILE"
+    } >> "$ASSEMBLED_FILE"
+    echo "[spawn:${SESSION}] Assembled: protocol(${WF_TYPE}) + task(${ROLE_FILE})"
+  else
+    echo "[spawn:${SESSION}] Assembled: protocol only (no task file)"
+  fi
+  INJECT_FILE="$ASSEMBLED_FILE"
+elif [ -f "$ROLE_FILE" ]; then
+  # 프로토콜 없으면 기존 방식 (role 파일만)
+  INJECT_FILE="$ROLE_FILE"
+  echo "[spawn:${SESSION}] Legacy mode: role file only (no protocol)"
 fi
 
-echo "[spawn:${SESSION}] DONE (session=${SESSION}, model=${MODEL}, ack=OK)"
+if [ -n "$INJECT_FILE" ] && [ -f "$INJECT_FILE" ]; then
+  sleep 2
+  "$PSMUX" send-keys -t "$SESSION" "Read ${INJECT_FILE} and follow all instructions inside. This is your role assignment." Enter
+  echo "[spawn:${SESSION}] Role injected: ${INJECT_FILE}"
+else
+  echo "[spawn:${SESSION}] No role/protocol file — skipping"
+fi
+
+echo "[spawn:${SESSION}] DONE (session=${SESSION}, model=${MODEL}, wf=${WF_TYPE}, ack=OK)"

@@ -519,7 +519,11 @@ print(len([f for f in files if os.path.getmtime(f) > ts]))
   elif REMAIN=$(echo "$BLOCK" | grep "^AUTO_COMPACT_REMAIN:" | awk '{print $2}'); \
        [ -n "$REMAIN" ] && [ "$REMAIN" != "NONE" ] && [ "${REMAIN}" -le 20 ] && [ "${REMAIN}" -gt 0 ] 2>/dev/null; then
     # 우선순위 2.5: "X% until auto-compact" 1~20% → 메모리 저장 요청 (0% = 압축 진행 중, 스킵)
-    if check_dedup "$S" "context_near_limit"; then
+    # "완료" 감지: 세션이 작업 완료 상태면 메모리 저장 불필요 — 스킵
+    _LAST_OUT=$("$PSMUX" capture-pane -p -S -30 -t "$S" 2>/dev/null | tail -15)
+    if echo "$_LAST_OUT" | grep -qE '완료|complete|finished|done|all.*(tasks|steps)'; then
+      log_event INFO "$S" "context_near_limit_skip" "remain=${REMAIN}% reason=completion_detected" "skip"
+    elif check_dedup "$S" "context_near_limit"; then
       CTX_WARN_FILE="$TMPDIR/ctx-warn-${S}.txt"
       TMPL="$SECRETARY_DIR/.messages/memory-save-template.md"
       echo "컨텍스트 압축까지 ${REMAIN}% 남았어. 당장 ${TMPL} 읽고 memory 파일에 저장해." > "$CTX_WARN_FILE"
@@ -642,50 +646,98 @@ print(len([f for f in files if os.path.getmtime(f) > ts]))
 
   fi
 
-  # Phase 2.5: 삽질 감지 — Fix-Fail 루프 (JSONL 기반, elif 체인과 독립)
-  # 같은 파일 Edit→Bash fail 3회+ = 삽질 확정 → 기존 모델별 분기 합류
+  # Phase 2.5: JSONL 기반 삽질/에러 감지 (elif 체인과 독립)
+  # detect-struggle.py exit: 1=fix-fail, 2=bash-retry (삽질) / 10-12 (에러)
+  # 삽질 → 2단계 넛지 (1차 자기정리, 2차 에스컬레이션)
+  # 에러 → 기존 에러 프로세스 합류 (Opus→self-verify, Sonnet→Opus 소환)
   S_SID=$(grep "^${S}|" "$REGISTRY" 2>/dev/null | cut -d'|' -f5)
   if [ -n "$S_SID" ] && [ "$STATUS" = "ACTIVE" ]; then
     S_JSONL=$(/usr/bin/find "$HOME/.claude/projects" -name "${S_SID}.jsonl" 2>/dev/null | head -1)
     if [ -n "$S_JSONL" ] && [ -f "$S_JSONL" ]; then
       STRUGGLE_OUT=$("$PYTHON" "$SECRETARY_DIR/.scripts/detect-struggle.py" "$S_JSONL" 10 2>/dev/null)
       STRUGGLE_EXIT=$?
-      if [ "$STRUGGLE_EXIT" -eq 1 ] && check_dedup "$S" "struggle_fix_fail"; then
-        # 동적 메시지 생성 (파일명, 횟수 포함)
-        STRUGGLE_FILE=$(echo "$STRUGGLE_OUT" | "$PYTHON" -c "import sys,json; d=json.load(sys.stdin); print(d.get('file','?'))" 2>/dev/null)
-        STRUGGLE_CYCLES=$(echo "$STRUGGLE_OUT" | "$PYTHON" -c "import sys,json; d=json.load(sys.stdin); print(d.get('cycles',3))" 2>/dev/null)
-        STRUGGLE_MSG=$(cat <<EOFMSG
-${STRUGGLE_FILE} 수정 → 테스트 실패를 ${STRUGGLE_CYCLES}회 반복 중.
+
+      if [ "$STRUGGLE_EXIT" -ge 1 ] && [ "$STRUGGLE_EXIT" -le 2 ]; then
+        # ── 삽질 감지 (exit 1: fix-fail, exit 2: bash-retry) ──
+        STRUGGLE_TYPE=$(echo "$STRUGGLE_OUT" | "$PYTHON" -c "import sys,json; d=json.load(sys.stdin); print(d.get('type','unknown'))" 2>/dev/null)
+        STRUGGLE_DEDUP_KEY="struggle_${STRUGGLE_TYPE}"
+        STRUGGLE_ESCALATE_KEY="struggle_escalate_${STRUGGLE_TYPE}"
+
+        if check_dedup "$S" "$STRUGGLE_DEDUP_KEY"; then
+          # ── 1차: 동적 넛지 (Opus/Sonnet 동일) ──
+          if [ "$STRUGGLE_EXIT" -eq 1 ]; then
+            STRUGGLE_FILE=$(echo "$STRUGGLE_OUT" | "$PYTHON" -c "import sys,json; d=json.load(sys.stdin); print(d.get('file','?'))" 2>/dev/null)
+            STRUGGLE_COUNT=$(echo "$STRUGGLE_OUT" | "$PYTHON" -c "import sys,json; d=json.load(sys.stdin); print(d.get('cycles',3))" 2>/dev/null)
+            STRUGGLE_MSG="${STRUGGLE_FILE} 수정 → 실패를 ${STRUGGLE_COUNT}회 반복 중.
 
 다음 수정 전에 먼저 정리해:
 1. 마지막 에러 메시지가 정확히 뭐야?
-2. ${STRUGGLE_CYCLES}번 시도에서 각각 뭘 바꿨고 왜 안 됐어?
+2. ${STRUGGLE_COUNT}번 시도에서 각각 뭘 바꿨고 왜 안 됐어?
 3. 근본 원인이 네가 고치는 곳이 아니라 다른 데 있을 수 있어?
 
-정리 후에도 모르겠으면 현재 상황을 그대로 보고해.
-EOFMSG
-)
-        log_event WARN "$S" "struggle_fix_fail" "$STRUGGLE_OUT" "exception_analysis"
-        SESSION_MODEL=$(grep "^${S}|" "$REGISTRY" | cut -d'|' -f2)
-        if echo "$SESSION_MODEL" | grep -qi "opus"; then
-          # Opus → 구체적 삽질 컨텍스트 + self-verify 절차
-          STRUGGLE_TMPFILE="$TMPDIR/struggle-msg-${S}.txt"
-          printf '%s\n\n' "$STRUGGLE_MSG" > "$STRUGGLE_TMPFILE"
-          cat "$SECRETARY_DIR/.messages/self-verify-opus.txt" >> "$STRUGGLE_TMPFILE"
-          bash "$SECRETARY_DIR/.scripts/msg.sh" "$S" "$STRUGGLE_TMPFILE"
-          rm -f "$STRUGGLE_TMPFILE"
-          log_event WARN "$S" "opus_struggle_self_verify" "file=$STRUGGLE_FILE cycles=$STRUGGLE_CYCLES" "self-verify"
-        elif [ -f "$SECRETARY_DIR/.sonnet-enabled" ]; then
-          # Sonnet → 삽질 컨텍스트 포함 Opus 소환
-          SNAP_CTX=$(cat "$SNAP_DIR/$S/snap_$(cat "$SNAP_DIR/$S/.idx" 2>/dev/null || echo 0).txt" 2>/dev/null | tail -30)
-          queue_sonnet_task "exception_analysis" "$S" "struggle: file=$STRUGGLE_FILE cycles=$STRUGGLE_CYCLES context=$SNAP_CTX"
-          log_event WARN "$S" "sonnet_struggle_escalation" "file=$STRUGGLE_FILE cycles=$STRUGGLE_CYCLES" "opus-escalation"
-        else
-          # Sonnet disabled → 넛지 메시지만
+정리 후에도 모르겠으면 현재 상황을 그대로 보고해."
+          else
+            RETRY_CMD=$(echo "$STRUGGLE_OUT" | "$PYTHON" -c "import sys,json; d=json.load(sys.stdin); print(d.get('command','?'))" 2>/dev/null)
+            RETRY_COUNT=$(echo "$STRUGGLE_OUT" | "$PYTHON" -c "import sys,json; d=json.load(sys.stdin); print(d.get('count',3))" 2>/dev/null)
+            STRUGGLE_MSG="같은 명령을 ${RETRY_COUNT}회 반복 실행 중: ${RETRY_CMD}
+
+수정 없이 재실행해도 결과는 같아. 멈추고 정리해:
+1. 왜 이 명령이 실패하는지 에러 메시지를 다시 읽어봐.
+2. 환경/경로/의존성 문제는 아닌지 확인해.
+3. 접근 방식을 바꿔야 할 수 있어.
+
+모르겠으면 현재 상황을 그대로 보고해."
+          fi
+
           STRUGGLE_TMPFILE="$TMPDIR/struggle-msg-${S}.txt"
           echo "$STRUGGLE_MSG" > "$STRUGGLE_TMPFILE"
           bash "$SECRETARY_DIR/.scripts/msg.sh" "$S" "$STRUGGLE_TMPFILE"
           rm -f "$STRUGGLE_TMPFILE"
+          log_event WARN "$S" "$STRUGGLE_DEDUP_KEY" "$STRUGGLE_OUT" "nudge"
+
+        elif check_dedup "$S" "$STRUGGLE_ESCALATE_KEY"; then
+          # ── 2차: 에스컬레이션 (1차 넛지 후에도 계속 삽질) ──
+          SESSION_MODEL=$(grep "^${S}|" "$REGISTRY" | cut -d'|' -f2)
+          if echo "$SESSION_MODEL" | grep -qi "opus"; then
+            # Opus → specialist 소환 또는 Telegram 알림
+            if [ -f "$SECRETARY_DIR/.sonnet-enabled" ]; then
+              SNAP_CTX=$(cat "$SNAP_DIR/$S/snap_$(cat "$SNAP_DIR/$S/.idx" 2>/dev/null || echo 0).txt" 2>/dev/null | tail -30)
+              queue_sonnet_task "struggle_specialist" "$S" "persistent_struggle type=$STRUGGLE_TYPE detail=$STRUGGLE_OUT context=$SNAP_CTX"
+              log_event WARN "$S" "opus_struggle_specialist" "$STRUGGLE_OUT" "specialist"
+            else
+              bash "$SECRETARY_DIR/.scripts/msg.sh" "$S" "TELEGRAM" "삽질 지속: ${S} — ${STRUGGLE_OUT}"
+              log_event WARN "$S" "opus_struggle_telegram" "$STRUGGLE_OUT" "telegram"
+            fi
+          else
+            # Sonnet → Opus 분석 세션 소환
+            if [ -f "$SECRETARY_DIR/.sonnet-enabled" ]; then
+              SNAP_CTX=$(cat "$SNAP_DIR/$S/snap_$(cat "$SNAP_DIR/$S/.idx" 2>/dev/null || echo 0).txt" 2>/dev/null | tail -30)
+              queue_sonnet_task "struggle_analysis" "$S" "sonnet_struggling type=$STRUGGLE_TYPE detail=$STRUGGLE_OUT context=$SNAP_CTX"
+              log_event WARN "$S" "sonnet_struggle_opus_escalation" "$STRUGGLE_OUT" "opus-escalation"
+            else
+              bash "$SECRETARY_DIR/.scripts/msg.sh" "$S" "TELEGRAM" "삽질 지속: ${S} — ${STRUGGLE_OUT}"
+              log_event WARN "$S" "sonnet_struggle_telegram" "$STRUGGLE_OUT" "telegram"
+            fi
+          fi
+        fi
+
+      elif [ "$STRUGGLE_EXIT" -ge 10 ] && [ "$STRUGGLE_EXIT" -le 12 ]; then
+        # ── 에러 감지 (exit 10-12) → 기존 에러 프로세스 합류 ──
+        ERROR_TYPE=$(echo "$STRUGGLE_OUT" | "$PYTHON" -c "import sys,json; d=json.load(sys.stdin); print(d.get('type','unknown'))" 2>/dev/null)
+        if check_dedup "$S" "jsonl_error_${ERROR_TYPE}"; then
+          log_event ERROR "$S" "jsonl_error_${ERROR_TYPE}" "$STRUGGLE_OUT" "exception_analysis"
+          SESSION_MODEL=$(grep "^${S}|" "$REGISTRY" | cut -d'|' -f2)
+          if echo "$SESSION_MODEL" | grep -qi "opus"; then
+            # Opus → self-verify
+            SELF_VERIFY="$SECRETARY_DIR/.messages/self-verify-opus.txt"
+            bash "$SECRETARY_DIR/.scripts/msg.sh" "$S" "$SELF_VERIFY"
+            log_event WARN "$S" "opus_jsonl_error_self_verify" "$STRUGGLE_OUT" "self-verify"
+          elif [ -f "$SECRETARY_DIR/.sonnet-enabled" ]; then
+            # Sonnet → Opus 소환
+            SNAP_CTX=$(cat "$SNAP_DIR/$S/snap_$(cat "$SNAP_DIR/$S/.idx" 2>/dev/null || echo 0).txt" 2>/dev/null | tail -30)
+            queue_sonnet_task "exception_analysis" "$S" "jsonl_error type=$ERROR_TYPE detail=$STRUGGLE_OUT context=$SNAP_CTX"
+            log_event WARN "$S" "sonnet_jsonl_error_escalation" "$STRUGGLE_OUT" "opus-escalation"
+          fi
         fi
       fi
     fi
