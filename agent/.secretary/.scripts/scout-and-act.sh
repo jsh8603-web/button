@@ -203,12 +203,6 @@ fi
     PCT=$(echo "$CAP" | grep -oP '\d+%' | tail -1)
     echo "CONTEXT_PCT: ${PCT:-UNKNOWN}"
 
-    if echo "$CAP" | grep -qP '────.*────'; then
-      echo "UNSENT_MSG: YES"
-    else
-      echo "UNSENT_MSG: NO"
-    fi
-
     if echo "$LAST_LINES" | grep -qE '(진행할까요|번호를 입력|어떤 방향|선택해)'; then
       echo "WAITING_FOR_USER: YES"
     else
@@ -310,12 +304,6 @@ for S in $SESSIONS; do
         log_event WARN "$S" "guard_unlock_failed" "deny=$DENY_COUNT" "guard-unlock-fail"
       fi
     fi
-    HANDLED_COUNT=$((HANDLED_COUNT + 1))
-
-  elif echo "$BLOCK" | grep -q "UNSENT_MSG: YES"; then
-    # 우선순위 4: 미전송 메시지 → Enter
-    log_event INFO "$S" "unsent_msg" "" "send_enter"
-    "$PSMUX" send-keys -t "$S" Enter
     HANDLED_COUNT=$((HANDLED_COUNT + 1))
 
   elif echo "$BLOCK" | grep -q "REPEAT_ERROR: FOUND"; then
