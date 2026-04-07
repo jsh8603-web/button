@@ -85,7 +85,7 @@ def recent_unique(lst, n):
             break
     return result
 
-print('## Session Resume (secretary — compression recovery)')
+print('## Session Resume (compression recovery)')
 print()
 
 # 1. 마지막 사용자 요청 (Claude Code 요약과 중복이지만 가장 중요 — 유지)
@@ -132,7 +132,7 @@ if agents:
 PYEOF
 else
   # JSONL not found — generate minimal resume header
-  echo "## Session Resume (secretary — compression recovery, no JSONL)" > "$RESUME_FILE"
+  echo "## Session Resume (compression recovery, no JSONL)" > "$RESUME_FILE"
   echo "" >> "$RESUME_FILE"
 fi
 

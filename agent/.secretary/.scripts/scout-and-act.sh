@@ -506,8 +506,8 @@ print(len([f for f in files if os.path.getmtime(f) > ts]))
     HANDLED_COUNT=$((HANDLED_COUNT + 1))
 
   elif REMAIN=$(echo "$BLOCK" | grep "^AUTO_COMPACT_REMAIN:" | awk '{print $2}'); \
-       [ -n "$REMAIN" ] && [ "$REMAIN" != "NONE" ] && [ "${REMAIN}" -le 20 ] 2>/dev/null; then
-    # 우선순위 2.5: "X% until auto-compact" 20% 이하 → 메모리 저장 요청
+       [ -n "$REMAIN" ] && [ "$REMAIN" != "NONE" ] && [ "${REMAIN}" -le 20 ] && [ "${REMAIN}" -gt 0 ] 2>/dev/null; then
+    # 우선순위 2.5: "X% until auto-compact" 1~20% → 메모리 저장 요청 (0% = 압축 진행 중, 스킵)
     if check_dedup "$S" "context_near_limit"; then
       CTX_WARN_FILE="$TMPDIR/ctx-warn-${S}.txt"
       TMPL="$SECRETARY_DIR/.messages/memory-save-template.md"
