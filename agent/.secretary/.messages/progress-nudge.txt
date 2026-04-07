@@ -1,4 +1,4 @@
-plan.md는 있는데 progress.md가 없어. 작업 진행하면서 progress.md 만들어줘.
+plan.md는 있는데 progress.md가 없어. plan.md와 같은 디렉토리(프로젝트 루트)에 만들어줘.
 
 형식:
 ## Progress
