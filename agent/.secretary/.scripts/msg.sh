@@ -60,16 +60,6 @@ if echo "$_CAP_CHECK" | grep -qE '^[>❯]\s+\S'; then
   exit 0
 fi
 
-# 사용자가 터미널 외 앱 사용 중이면 전송 차단 (Windows Terminal 포커스 방지)
-# idle < 30초 = 다른 앱에서 활발히 작업 중 → send-keys가 창을 앞으로 끌어올림
-_IDLE_SEC=$(powershell.exe -NoProfile -File "$SCRIPT_DIR/get-idle-time.ps1" 2>/dev/null | tr -d '\r')
-_IDLE_SEC=$(echo "$_IDLE_SEC" | grep -oE '^[0-9]+$' || echo 999)
-if [ "${_IDLE_SEC:-999}" -lt 30 ]; then
-  mkdir -p "$DEAD_LETTER_DIR"
-  cp "$MSG_FILE" "$DEAD_LETTER_DIR/$(date +%s)-deferred-${SESSION}.txt"
-  echo "MSG_DEFERRED: user active (idle=${_IDLE_SEC}s) — saved to dead-letter" >&2
-  exit 0
-fi
 
 # [INFO] 또는 접두사 없음 → 세션 직접 전송
 "$PSMUX" send-keys -t "$SESSION" "Read $(realpath "$MSG_FILE") 의 내용을 참고해." Enter

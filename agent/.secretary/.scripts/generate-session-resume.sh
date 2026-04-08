@@ -24,7 +24,7 @@ RESUME_FILE="$TMPDIR/session-resume-${SESSION}.txt"
 SID=$(grep "^${SESSION}|" "$REGISTRY" | cut -d'|' -f5)
 DIR=$(grep "^${SESSION}|" "$REGISTRY" | cut -d'|' -f3)
 
-JSONL_DIR="$JSONL_BASE/$(echo "$DIR" | sed 's|:|--|; s|/|--|g; s|\\|--|g')"
+JSONL_DIR="$JSONL_BASE/$("$PYTHON" -c "import sys; print(sys.argv[1].replace(':','-').replace(chr(92),'-').replace('/','-'))" "$DIR")"
 JSONL_FILE="$JSONL_DIR/${SID}.jsonl"
 if [ -f "$JSONL_FILE" ]; then
   HAS_JSONL=1
@@ -179,8 +179,8 @@ fi
 # 3. plan.md 전체 체크박스 상태 (완료+미완료 카운트 + 전체 항목)
 PLAN_FILE="$DIR/plan.md"
 if [ -f "$PLAN_FILE" ]; then
-  DONE=$(grep -c '^\- \[x\]' "$PLAN_FILE" 2>/dev/null || echo 0)
-  TODO=$(grep -c '^\- \[ \]' "$PLAN_FILE" 2>/dev/null || echo 0)
+  DONE=$(grep -c '^\- \[x\]' "$PLAN_FILE" 2>/dev/null | tr -d '\r' || echo 0)
+  TODO=$(grep -c '^\- \[ \]' "$PLAN_FILE" 2>/dev/null | tr -d '\r' || echo 0)
   TOTAL=$((DONE + TODO))
   echo "### Plan Checkpoint (${DONE}/${TOTAL} done)" >> "$RESUME_FILE"
   grep '^\- \[' "$PLAN_FILE" | head -25 >> "$RESUME_FILE"
@@ -189,8 +189,8 @@ fi
 
 PROGRESS_FILE="$DIR/progress.md"
 if [ -f "$PROGRESS_FILE" ]; then
-  P_DONE=$(grep -c '^\- \[x\]' "$PROGRESS_FILE" 2>/dev/null || echo 0)
-  P_TODO=$(grep -c '^\- \[ \]' "$PROGRESS_FILE" 2>/dev/null || echo 0)
+  P_DONE=$(grep -c '^\- \[x\]' "$PROGRESS_FILE" 2>/dev/null | tr -d '\r' || echo 0)
+  P_TODO=$(grep -c '^\- \[ \]' "$PROGRESS_FILE" 2>/dev/null | tr -d '\r' || echo 0)
   P_TOTAL=$((P_DONE + P_TODO))
   echo "### Progress Checkpoint (${P_DONE}/${P_TOTAL} done)" >> "$RESUME_FILE"
   grep '^\- \[' "$PROGRESS_FILE" | head -25 >> "$RESUME_FILE"
@@ -219,5 +219,33 @@ git -C "$DIR" diff --cached --unified=2 2>/dev/null | head -80 >> "$RESUME_FILE"
 echo "" >> "$RESUME_FILE"
 echo "### Active psmux Sessions" >> "$RESUME_FILE"
 "$PSMUX_PATH" ls 2>/dev/null | cut -d: -f1 >> "$RESUME_FILE" || echo "(none)" >> "$RESUME_FILE"
+
+# 7. MEMORY.md (Claude Code 요약에 없는 고유 정보)
+MEMORY_FILE="$JSONL_DIR/memory/MEMORY.md"
+if [ -f "$MEMORY_FILE" ]; then
+  echo "" >> "$RESUME_FILE"
+  echo "### Project Memory (MEMORY.md)" >> "$RESUME_FILE"
+  head -40 "$MEMORY_FILE" >> "$RESUME_FILE"
+fi
+
+# 8. 대화 턴 수 (세션 수명 감각)
+if [ "$HAS_JSONL" = "1" ]; then
+  TURN_COUNT=$(wc -l < "$JSONL_FILE" 2>/dev/null || echo 0)
+  echo "" >> "$RESUME_FILE"
+  echo "### Session Stats" >> "$RESUME_FILE"
+  echo "JSONL lines: $TURN_COUNT" >> "$RESUME_FILE"
+fi
+
+# 9. 미커밋 신규 파일 head (git diff로는 안 보이는 untracked 파일)
+UNTRACKED=$(git -C "$DIR" ls-files --others --exclude-standard 2>/dev/null | grep -E '\.(js|ts|tsx|sh|py|md|json)$' | head -5)
+if [ -n "$UNTRACKED" ]; then
+  echo "" >> "$RESUME_FILE"
+  echo "### Untracked Files (head 20 lines each)" >> "$RESUME_FILE"
+  echo "$UNTRACKED" | while read -r UF; do
+    echo "--- $UF ---" >> "$RESUME_FILE"
+    head -20 "$DIR/$UF" >> "$RESUME_FILE" 2>/dev/null
+    echo "" >> "$RESUME_FILE"
+  done
+fi
 
 echo "$RESUME_FILE"

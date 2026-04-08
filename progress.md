@@ -1,14 +1,14 @@
-## Progress — Hook/Guard Diet + 문서 정리 (2026-04-07~08)
+## Progress — Gemini API 모델 전환 + 폴백 체인
 
-- [x] Step 1: generate-session-resume.sh progress.md 섹션 추가
-- [x] Step 2: settings.json 다이어트 (pending-promotion 외 REMOVE 항목 제거)
-- [x] Step 3: scout-and-act.sh 신규 트리거 (promo remind + progress nudge + simplify)
-- [x] Step 4: docs archive 9개 이동
-- [x] Step 5: hook-guard-review.md 새 버전 (slim SSOT)
-- [x] Step 6: hook-architecture-guide.md 새 버전
-- [x] Step 7: hook-guard-test-plan.md 새 버전 (docs/verification/)
-- [x] Step 8: self-improvement-loop.md 업데이트
-- [x] Step 9: OPERATIONS_INDEX.md + audit-wf skill.md 업데이트
-- [x] Step 10: CLAUDE.md 업데이트 (pending-promotion 제거, progress.md 위치 명시)
-- [x] Step 11: secretary .messages/ 파일 현행화 (deadlock/revive/constitution/self-verify)
-- [x] Step 12: btn-Obsidian 감사 wf 브리핑 전송
+- [x] Phase 1: Babyplace — 8단 폴백 체인
+- [x] Phase 2: VaultVoice — 8단 폴백 + Pro 축소
+- [x] Phase 3: gemini-search.js — 모델 변경
+- [x] Phase 4: Gemini CLI — 환경변수
+- [x] Phase 5: Slides-Grab — Imagen 4 카운터 + 4단 폴백
+- [x] Phase 6: 키 레퍼런스 업데이트
+- [x] 검증: gemini-search.js 테스트 + Babyplace tsc 빌드
+- [ ] .env.local 키 확인 (Babyplace)
+- [ ] .env 에 GEMINI_FALLBACK_KEY + GEMINI_PRO_KEY 추가 (VaultVoice)
+- [ ] .env 에 SLIDES_GEMINI_PRO_KEY 확인 (Slides-Grab)
+- [ ] 메모리 업데이트
+- [ ] VaultVoice/Slides-Grab .env 키 설정 (Pi/로컬)
