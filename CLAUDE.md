@@ -158,27 +158,22 @@ cd agent && node server.js &
 
 ## 비서 시스템 (Secretary)
 
-`proj` action(claude runner) 실행 시 `server.js`가 자동으로 `secretary` psmux 세션을 스폰하고 wt.exe 탭을 열어 사용자에게 표시한다.
+`server.js`가 시작 시 `secretary.js` JS 모니터를 인라인으로 구동한다. bash 스크립트 불필요.
 
 ```
-proj action (claude) → killUnprotectedSessions + 에디터 오픈
-                     → psmux secretary 세션 생성 (이미 존재 시 wt.exe만 열기)
-                     → secretary-loop.sh 실행 (3분 주기)
-                       ↓ scout-and-act.sh 매 사이클
-                         Phase 1: psmux 세션 상태 수집 → .scout-report.txt
-                         Phase 2: elif 체인 (사망/압축/교착/미전송/삽질/부재) 처리
-                         Phase 3: 파일 충돌 감지
-                         Phase 4: git diff 브로드캐스트
-                         Phase 4.5: JSONL 감사수집 + 의존성 체크 + rate limit 조율
-                         Phase 4.6: 미등록 psmux 세션 자동 등록 (harness-wf 세션)
-                         S-1: 미처리 이상 → Sonnet 예외분석 (또는 Telegram 폴백)
-                         S-2: 5사이클 중 3+ 새 에러 → Sonnet 의미적 분석
-                         Phase 5: 주간 리마인더 + audit-log rotation
+server.js 시작 → startSecretary(deps)
+  15s 사이클: screen scraping (stuck/context/memory/rate-limit/conflict/presence)
+  60s 사이클: circular-work / git 연동 / 에스컬레이션 / struggle / guard deadlock
+              auto-register / WF completion / promo nudge / Telegram agg
+  300s 사이클: JSONL audit / WF orphan cleanup / weekly audit / log rotation
+              dedup GC / solution cache reload
+SIGTERM → stopSecretary() → graceful exit
 ```
 
 **WF 충돌 방지**: `.wf-active` 존재 시 `worker/verifier/healer/strategic` 세션을 모니터링에서 제외.
-**Heartbeat**: server.js 5분마다 `.self-wake-ts` 확인 → 6분+ stale 시 루프 자동 재시작.
-**JSONL 감사**: 등록 세션(Phase 1) + 서브에이전트 자동 탐지(Phase 2) → `~/.claude/audit-log/YYYY-MM-DD.jsonl`.
+**JSONL 감사**: 등록 세션 + 서브에이전트 자동 탐지 → `~/.claude/audit-log/YYYY-MM-DD.jsonl` (JS-native, Python 불필요).
+**Promotion-log 넛지**: 에러/커밋/WF종료/docs 감지 시 4개 트리거로 자동 넛지.
+**bash 비서 스크립트**: `agent/.secretary/.scripts/` — 참조용 보존, 비활성.
 
 ## Critical Rules
 - Agent Bearer 토큰 = `AGENT_SECRET` (Pi↔Agent 인증)

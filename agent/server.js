@@ -25,6 +25,7 @@ const AGENT_SECRET = process.env.AGENT_SECRET;
 const PI_HOST = process.env.PI_HOST || '192.168.219.125';
 const PI_PORT = parseInt(process.env.PI_PORT || '7777', 10);
 const telegram = require('./telegram');
+const { startSecretary, stopSecretary } = require('./secretary');
 
 // Windows path → MSYS path (e.g. D:\projects → /d/projects)
 const toMsys = (p) => p.replace(/\\/g, '/').replace(/^([A-Z]):/i, (_, d) => `/${d.toLowerCase()}`);
@@ -1683,46 +1684,9 @@ function openProjectInEditor(name, runner = 'claude') {
       if (err) console.error('[proj] Maximize error:', err.message);
     });
 
-    // Start secretary session (claude runner only)
-    const secretaryDisabled = fs.existsSync(path.join(__dirname, '.secretary', '.secretary-disabled'));
-    if (!isGeminiProj && !secretaryDisabled) {
-      const secretaryDir = path.join(__dirname, '.secretary');
-      const loopScriptMsys = toMsys(path.join(secretaryDir, 'secretary-loop.sh'));
-      const secretarySession = 'secretary';
-
-      // Keep agent_secret in sonnet-config.json up to date
-      const cfgPath = path.join(secretaryDir, '.sonnet-config.json');
-      try {
-        const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
-        cfg.agent_secret = AGENT_SECRET || '';
-        fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2));
-      } catch (e) { console.error('[secretary] config update error:', e.message); }
-
-      // Ensure .sonnet-enabled exists (activates S-1/S-2 Sonnet triggers)
-      try { fs.writeFileSync(path.join(secretaryDir, '.sonnet-enabled'), '', { flag: 'a' }); } catch {}
-
-      // If session already exists, just open wt.exe to show it
-      exec(`"${PSMUX_BIN}" has-session -t ${secretarySession}`, (hasErr) => {
-        if (!hasErr) {
-          console.log('[secretary] session already running, opening wt.exe');
-          openSecretaryWindow();
-          return;
-        }
-        // Create new psmux session for secretary loop
-        const winDir = __dirname.replace(/\//g, '\\');
-        exec(`"${PSMUX_BIN}" new-session -d -s ${secretarySession} -c "${winDir}" -- "${BASH_PATH}" -l`, (err) => {
-          if (err) return console.error('[secretary] session create error:', err.message);
-          setTimeout(() => {
-            exec(`"${PSMUX_BIN}" send-keys -t ${secretarySession} 'bash ${loopScriptMsys}' Enter`, (err) => {
-              if (err) console.error('[secretary] loop start error:', err.message);
-              else console.log('[secretary] loop started in psmux session: ' + secretarySession);
-            });
-          }, 1500);
-          // Open visible wt.exe window so user can monitor secretary activity
-          openSecretaryWindow();
-        });
-      });
-    }
+    // [Phase 7 정리 전 — bash secretary 스폰 주석 처리, JS secretary.js가 대체]
+    // const secretaryDisabled = fs.existsSync(path.join(__dirname, '.secretary', '.secretary-disabled'));
+    // if (!isGeminiProj && !secretaryDisabled) { ... bash secretary spawn ... }
   }, 5000);
 }
 
@@ -2126,20 +2090,19 @@ app.listen(PORT, async () => {
   startTaskRunner();
   startRemoteControlWatchdog();
 
-  // Helper: open secretary WT window only if no terminal is attached (psmux check)
-  const SECRETARY_WT_SCRIPT = path.join(__dirname, 'open-secretary-wt.ps1');
-  function openSecretaryWindow() {
-    // Check if a terminal is already attached to the secretary session
-    exec(`"${PSMUX_BIN}" display-message -p -t secretary "#{session_attached}"`, { timeout: EXEC_TIMEOUT }, (err, stdout) => {
-      if (err) return; // session doesn't exist yet
-      if ((stdout || '').trim() !== '0') return; // already attached, skip
-      const psmuxWin = PSMUX_BIN.replace(/\//g, '\\');
-      exec(`powershell.exe -WindowStyle Hidden -ExecutionPolicy Bypass -File "${SECRETARY_WT_SCRIPT}" -PsmuxBin "${psmuxWin}"`, (err2) => {
-        if (err2) console.error('[secretary] wt.exe open error:', err2.message);
-        else console.log('[secretary] wt.exe opened (minimized)');
-      });
-    });
-  }
+  // [Phase 7 정리 — bash secretary openSecretaryWindow 주석 처리, JS secretary.js가 대체]
+  // const SECRETARY_WT_SCRIPT = path.join(__dirname, 'open-secretary-wt.ps1');
+  // function openSecretaryWindow() {
+  //   exec(`"${PSMUX_BIN}" display-message -p -t secretary "#{session_attached}"`, { timeout: EXEC_TIMEOUT }, (err, stdout) => {
+  //     if (err) return;
+  //     if ((stdout || '').trim() !== '0') return;
+  //     const psmuxWin = PSMUX_BIN.replace(/\//g, '\\');
+  //     exec(`powershell.exe -WindowStyle Hidden -ExecutionPolicy Bypass -File "${SECRETARY_WT_SCRIPT}" -PsmuxBin "${psmuxWin}"`, (err2) => {
+  //       if (err2) console.error('[secretary] wt.exe open error:', err2.message);
+  //       else console.log('[secretary] wt.exe opened (minimized)');
+  //     });
+  //   });
+  // }
 
   // --- Session heartbeat: revive registered btn-* sessions ---
   // Runs every 60s. Checks registry entries against live psmux sessions.
@@ -2264,60 +2227,25 @@ app.listen(PORT, async () => {
     }
   }, SESSION_HB_INTERVAL);
 
-  // Secretary heartbeat — revive session+loop if dead or stale
-  const SECRETARY_TS_FILE = path.join(__dirname, '.secretary', '.self-wake-ts');
-  const SECRETARY_LOOP_STALE_MS = 3 * 60 * 1000;
-  const secretaryLoopScript = toMsys(path.join(__dirname, '.secretary', 'secretary-loop.sh'));
-  const secretaryDir = path.join(__dirname, '.secretary');
-  const EXEC_TIMEOUT = 10_000; // 10s timeout for all psmux exec calls
-  const createSecretarySession = (cb) => {
-    const winDir = secretaryDir.replace(/\//g, '\\');
-    exec(`"${PSMUX_BIN}" new-session -d -s secretary -c "${winDir}" -- "${BASH_PATH}" -l`, { timeout: EXEC_TIMEOUT }, (err) => {
-      if (err) { console.error('[secretary] heartbeat session create error:', err.message); return cb && cb(err); }
-      setTimeout(() => {
-        // Kill any leftover process and restart loop cleanly
-        exec(`"${PSMUX_BIN}" send-keys -t secretary C-c`, { timeout: EXEC_TIMEOUT }, () => {
-          setTimeout(() => {
-            exec(`"${PSMUX_BIN}" send-keys -t secretary 'bash ${secretaryLoopScript}' Enter`, { timeout: EXEC_TIMEOUT }, (err2) => {
-              if (err2) console.error('[secretary] heartbeat restart error:', err2.message);
-              else { console.log('[secretary] heartbeat: loop restarted'); openSecretaryWindow(); }
-              cb && cb(err2);
-            });
-          }, 500);
-        });
-      }, 1000);
-    });
-  };
-  setInterval(() => {
-    // .secretary-disabled flag → skip heartbeat entirely
-    const disabledFlag = path.join(secretaryDir, '.secretary-disabled');
-    if (fs.existsSync(disabledFlag)) return;
+  // [Phase 7 정리 전 — bash secretary heartbeat 주석 처리, JS secretary.js가 대체]
+  // const SECRETARY_TS_FILE = ...; setInterval(...); // bash heartbeat removed
 
-    let tsMs = 0;
-    try {
-      const parsed = parseInt(fs.readFileSync(SECRETARY_TS_FILE, 'utf8').trim(), 10);
-      if (!isNaN(parsed)) tsMs = parsed;
-    } catch {}
-    const staleness = Date.now() - tsMs;
-    exec(`"${PSMUX_BIN}" has-session -t secretary`, { timeout: EXEC_TIMEOUT }, (hasErr) => {
-      if (hasErr) {
-        // Session doesn't exist → always recreate
-        console.log(`[secretary] heartbeat: session gone (code=${hasErr.code}), recreating`);
-        createSecretarySession();
-        return;
-      }
-      // Session exists — only act if loop is stale
-      if (staleness >= SECRETARY_LOOP_STALE_MS) {
-        console.log(`[secretary] heartbeat: loop stale (${Math.round(staleness / 1000)}s), recreating session`);
-        exec(`"${PSMUX_BIN}" kill-session -t secretary`, { timeout: EXEC_TIMEOUT }, () => {
-          createSecretarySession();
-        });
-        return;
-      }
-      // Session alive — open WT window if no terminal attached
-      openSecretaryWindow();
-    });
-  }, 1 * 60 * 1000);
+  // Start JS secretary monitor
+  startSecretary({
+    tmuxRun,
+    parseSessionNames,
+    captureTail,
+    PSMUX_BIN,
+    getActiveSessionObjects,
+    SECRETARY_REGISTRY,
+    ALWAYS_PROTECTED,
+    SESSION_PREFIX,
+    AI_TASK_PREFIX,
+    BASH_PATH,
+    AGENT_SECRET,
+    telegram,
+  });
+
   telegram.init({
     getActiveSessionObjects,
     getProtectedSessions,
@@ -2327,4 +2255,11 @@ app.listen(PORT, async () => {
     AI_TASK_PREFIX,
   });
   console.log('[agent] Ready — waiting for commands from Pi relay');
+});
+
+// Graceful shutdown — stop JS secretary loop on SIGTERM
+process.on('SIGTERM', () => {
+  console.log('[agent] SIGTERM received — stopping secretary and exiting');
+  stopSecretary();
+  process.exit(0);
 });
