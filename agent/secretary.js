@@ -271,7 +271,7 @@ async function checkStuck(session) {
   if (dedup(`stuck_${session.name}`)) return;
   await sendMessage(
     session.name,
-    '[비서] 5사이클 동안 화면 변화가 없습니다. 현재 상태를 확인하고 다음 단계로 진행하세요.'
+    '5사이클 동안 화면 변화 없음. 현재 상태 확인하고 다음 단계로 진행해.'
   );
   log_event('stuck', { session: session.name });
 }
@@ -297,7 +297,7 @@ async function checkCircularWork(session) {
         if (!dedup(`circular_${session.name}`)) {
           sendMessage(
             session.name,
-            '[비서] 5사이클 동안 코드 변경이 원점을 맴돌고 있습니다. 접근 방법을 재고하세요.'
+            '5사이클 동안 코드 변경이 원점 회귀 중. 접근 방법 재고해.'
           );
           log_event('circular_work', { session: session.name, totIns, totDel, totFiles });
         }
@@ -314,7 +314,7 @@ async function checkContextWarning(session) {
   const pct = text.match(/(\d+)%?\s+remaining/i);
   if (pct && parseInt(pct[1], 10) > 20) return;
   if (dedup(`ctx_warn_${session.name}`)) return;
-  await sendMessage(session.name, '[비서] 컨텍스트 부족. 핵심 정보를 memory에 저장하세요.');
+  await sendMessage(session.name, '컨텍스트 부족. 핵심 정보를 memory에 저장해.');
   log_event('context_warning', { session: session.name });
 }
 
@@ -367,9 +367,9 @@ async function checkUserPresence(sessions) {
       const idleMs = parseInt(stdout?.trim(), 10);
       if (isNaN(idleMs) || idleMs < 10 * 60 * 1000) return resolve();
       for (const s of sessions) {
-        if (s.status !== 'WORKING') continue;
+        if (s.status !== 'WAITING') continue;
         if (!dedup(`presence_${s.name}`, 30 * 60_000)) {
-          sendMessage(s.name, '[비서] 사용자 10분+ 부재. 자율적으로 진행하세요.');
+          sendMessage(s.name, '사용자 10분+ 부재. 자율적으로 진행해.');
           log_event('user_absent', { session: s.name, idleMs });
         }
       }
@@ -385,7 +385,7 @@ async function checkRateLimit(sessions) {
   if (dedup('rate_limit')) return;
   for (const s of sessions) {
     if (s.status === 'WORKING') {
-      await sendMessage(s.name, '[비서] Rate limit 감지. 세션 수 줄이거나 대기하세요.');
+      await sendMessage(s.name, 'Rate limit 감지. 세션 수 줄이거나 대기해.');
     }
   }
   log_event('rate_limit', { sessions: rl.map(s => s.name) });
@@ -400,8 +400,8 @@ async function checkFileConflict(sessions) {
       for (const f of (b.editing || [])) {
         if (!aSet.has(f)) continue;
         if (dedup(`conflict_${f}`)) continue;
-        await sendMessage(a.name, `[비서] 파일 충돌: ${f} — ${b.name}도 수정 중`);
-        await sendMessage(b.name, `[비서] 파일 충돌: ${f} — ${a.name}도 수정 중`);
+        await sendMessage(a.name, `파일 충돌: ${f} — ${b.name}도 수정 중`);
+        await sendMessage(b.name, `파일 충돌: ${f} — ${a.name}도 수정 중`);
         log_event('file_conflict', { file: f, sessions: [a.name, b.name] });
       }
     }
@@ -454,7 +454,7 @@ async function checkSimplifyReminder(session, commitInfo) {
   const deleted = parseInt(out.match(/(\d+) deletion/)?.[1]   || '0', 10);
   const total   = added + deleted;
   if (total < 50) return;
-  await sendMessage(session.name, `[비서] 커밋 diff ${total}줄. /simplify 고려하세요.`);
+  await sendMessage(session.name, `커밋 diff ${total}줄. /simplify 고려해.`);
   log_event('simplify_reminder', { session: session.name, hash: commitInfo.hash, total });
 }
 
@@ -495,7 +495,7 @@ async function processCommits(sessions) {
     await broadcastGitDiff(s, commitInfo);
     // Trigger 2: promo-log nudge after commit (1x per session per day)
     if (!dedup(`promo_commit_remind_${s.name}`, 86_400_000)) {
-      await sendMessage(s.name, '[비서] 커밋 감지. promotion-log에 기록이 필요하면 추가하세요.');
+      await sendMessage(s.name, '커밋 감지. promotion-log에 기록 필요하면 추가해.');
       log_event('promo_nudge', { trigger: 'commit', session: s.name });
     }
   }
@@ -549,11 +549,11 @@ const ESCALATION_FSM = {
 async function onEnterState(sessionName, nextState, errKey) {
   if (nextState === 'warned') {
     const hint = matchSolution(errKey || '') ? `\n💡 ${matchSolution(errKey)}` : '';
-    await sendMessage(sessionName, `[비서] 에러 감지. 현재 상태를 확인하세요.${hint}`);
+    await sendMessage(sessionName, `에러 감지. 현재 상태 확인해.${hint}`);
     log_event('escalation_warned', { session: sessionName, error: errKey });
     // Trigger 1: promo-log nudge on first error per session per day
     if (!dedup(`promo_error_remind_${sessionName}`, 86_400_000)) {
-      sendMessage(sessionName, '[비서] 에러 해결 후 promotion-log에 기록하세요.').catch(() => {});
+      sendMessage(sessionName, '에러 해결 후 promotion-log에 기록해.').catch(() => {});
       log_event('promo_nudge', { trigger: 'error', session: sessionName });
     }
   } else if (nextState === 'escalated') {
@@ -564,7 +564,7 @@ async function onEnterState(sessionName, nextState, errKey) {
     );
     log_event('escalation_escalated', { session: sessionName });
   } else if (nextState === 'analyzing') {
-    await sendMessage(sessionName, '[비서] 동일 에러 반복. Opus 분석 요청 중...');
+    await sendMessage(sessionName, '동일 에러 반복. Opus 분석 요청 중...');
     try {
       const d = path.join(SECRETARY_DIR, '.opus-queue');
       fs.mkdirSync(d, { recursive: true });
@@ -701,7 +701,7 @@ async function processStruggle(sessions) {
     const result = detectStruggle(s.dir, reg.sid);
     if (!result) continue;
     if (dedup(`struggle_${s.name}_${result.type}`, 10 * 60_000)) continue;
-    await sendMessage(s.name, `[비서] 삽질 감지: ${result.type}. ${result.details}`);
+    await sendMessage(s.name, `삽질 감지: ${result.type}. ${result.details}`);
     log_event('struggle', { session: s.name, ...result });
     addCycleAlert('struggle', s.name);
     // Feed into FSM as an 'error' event so struggle escalates through the same chain
@@ -755,13 +755,13 @@ async function checkGuardDeadlock(session) {
 
     if (patched) {
       fs.writeFileSync(SETTINGS_PATH, JSON.stringify(settings, null, 2), 'utf8');
-      await sendMessage(session.name, '[비서] guard 임시 해제됨. 작업 재개하세요.');
+      await sendMessage(session.name, 'guard 임시 해제됨. 작업 재개해.');
       log_event('guard_deadlock_unlock', { session: session.name, guard: blockedMatch });
       addCycleAlert('guard_deadlock_unlock', session.name);
     } else {
       // Pattern found but no deny rule matched — just nudge
       fs.unlinkSync(GUARD_RESTORE_FILE); // no restore needed
-      await sendMessage(session.name, '[비서] guard 차단 감지. 설정 확인 후 재개하세요.');
+      await sendMessage(session.name, 'guard 차단 감지. 설정 확인 후 재개해.');
       log_event('guard_deadlock_nudge', { session: session.name, guard: blockedMatch });
     }
   } catch (e) {
@@ -971,11 +971,11 @@ async function checkPromotionNudge(sessions) {
       } catch {}
     }
     if (docsReads >= 1 && !dedup(`request_remind_${today}`, 86_400_000)) {
-      await sendMessage(active[0].name, '[비서] docs Read 감지. 유용한 요청이 있으면 promotion-log에 기록하세요.');
+      await sendMessage(active[0].name, 'docs Read 감지. 유용한 요청 있으면 promotion-log에 기록해.');
       log_event('promo_nudge', { trigger: 'docs_read', today });
     }
     if (docsEdits >= 3 && !dedup(`pattern_remind_${today}`, 86_400_000)) {
-      await sendMessage(active[0].name, '[비서] docs Edit 3+회 감지. 새 패턴이 있으면 promotion-log에 기록하세요.');
+      await sendMessage(active[0].name, 'docs Edit 3+회 감지. 새 패턴 있으면 promotion-log에 기록해.');
       log_event('promo_nudge', { trigger: 'docs_edit', today });
     }
   } catch {}
@@ -993,13 +993,13 @@ async function checkWfCompletion(sessions) {
   const active = sessions.filter(s => s.status !== 'DEAD');
   // Nudge to clean up execution-log if present
   if (fs.existsSync(EXEC_LOG_PATH) && active.length) {
-    await sendMessage(active[0].name, '[비서] WF 완료. execution-log.md 정리(삭제/아카이브)를 고려하세요.');
+    await sendMessage(active[0].name, 'WF 완료. execution-log.md 정리(삭제/아카이브) 고려해.');
   }
   // Nudge promo-log if stale
   try {
     const stat = fs.statSync(PROMO_LOG_PATH);
     if (Date.now() - stat.mtimeMs > 5 * 60_000 && !dedup('wf_promo_check', 3_600_000) && active.length) {
-      await sendMessage(active[0].name, '[비서] WF 종료. promotion-log 업데이트 고려하세요.');
+      await sendMessage(active[0].name, 'WF 종료. promotion-log 업데이트 고려해.');
       log_event('promo_nudge', { trigger: 'wf_complete' });
     }
   } catch {}
@@ -1030,7 +1030,7 @@ async function runWeeklyAudit() {
   if (now.getDay() !== 0) return; // Sunday only
   if (now.getHours() < 9 || now.getHours() > 10) return; // 9~10 AM
   if (dedup('weekly_audit', 23 * 3_600_000)) return;
-  deps.telegram.notify('📊 *주간 감사 리마인더*\npromotion-log 및 시스템 점검을 진행하세요.', { parse_mode: 'Markdown' });
+  deps.telegram.notify('📊 *주간 감사 리마인더*\npromotion-log 및 시스템 점검 진행해.', { parse_mode: 'Markdown' });
   log_event('weekly_audit', {});
 }
 
