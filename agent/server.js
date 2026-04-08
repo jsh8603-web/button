@@ -390,7 +390,12 @@ function startRemoteControlWatchdog() {
     let stdout;
     try { stdout = await tmuxRun("list-sessions"); } catch { return; }
     if (!stdout) return;
-    const sessions = new Set(parseSessionNames(stdout).filter(s => s.startsWith('btn-')));
+    // All sessions except secretary, WF, task, schedule
+    const RC_EXCLUDE = new Set(['secretary', ...ALWAYS_PROTECTED]);
+    const RC_EXCLUDE_PREFIX = [AI_TASK_PREFIX, 'task-', 'worker', 'verifier', 'healer', 'strategic'];
+    const sessions = new Set(parseSessionNames(stdout).filter(s =>
+      !RC_EXCLUDE.has(s) && !RC_EXCLUDE_PREFIX.some(p => s.startsWith(p))
+    ));
     for (const [key, ts] of RC_COOLDOWN) {
       if (!sessions.has(key) || Date.now() - ts > RC_COOLDOWN_MS) RC_COOLDOWN.delete(key);
     }
@@ -2194,7 +2199,18 @@ app.listen(PORT, async () => {
         } else {
           cmd = `${toMsys(CLAUDE_BIN)} --dangerously-skip-permissions --model ${CLAUDE_MODEL} --name ${projName}`;
         }
-        try { await tmuxRun(`send-keys -t ${psmuxName} '${cmd}' Enter`); } catch (e) {
+        try {
+          await tmuxRun(`send-keys -t ${psmuxName} '${cmd}' Enter`);
+          // Send /remote-control after Claude starts (claude runner only)
+          if (runner !== 'gemini') {
+            setTimeout(() => {
+              exec(`"${PSMUX_BIN}" send-keys -t ${psmuxName} '/remote-control' Enter`, (e) => {
+                if (e) console.error(`[session-hb] /remote-control failed for ${psmuxName}:`, e.message);
+                else console.log(`[session-hb] /remote-control sent to ${psmuxName}`);
+              });
+            }, 15000);
+          }
+        } catch (e) {
           console.error(`[session-hb] relaunch failed for ${psmuxName}:`, e.message);
         }
       } else {
