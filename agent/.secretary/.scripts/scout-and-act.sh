@@ -97,9 +97,9 @@ TMPDIR="$SECRETARY_DIR/.tmp"
 mkdir -p "$CTX_WARN_TS_DIR" "$TMPDIR"
 [ -f "$SOLUTIONS_FILE" ] || echo "[]" > "$SOLUTIONS_FILE"
 
-# 모니터링 대상: 비서 자신만 제외, 나머지 전체 풀 모니터링
+# 모니터링 대상: 비서 자신 + Agent task 세션(schedule-*/task-*) 제외
 ALL_PSMUX=$("$PSMUX" ls 2>/dev/null | cut -d: -f1)
-SESSIONS=$(echo "$ALL_PSMUX" | grep -v "^${SELF_SESSION}$")
+SESSIONS=$(echo "$ALL_PSMUX" | grep -v "^${SELF_SESSION}$" | grep -v "^schedule-" | grep -v "^task-")
 
 # WF 세션 목록 (autonomous-proceed + revive만 제외, 나머지는 모니터링)
 # .wf-active는 JSON: {"type":"harness"|"lightweight",...} → 타입별 세션 목록 구성
@@ -115,18 +115,19 @@ if [ -f "$WF_ACTIVE_FILE" ]; then
 fi
 
 # DEAD_SESSIONS: 레지스트리 등록됐지만 psmux에 없는 세션 → revive 대상
-# WF 세션은 Supervisor가 관리하므로 제외
+# WF 세션은 Supervisor가 관리, schedule-/task-*는 Agent가 관리하므로 제외
 REGISTERED=$(cut -d'|' -f1 "$REGISTRY" 2>/dev/null)
 DEAD_SESSIONS=""
 for _S in $REGISTERED; do
   [ "$_S" = "$SELF_SESSION" ] && continue
   echo "$ALL_PSMUX" | grep -qxF "$_S" && continue  # alive
   echo "$WF_SESSION_LIST" | tr ' ' '\n' | grep -qxF "$_S" && continue  # WF — skip
+  [[ "$_S" == schedule-* || "$_S" == task-* ]] && continue  # Agent task — skip
   DEAD_SESSIONS="$DEAD_SESSIONS $_S"
 done
 
 # === 사용자 부재 체크 ===
-IDLE_SEC=$(powershell.exe -NoProfile -File "$SECRETARY_DIR/.scripts/get-idle-time.ps1" 2>/dev/null | tr -d '\r')
+IDLE_SEC=$(timeout 5 powershell.exe -NoProfile -File "$SECRETARY_DIR/.scripts/get-idle-time.ps1" 2>/dev/null | tr -d '\r')
 IDLE_SEC=$(echo "$IDLE_SEC" | grep -oE '^[0-9]+$' || echo 0)
 [ -z "$IDLE_SEC" ] && IDLE_SEC=0
 
@@ -147,7 +148,7 @@ if [ -f "$RESTORE_MARKER" ]; then
     fi
   else
     # 세션 정보 없으면 fallback: 5분 후 복원
-    MARKER_TS=$("C:/Users/jsh86/AppData/Local/Programs/Python/Python312/python.exe" \
+    MARKER_TS=$(timeout 5 "C:/Users/jsh86/AppData/Local/Programs/Python/Python312/python.exe" \
       -c "import os,time; print(int(os.path.getmtime('$RESTORE_MARKER')))" 2>/dev/null || echo 0)
     [ $(( $(date +%s) - MARKER_TS )) -gt 300 ] && RESTORE_NOW=true
   fi
@@ -226,7 +227,7 @@ fi
 
     LAST_LINES=$(echo "$CAP" | tail -5)
     _COMPRESS_FLAG="$SECRETARY_DIR/.compressed-recently-${S}"
-    if echo "$LAST_LINES" | grep -qE '^\$\s*$|^bash-|^[A-Z]:[/\\]|^PS '; then
+    if echo "$LAST_LINES" | grep -qE '^\$\s*$|^bash-|^[A-Z]:[/\\]|^PS |command not found|not recognized|@.+[\$#]\s*$'; then
       echo "STATUS: AGENT_DEAD"
     elif echo "$LAST_LINES" | grep -qE '^[>❯]\s*$'; then
       # '>'/'❯'는 Claude Code 대기 프롬프트이기도 함 — 전체 pane에 Claude 컨텍스트 있으면 ALIVE
@@ -438,72 +439,59 @@ for S in $SESSIONS $DEAD_SESSIONS; do
   FIRST_ERR=$(echo "$ERRORS" | head -1 | sed 's/[0-9]\+/N/g')
 
   # Feature 3: 메모리 저장 검증 (elif 체인과 독립)
+  # ts 파일 형식: "PENDING|{timestamp}|{dir}" 또는 "DONE|{saved_remain}|{dir}"
   CTX_WARN_TS_FILE="$CTX_WARN_TS_DIR/${S}.ts"
   if [ -f "$CTX_WARN_TS_FILE" ]; then
-    WARN_INFO=$(cat "$CTX_WARN_TS_FILE")
-    WARN_TS="${WARN_INFO%%|*}"
-    WARN_DIR="${WARN_INFO##*|}"
-    WARN_AGE=$(( $(date +%s) - ${WARN_TS:-0} ))
-    if [ "$WARN_AGE" -gt 90 ] && [ "$WARN_AGE" -lt 600 ]; then
-      PROJ_KEY=$(echo "$WARN_DIR" | sed 's|:|--|; s|/|--|g; s|\\|--|g')
-      NEW_MEM=$("$PYTHON" -c "
+    _TS_CONTENT=$(cat "$CTX_WARN_TS_FILE")
+    _TS_STATE="${_TS_CONTENT%%|*}"
+    _TS_REST="${_TS_CONTENT#*|}"
+    _TS_VAL="${_TS_REST%%|*}"
+    _TS_DIR="${_TS_REST#*|}"
+    if [ "$_TS_STATE" = "PENDING" ]; then
+      WARN_AGE=$(( $(date +%s) - ${_TS_VAL:-0} ))
+      if [ "$WARN_AGE" -gt 90 ] && [ "$WARN_AGE" -lt 600 ]; then
+        PROJ_KEY=$(echo "$_TS_DIR" | sed 's|:|--|; s|/|--|g; s|\\|--|g')
+        NEW_MEM=$("$PYTHON" -c "
 import os, glob
 path = os.path.expanduser('~/.claude/projects/$PROJ_KEY/memory/')
-ts = $WARN_TS
+ts = $_TS_VAL
 files = glob.glob(path + '*.md') if os.path.exists(path) else []
 print(len([f for f in files if os.path.getmtime(f) > ts]))
 " 2>/dev/null || echo 0)
-      if [ "${NEW_MEM:-0}" -eq 0 ]; then
-        if check_dedup "$S" "memory_save_remind"; then
-          echo "컨텍스트 압축이 임박해. 현재 작업 상태와 핵심 결정사항을 지금 바로 memory 파일에 저장해." > "$TMPDIR/mem-remind-${S}.txt"
-          bash "$SECRETARY_DIR/.scripts/msg.sh" "$S" "$TMPDIR/mem-remind-${S}.txt"
-          log_event WARN "$S" "memory_save_reminded" "age=${WARN_AGE}s no_new_files" "memory-remind"
+        if [ "${NEW_MEM:-0}" -eq 0 ]; then
+          if check_dedup "$S" "memory_save_remind"; then
+            echo "컨텍스트 압축이 임박해. 현재 작업 상태와 핵심 결정사항을 지금 바로 memory 파일에 저장해." > "$TMPDIR/mem-remind-${S}.txt"
+            bash "$SECRETARY_DIR/.scripts/msg.sh" "$S" "$TMPDIR/mem-remind-${S}.txt"
+            log_event WARN "$S" "memory_save_reminded" "age=${WARN_AGE}s no_new_files" "memory-remind"
+          fi
+        else
+          # 메모리 저장 확인 → DONE|{현재remain%}|{dir} 로 전환
+          _CUR_REMAIN=$(echo "$BLOCK" | grep "^AUTO_COMPACT_REMAIN:" | awk '{print $2}')
+          [ -z "$_CUR_REMAIN" ] || [ "$_CUR_REMAIN" = "NONE" ] && _CUR_REMAIN=20
+          echo "DONE|${_CUR_REMAIN}|${_TS_DIR}" > "$CTX_WARN_TS_FILE"
+          log_event INFO "$S" "memory_saved_confirmed" "saved_at=${_CUR_REMAIN}%" "done"
         fi
-      else
+      elif [ "$WARN_AGE" -ge 600 ]; then
         rm -f "$CTX_WARN_TS_FILE"
       fi
-    elif [ "$WARN_AGE" -ge 600 ]; then
-      rm -f "$CTX_WARN_TS_FILE"
     fi
+    # DONE 상태는 여기서 처리 안 함 — ctx-warn 발동 시점에서 체크
   fi
 
-  if [ "$STATUS" = "AGENT_DEAD" ]; then
-    # 우선순위 1a: psmux 살아있지만 Claude만 종료 → claude 재실행 (proj 불필요)
-    echo "$WF_SESSION_LIST" | tr ' ' '\n' | grep -qxF "$S" 2>/dev/null && IS_WF=1 || IS_WF=0
-    case "$S" in task-*) IS_TASK=1 ;; *) IS_TASK=0 ;; esac
-    [ "$S" = "$SONNET_SESSION" ] && IS_SONNET=1 || IS_SONNET=0
-    if [ "$IS_WF" -eq 1 ] || [ "$IS_TASK" -eq 1 ] || [ "$IS_SONNET" -eq 1 ]; then
-      log_event WARN "$S" "agent_dead_skip" "status=AGENT_DEAD reason=wf/task/sonnet" "skip"
-    elif check_dedup "$S" "agent_dead"; then
-      CLAUDE_BIN=$(jq -r '.claude_bin // "claude"' "$CONFIG" 2>/dev/null)
-      log_event WARN "$S" "agent_dead_restart" "status=AGENT_DEAD" "restart-claude"
-      "$PSMUX" send-keys -t "$S" "$CLAUDE_BIN --dangerously-skip-permissions" Enter
-      # 시작 대기 후 resume 주입 (백그라운드)
-      _S="$S" _SDIR="$SECRETARY_DIR" _TMPDIR="$TMPDIR" _PSMUX="$PSMUX" bash -c '
-        sleep 12
-        bash "$_SDIR/.scripts/generate-session-resume.sh" "$_S" >/dev/null 2>&1
-        if [ -f "$_TMPDIR/session-resume-${_S}.txt" ]; then
-          bash "$_SDIR/.scripts/msg.sh" "$_S" "$_TMPDIR/session-resume-${_S}.txt"
-        fi
-      ' &
-    fi
-    HANDLED_COUNT=$((HANDLED_COUNT + 1))
+  # 살아있으면 revive 카운터 리셋
+  if [ "$STATUS" = "ALIVE" ]; then
+    rm -f "$LOCK_DIR/${S}_revive_count" 2>/dev/null
+  fi
 
-  elif [ "$STATUS" = "SESSION_DEAD" ]; then
-    # 우선순위 1b: psmux 세션 자체 사망 → revive.sh (API 통한 완전 재생성)
-    echo "$WF_SESSION_LIST" | tr ' ' '\n' | grep -qxF "$S" 2>/dev/null && IS_WF=1 || IS_WF=0
-    case "$S" in task-*) IS_TASK=1 ;; *) IS_TASK=0 ;; esac
-    [ "$S" = "$SONNET_SESSION" ] && IS_SONNET=1 || IS_SONNET=0
-    if [ "$IS_WF" -eq 1 ] || [ "$IS_TASK" -eq 1 ] || [ "$IS_SONNET" -eq 1 ]; then
-      log_event WARN "$S" "session_dead_no_revive" "status=$STATUS reason=wf/task/sonnet" "skip"
-    elif check_dedup "$S" "session_dead"; then
-      log_event ERROR "$S" "session_dead" "status=$STATUS" "revive.sh"
-      bash "$SECRETARY_DIR/.scripts/revive.sh" "$S"
-    elif check_dedup "$S" "revival_failed"; then
-      # revive 이미 시도했는데 다음 사이클도 사망 → 1회만 Telegram
+  if [ "$STATUS" = "AGENT_DEAD" ] || [ "$STATUS" = "SESSION_DEAD" ]; then
+    # Secretary does NOT revive sessions — only logs + notifies.
+    # Session lifecycle is managed by agent server.js (web app triggers).
+    log_event WARN "$S" "${STATUS,,}_detected" "status=$STATUS" "notify-only"
+
+    # Deduplicated Telegram alert (once per session)
+    if check_dedup "$S" "dead_notify"; then
       TELEGRAM_NEEDED=$((TELEGRAM_NEEDED + 1))
-      TELEGRAM_REASONS="$TELEGRAM_REASONS revival_failed:$S"
-      log_event ERROR "$S" "revival_failed" "status=$STATUS" "telegram"
+      TELEGRAM_REASONS="$TELEGRAM_REASONS ${STATUS,,}:$S"
     fi
     HANDLED_COUNT=$((HANDLED_COUNT + 1))
 
@@ -514,24 +502,40 @@ print(len([f for f in files if os.path.getmtime(f) > ts]))
     if [ -f "$TMPDIR/session-resume-${S}.txt" ]; then
       bash "$SECRETARY_DIR/.scripts/msg.sh" "$S" "$TMPDIR/session-resume-${S}.txt"
     fi
+    # 압축 완료 → ctx-warn ts 초기화 (새 사이클 시작)
+    rm -f "$CTX_WARN_TS_FILE"
     HANDLED_COUNT=$((HANDLED_COUNT + 1))
 
   elif REMAIN=$(echo "$BLOCK" | grep "^AUTO_COMPACT_REMAIN:" | awk '{print $2}'); \
        [ -n "$REMAIN" ] && [ "$REMAIN" != "NONE" ] && [ "${REMAIN}" -le 20 ] && [ "${REMAIN}" -gt 0 ] 2>/dev/null; then
     # 우선순위 2.5: "X% until auto-compact" 1~20% → 메모리 저장 요청 (0% = 압축 진행 중, 스킵)
-    # "완료" 감지: 세션이 작업 완료 상태면 메모리 저장 불필요 — 스킵
-    _LAST_OUT=$("$PSMUX" capture-pane -p -S -30 -t "$S" 2>/dev/null | tail -15)
-    if echo "$_LAST_OUT" | grep -qE '완료|complete|finished|done|all.*(tasks|steps)'; then
-      log_event INFO "$S" "context_near_limit_skip" "remain=${REMAIN}% reason=completion_detected" "skip"
-    elif check_dedup "$S" "context_near_limit"; then
+    # DONE|{saved_remain}|{dir} 존재 시: 현재 remain이 saved_remain - 7 이하일 때만 재발동
+    _CTX_SHOULD_WARN=1
+    if [ -f "$CTX_WARN_TS_FILE" ]; then
+      _TS_CONTENT=$(cat "$CTX_WARN_TS_FILE")
+      _TS_STATE="${_TS_CONTENT%%|*}"
+      if [ "$_TS_STATE" = "DONE" ]; then
+        _TS_REST="${_TS_CONTENT#*|}"
+        _SAVED_REMAIN="${_TS_REST%%|*}"
+        _GAP=$(( ${_SAVED_REMAIN:-20} - ${REMAIN} ))
+        if [ "$_GAP" -lt 7 ]; then
+          _CTX_SHOULD_WARN=0
+          log_event INFO "$S" "context_near_limit_skip" "remain=${REMAIN}% saved_at=${_SAVED_REMAIN}% gap=${_GAP}" "skip"
+        fi
+      elif [ "$_TS_STATE" = "PENDING" ]; then
+        # 아직 저장 안 됨 — 중복 발송 방지
+        _CTX_SHOULD_WARN=0
+      fi
+    fi
+    if [ "$_CTX_SHOULD_WARN" -eq 1 ]; then
       CTX_WARN_FILE="$TMPDIR/ctx-warn-${S}.txt"
       TMPL="$SECRETARY_DIR/.messages/memory-save-template.md"
       echo "컨텍스트 압축까지 ${REMAIN}% 남았어. 당장 ${TMPL} 읽고 memory 파일에 저장해." > "$CTX_WARN_FILE"
       bash "$SECRETARY_DIR/.scripts/msg.sh" "$S" "$CTX_WARN_FILE"
       log_event WARN "$S" "context_near_limit" "remain=${REMAIN}%" "pre-compression-warn"
-      # Feature 3: 메모리 저장 검증용 타임스탬프 기록
+      # PENDING 상태로 기록 — Feature 3에서 메모리 저장 여부 검증
       CTX_WARN_DIR_VAL=$(grep "^${S}|" "$REGISTRY" | cut -d'|' -f3)
-      echo "$(date +%s)|${CTX_WARN_DIR_VAL:-unknown}" > "$CTX_WARN_TS_DIR/${S}.ts"
+      echo "PENDING|$(date +%s)|${CTX_WARN_DIR_VAL:-unknown}" > "$CTX_WARN_TS_DIR/${S}.ts"
     fi
     HANDLED_COUNT=$((HANDLED_COUNT + 1))
 
@@ -1012,7 +1016,7 @@ fi
 
 # =============================================
 # Phase 4.6: 미등록 psmux 세션 자동 등록
-# 제외: secretary(자기자신), task-*(task queue 관리), sonnet(온디맨드), WF 세션(Supervisor 관리)
+# 제외: secretary(자기자신), task-*/schedule-*(task queue 관리), sonnet(온디맨드), WF 세션(Supervisor 관리)
 # 나머지 전부 자동 등록 → revive 포함 전체 기능 적용
 # =============================================
 
@@ -1022,7 +1026,7 @@ if [ -f "$REGISTRY" ]; then
   for CAND_SESSION in $ALL_PSMUX; do
     [ "$CAND_SESSION" = "$SELF_SESSION" ] && continue
     [ "$CAND_SESSION" = "$SONNET_SESSION" ] && continue
-    [[ "$CAND_SESSION" == task-* ]] && continue
+    [[ "$CAND_SESSION" == task-* || "$CAND_SESSION" == schedule-* ]] && continue
     echo "$WF_SESSION_LIST" | tr ' ' '\n' | grep -qxF "$CAND_SESSION" && continue
     echo "$KNOWN_NAMES" | grep -qxF "$CAND_SESSION" && continue  # 이미 등록됨
 

@@ -15,7 +15,7 @@ const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN;
 const PROJECTS_DIR = process.env.PROJECTS_DIR || 'D:\\projects';
 const EDITOR_CMD = process.env.EDITOR_CMD || 'code';
 const BASH_PATH = process.env.BASH_PATH || 'C:\\msys64\\usr\\bin\\bash.exe';
-const CLAUDE_BIN = process.env.CLAUDE_BIN || 'claude';
+const CLAUDE_BIN = process.env.CLAUDE_BIN || 'C:\\Users\\jsh86\\.local\\bin\\claude';
 const IGNORE_DIRS_ENV = process.env.IGNORE_DIRS || 'node_modules,screenshots';
 const EDITOR_TITLE = process.env.EDITOR_TITLE || '';
 const CLAUDE_MODEL = process.env.CLAUDE_MODEL || 'opus';
@@ -1352,6 +1352,20 @@ function persistRunnerMap() {
 }
 
 const SECRETARY_REGISTRY = path.join(__dirname, '.secretary', '.session-registry.txt');
+function addToSecretaryRegistry(psmuxName, model, dir) {
+  try {
+    const lines = fs.readFileSync(SECRETARY_REGISTRY, 'utf8').split('\n').filter(Boolean);
+    // Remove existing entry for this session, then add fresh
+    const filtered = lines.filter(l => l.split('|')[0] !== psmuxName);
+    const ts = new Date().toISOString().replace(/\.\d+Z$/, '+09:00');
+    filtered.push(`${psmuxName}|${model}|${dir}|${ts}|`);
+    fs.writeFileSync(SECRETARY_REGISTRY, filtered.join('\n') + '\n');
+    console.log(`[registry] Added ${psmuxName} (model=${model}, dir=${dir})`);
+  } catch (e) {
+    console.error(`[registry] Failed to add ${psmuxName}:`, e.message);
+  }
+}
+
 function removeFromSecretaryRegistry(psmuxName) {
   try {
     const lines = fs.readFileSync(SECRETARY_REGISTRY, 'utf8').split('\n');
@@ -1500,6 +1514,7 @@ function openProjectInEditor(name, runner = 'claude') {
       console.log(`[proj] Created psmux session: ${session} (runner: ${runner})`);
       sessionRunnerMap.set(name, runner);
       persistRunnerMap();
+      addToSecretaryRegistry(session, runner === 'gemini' ? 'gemini' : CLAUDE_MODEL, workDir);
 
       // Protect proj session so killUnprotectedSessions doesn't kill it
       const protectedList = getProtectedSessions();
@@ -1664,7 +1679,8 @@ function openProjectInEditor(name, runner = 'claude') {
     });
 
     // Start secretary session (claude runner only)
-    if (!isGeminiProj) {
+    const secretaryDisabled = fs.existsSync(path.join(__dirname, '.secretary', '.secretary-disabled'));
+    if (!isGeminiProj && !secretaryDisabled) {
       const secretaryDir = path.join(__dirname, '.secretary');
       const loopScriptMsys = toMsys(path.join(secretaryDir, 'secretary-loop.sh'));
       const secretarySession = 'secretary';
@@ -2105,15 +2121,118 @@ app.listen(PORT, async () => {
   startTaskRunner();
   startRemoteControlWatchdog();
 
-  // Helper: open secretary in a separate WT window (UWP app needs Start-Process)
+  // Helper: open secretary WT window only if no terminal is attached (psmux check)
+  const SECRETARY_WT_SCRIPT = path.join(__dirname, 'open-secretary-wt.ps1');
   function openSecretaryWindow() {
-    const psmuxWin = PSMUX_BIN.replace(/\//g, '\\');
-    const cmd = `powershell.exe -WindowStyle Hidden -Command "Start-Process wt.exe -ArgumentList '-w','_new','--title','secretary','${psmuxWin}','attach-session','-t','secretary'"`;
-    exec(cmd, (err) => {
-      if (err) console.error('[secretary] wt.exe open error:', err.message);
-      else console.log('[secretary] wt.exe window opened');
+    // Check if a terminal is already attached to the secretary session
+    exec(`"${PSMUX_BIN}" display-message -p -t secretary "#{session_attached}"`, { timeout: EXEC_TIMEOUT }, (err, stdout) => {
+      if (err) return; // session doesn't exist yet
+      if ((stdout || '').trim() !== '0') return; // already attached, skip
+      const psmuxWin = PSMUX_BIN.replace(/\//g, '\\');
+      exec(`powershell.exe -WindowStyle Hidden -ExecutionPolicy Bypass -File "${SECRETARY_WT_SCRIPT}" -PsmuxBin "${psmuxWin}"`, (err2) => {
+        if (err2) console.error('[secretary] wt.exe open error:', err2.message);
+        else console.log('[secretary] wt.exe opened (minimized)');
+      });
     });
   }
+
+  // --- Session heartbeat: revive registered btn-* sessions ---
+  // Runs every 60s. Checks registry entries against live psmux sessions.
+  // SESSION_DEAD → recreate psmux + launch runner + /remote-control
+  // AGENT_DEAD (psmux alive but Claude exited) → relaunch runner only
+  // Sessions removed via kill-session action are already unregistered, so won't be revived.
+  const SESSION_HB_INTERVAL = 60_000;
+  const sessionReviveCounts = new Map(); // session → consecutive fail count
+
+  setInterval(async () => {
+    let registryLines;
+    try {
+      registryLines = fs.readFileSync(SECRETARY_REGISTRY, 'utf8').split('\n').filter(Boolean);
+    } catch { return; }
+    if (registryLines.length === 0) return;
+
+    // Get live psmux sessions
+    let liveSessions;
+    try {
+      const stdout = await tmuxRun('list-sessions');
+      liveSessions = new Set(parseSessionNames(stdout || ''));
+    } catch { return; }
+
+    for (const line of registryLines) {
+      const [psmuxName, model, dir] = line.split('|');
+      if (!psmuxName || !psmuxName.startsWith(SESSION_PREFIX)) continue;
+      const projName = psmuxName.slice(SESSION_PREFIX.length);
+
+      // Skip if session is alive — check Claude process inside
+      if (liveSessions.has(psmuxName)) {
+        let output;
+        try { output = await tmuxRun(`capture-pane -t ${psmuxName} -p -S -5`); } catch { continue; }
+        const pane = (output || '').trim();
+        const hasAgent = pane.includes('claude') || pane.includes('❯') || pane.includes('>>>') || /bypass permissions/i.test(pane) || pane.includes('/remote-control');
+        const isBareShell = /^\$\s*$/m.test(pane) && !hasAgent;
+        if (!isBareShell) {
+          // Session + agent alive → reset counter
+          sessionReviveCounts.delete(psmuxName);
+          continue;
+        }
+        // AGENT_DEAD: psmux alive but Claude exited → relaunch runner
+        const count = (sessionReviveCounts.get(psmuxName) || 0) + 1;
+        sessionReviveCounts.set(psmuxName, count);
+        if (count > 3) continue; // give up after 3 attempts
+        console.log(`[session-hb] AGENT_DEAD: ${psmuxName} (attempt ${count}/3), relaunching runner`);
+        const runner = sessionRunnerMap.get(projName) || 'claude';
+        let cmd;
+        if (runner === 'gemini') {
+          const script = path.join(__dirname, `.proj-gemini-${projName}.sh`);
+          cmd = `bash ${toMsys(script)}`;
+        } else {
+          cmd = `${toMsys(CLAUDE_BIN)} --dangerously-skip-permissions --model ${CLAUDE_MODEL} --name ${projName}`;
+        }
+        try { await tmuxRun(`send-keys -t ${psmuxName} '${cmd}' Enter`); } catch (e) {
+          console.error(`[session-hb] relaunch failed for ${psmuxName}:`, e.message);
+        }
+      } else {
+        // SESSION_DEAD: psmux session gone → full recreate
+        const count = (sessionReviveCounts.get(psmuxName) || 0) + 1;
+        sessionReviveCounts.set(psmuxName, count);
+        if (count > 3) continue;
+        console.log(`[session-hb] SESSION_DEAD: ${psmuxName} (attempt ${count}/3), recreating`);
+        const runner = sessionRunnerMap.get(projName) || 'claude';
+        const workDir = dir || path.join(PROJECTS_DIR, projName);
+        let runnerCmd;
+        if (runner === 'gemini') {
+          const geminiBinMsys = toMsys(GEMINI_BIN);
+          const script = path.join(__dirname, `.proj-gemini-${projName}.sh`);
+          fs.writeFileSync(script, `#!/bin/bash\nexport PATH="/c/Program Files/nodejs:$PATH"\n${geminiBinMsys} --yolo\n`);
+          runnerCmd = `bash ${toMsys(script)}`;
+        } else {
+          runnerCmd = `${toMsys(CLAUDE_BIN)} --dangerously-skip-permissions --model ${CLAUDE_MODEL} --name ${projName}`;
+        }
+        createPsmuxSession(psmuxName, workDir, runnerCmd, (err) => {
+          if (err) {
+            console.error(`[session-hb] recreate failed for ${psmuxName}:`, err.message);
+            return;
+          }
+          console.log(`[session-hb] Recreated ${psmuxName} (runner: ${runner})`);
+          // Re-protect
+          const protectedList = getProtectedSessions();
+          if (!protectedList.includes(projName)) {
+            protectedList.push(projName);
+            setProtectedSessions(protectedList);
+          }
+          // Send /remote-control for Claude sessions after startup
+          if (runner !== 'gemini') {
+            setTimeout(() => {
+              exec(`"${PSMUX_BIN}" send-keys -t ${psmuxName} '/remote-control' Enter`, (e) => {
+                if (e) console.error(`[session-hb] /remote-control failed for ${psmuxName}:`, e.message);
+                else console.log(`[session-hb] /remote-control sent to ${psmuxName}`);
+              });
+            }, 15000); // wait for Claude to start
+          }
+        });
+      }
+    }
+  }, SESSION_HB_INTERVAL);
 
   // Secretary heartbeat — revive session+loop if dead or stale
   const SECRETARY_TS_FILE = path.join(__dirname, '.secretary', '.self-wake-ts');
@@ -2121,9 +2240,7 @@ app.listen(PORT, async () => {
   const secretaryLoopScript = toMsys(path.join(__dirname, '.secretary', 'secretary-loop.sh'));
   const secretaryDir = path.join(__dirname, '.secretary');
   const EXEC_TIMEOUT = 10_000; // 10s timeout for all psmux exec calls
-  let secretaryWindowOpened = false;
   const createSecretarySession = (cb) => {
-    secretaryWindowOpened = false;
     const winDir = secretaryDir.replace(/\//g, '\\');
     exec(`"${PSMUX_BIN}" new-session -d -s secretary -c "${winDir}" -- "${BASH_PATH}" -l`, { timeout: EXEC_TIMEOUT }, (err) => {
       if (err) { console.error('[secretary] heartbeat session create error:', err.message); return cb && cb(err); }
@@ -2133,7 +2250,7 @@ app.listen(PORT, async () => {
           setTimeout(() => {
             exec(`"${PSMUX_BIN}" send-keys -t secretary 'bash ${secretaryLoopScript}' Enter`, { timeout: EXEC_TIMEOUT }, (err2) => {
               if (err2) console.error('[secretary] heartbeat restart error:', err2.message);
-              else console.log('[secretary] heartbeat: loop restarted');
+              else { console.log('[secretary] heartbeat: loop restarted'); openSecretaryWindow(); }
               cb && cb(err2);
             });
           }, 500);
@@ -2142,6 +2259,10 @@ app.listen(PORT, async () => {
     });
   };
   setInterval(() => {
+    // .secretary-disabled flag → skip heartbeat entirely
+    const disabledFlag = path.join(secretaryDir, '.secretary-disabled');
+    if (fs.existsSync(disabledFlag)) return;
+
     let tsMs = 0;
     try {
       const parsed = parseInt(fs.readFileSync(SECRETARY_TS_FILE, 'utf8').trim(), 10);
@@ -2163,18 +2284,8 @@ app.listen(PORT, async () => {
         });
         return;
       }
-      // Session alive — open WT window once if not attached
-      if (!secretaryWindowOpened) {
-        exec(`"${PSMUX_BIN}" ls`, { encoding: 'utf8', timeout: EXEC_TIMEOUT }, (lsErr, lsOut) => {
-          if (lsErr) return;
-          const secLine = (lsOut || '').split('\n').find(l => l.startsWith('secretary:'));
-          if (secLine && !secLine.includes('(attached)')) {
-            console.log('[secretary] heartbeat: no WT window attached, opening');
-            openSecretaryWindow();
-            secretaryWindowOpened = true;
-          }
-        });
-      }
+      // Session alive — open WT window if no terminal attached
+      openSecretaryWindow();
     });
   }, 1 * 60 * 1000);
   telegram.init({
