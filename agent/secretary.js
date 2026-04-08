@@ -101,11 +101,10 @@ async function sendMessage(sessionName, message) {
   assertSafeSession(sessionName);
   const tmpPath = path.join(os.tmpdir(), `sec-msg-${sessionName}-${Date.now()}.txt`);
   fs.writeFileSync(tmpPath, message, 'utf8');
-  try {
-    await deps.tmuxRun(`send-keys -t ${sessionName} "Read ${tmpPath}" Enter`);
-  } finally {
-    try { fs.unlinkSync(tmpPath); } catch {}
-  }
+  await deps.tmuxRun(`send-keys -t ${sessionName} "Read ${tmpPath}" Enter`);
+  // Delay delete — agent might be busy and process the Read later
+  setTimeout(() => { try { fs.unlinkSync(tmpPath); } catch {} }, 5 * 60_000);
+
 }
 
 // ─────────────────────────────────────────────────────────
@@ -169,7 +168,15 @@ function parseStatus(text) {
   return 'DEAD';
 }
 
-const ERROR_RE = [/\bError\b/, /ENOENT/, /\brejected\b/i, /\bdenied\b/i, /\bfailed\b/i, /\btimeout\b/i];
+// Match actual Claude Code tool error output, not words in code being discussed
+const ERROR_RE = [
+  /Exit code [1-9]\d*/,                    // Bash tool failure
+  /tool_use was rejected/i,                // tool denied by user/guard
+  /The user doesn't want to proceed/i,     // tool rejection message
+  /ENOENT.*no such file/i,                 // actual file not found (full pattern)
+  /old_string.*not found|not unique/i,     // Edit tool failure
+  /Command timed out/i,                    // Bash timeout
+];
 function parseErrors(text) {
   return ERROR_RE.filter(p => p.test(text)).map(p => p.source);
 }
@@ -709,13 +716,13 @@ async function processStruggle(sessions) {
   }
 }
 
-// Guard blocking patterns to detect deadlock
+// Guard blocking patterns — only match actual Claude Code guard/hook messages
 const GUARD_BLOCK_RE = [
-  /\bguard\b.*\bblock/i,
-  /permission required/i,
-  /Tier [1-3].*block/i,
-  /Do you want to proceed/i,
-  /\bDo you trust\b/i,
+  /blocked by.*guard/i,                    // PreToolUse guard block
+  /PreToolUse.*denied/i,                   // hook guard denial
+  /doesn't want to proceed with this tool/i, // user rejection via guard
+  /Do you want to proceed.*\?\s*$/im,      // permission prompt (line-end, not in code)
+  /Do you trust.*\?\s*$/im,               // trust prompt (line-end, not in code)
 ];
 
 // #22 — Guard deadlock detection + unlock
@@ -918,7 +925,6 @@ async function autoRegisterSessions() {
 
   let added = 0;
   for (const name of names) {
-    if (!name.startsWith('btn-'))  continue;
     if (WF_SESSION_RE.test(name))  continue;
     if (SKIP_REG_RE.test(name))    continue;
     if (registered.has(name))      continue;
