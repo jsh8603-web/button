@@ -35,8 +35,7 @@ const SNAPSHOT_SLOTS = 5;
 // Circular work ring buffer — key: sessionName → [{ins,del,files}] (max 5)
 const circularMap = new Map();
 
-// Memory-save pending — key: sessionName → Set<filePath>
-const memorySaveMap = new Map();
+// (memorySaveMap removed — #12 replaced by JSONL resume injection)
 
 // User-presence last-check timestamp
 let lastPresenceCheck = 0;
@@ -187,11 +186,12 @@ function parseWaiting(text) {
 
 function parseEditing(text) {
   const results = [];
-  // Match "Edit <path>" or "Write <path>"
-  const re = /(?:Edit|Write)\s+(\S+\.\w+)/g;
+  // Claude Code shows tool calls as "Edit(filepath)" or "Update(filepath)" or "Write(filepath)"
+  const re = /(?:Edit|Update|Write)\(([^)]+)\)/g;
   let m;
   while ((m = re.exec(text)) !== null) {
-    if (!results.includes(m[1])) results.push(m[1]);
+    const fp = m[1].trim();
+    if (fp && !results.includes(fp)) results.push(fp);
   }
   return results;
 }
@@ -314,40 +314,173 @@ async function checkCircularWork(session) {
   });
 }
 
-// #11 — Context warning
+// #11 — Context warning (pre-compression) + Compression detection (post-compression resume injection)
+// Pattern from commit 8ace18d: Claude Code shows "X% until auto-compact" in status bar (last 3 lines)
+const COMPRESSED_RE = /^\s*(Compacted|Auto-compacted)|⎿\s+Compacted/m;
+
 async function checkContextWarning(session) {
   const text = session.text || '';
-  if (!/context window|auto-compact|remaining/i.test(text)) return;
-  const pct = text.match(/(\d+)%?\s+remaining/i);
-  if (pct && parseInt(pct[1], 10) > 20) return;
+
+  // A. Post-compression: resume injection (핵심 기능 — scriptagent.md §1-2)
+  if (COMPRESSED_RE.test(text)) {
+    if (!dedup(`compressed_${session.name}`, 5 * 60_000)) {
+      const resume = await generateSessionResume(session);
+      if (resume) {
+        await sendMessage(session.name, resume);
+        log_event('compression_resume_injected', { session: session.name });
+      }
+    }
+    return; // 압축 발생 시 사전 경고는 스킵
+  }
+
+  // B. Pre-compression: "X% until auto-compact" → warn at ≤20%
+  const tail3 = text.split('\n').slice(-3).join('\n');
+  const autoCompact = tail3.match(/(\d+)%[^]*?until[^]*?auto[^-]*compact/i);
+  if (!autoCompact) return;
+  const remain = parseInt(autoCompact[1], 10);
+  if (remain > 20 || remain <= 0) return; // 0% = 압축 진행 중, 스킵
   if (dedup(`ctx_warn_${session.name}`)) return;
-  await sendMessage(session.name, '컨텍스트 부족. 핵심 정보를 memory에 저장해.');
-  log_event('context_warning', { session: session.name });
+  await sendMessage(session.name, `컨텍스트 ${remain}% 남음. 핵심 정보를 memory에 저장해.`);
+  log_event('context_warning', { session: session.name, remain });
 }
 
-// #12 — Memory save validation (PENDING → DONE)
-async function checkMemorySave(session) {
-  const text = session.text || '';
-  // Detect Write targeting memory/
-  const re = /Write\s+(\S*memory\/\S+)/g;
-  let m;
-  while ((m = re.exec(text)) !== null) {
-    const p = m[1];
-    const pending = memorySaveMap.get(session.name) || new Set();
-    if (!pending.has(p)) {
-      pending.add(p);
-      memorySaveMap.set(session.name, pending);
+// #11-B — JSONL-based session resume generation (replaces generate-session-resume.sh)
+// 압축/부활 시 세션에 주입할 컨텍스트 복원 데이터 생성
+async function generateSessionResume(session) {
+  const reg = getRegisteredSessions().find(r => r.name === session.name);
+  const dir = reg?.dir || session.dir;
+  const sid = reg?.sid;
+  const lines = [];
+
+  lines.push('## Session Resume (compression recovery)');
+  lines.push('');
+
+  // 1. JSONL 파싱 — last-prompt, writes, edits, errors, bashes, agents
+  if (sid) {
+    const homeDir = process.env.USERPROFILE || os.homedir();
+    const projDir = path.join(homeDir, '.claude', 'projects');
+    let jsonlPath = null;
+    try {
+      for (const entry of fs.readdirSync(projDir)) {
+        const candidate = path.join(projDir, entry, `${sid}.jsonl`);
+        if (fs.existsSync(candidate)) { jsonlPath = candidate; break; }
+      }
+    } catch {}
+
+    if (jsonlPath) {
+      try {
+        const raw = fs.readFileSync(jsonlPath, 'utf8');
+        const jsonlLines = raw.split('\n').filter(l => l.trim());
+        let lastPrompt = '', lastAssistant = '';
+        const writes = [], edits = [], bashes = [], agents = [], errors = [];
+
+        for (const line of jsonlLines) {
+          let d; try { d = JSON.parse(line); } catch { continue; }
+          if (d.type === 'last-prompt' && d.lastPrompt) lastPrompt = d.lastPrompt;
+          if (d.type === 'assistant') {
+            for (const c of (d.message?.content || [])) {
+              if (!c || typeof c !== 'object') continue;
+              if (c.type === 'text' && c.text?.length > 80) lastAssistant = c.text;
+              if (c.type !== 'tool_use') continue;
+              const { name = '', input: inp = {} } = c;
+              if (name === 'Write' && inp.file_path) writes.push(inp.file_path);
+              if (name === 'Edit' && inp.file_path) edits.push(inp.file_path);
+              if (name === 'Bash') bashes.push((inp.command || '').slice(0, 120));
+              if (name === 'Agent') agents.push((inp.description || '').slice(0, 60));
+            }
+          }
+          if (d.type === 'user') {
+            for (const c of (d.message?.content || [])) {
+              if (c?.type === 'tool_result' && c.is_error) {
+                const txt = (typeof c.content === 'string' ? c.content : JSON.stringify(c.content)).slice(0, 200);
+                if (txt) errors.push(txt.replace(/\n/g, ' '));
+              }
+            }
+          }
+        }
+
+        const uniq = (arr, n) => [...new Set(arr.slice(-n * 2))].slice(-n);
+
+        if (lastPrompt) { lines.push('### Last User Request'); lines.push(`> ${lastPrompt.slice(0, 500)}`); lines.push(''); }
+        if (lastAssistant) { lines.push('### Last Assistant Response'); lines.push(lastAssistant.slice(0, 800)); lines.push(''); }
+        const cre = uniq(writes, 8);
+        if (cre.length) { lines.push('### Created Files (Write)'); cre.forEach(f => lines.push(`- ${f}`)); lines.push(''); }
+        const mod = uniq(edits, 10);
+        if (mod.length) { lines.push('### Modified Files (Edit)'); mod.forEach(f => lines.push(`- ${f}`)); lines.push(''); }
+        const errs = uniq(errors, 5);
+        if (errs.length) { lines.push('### Tool Errors'); errs.forEach(e => lines.push(`- ${e}`)); lines.push(''); }
+        const cmds = uniq(bashes, 5);
+        if (cmds.length) { lines.push('### Recent Bash Commands'); cmds.forEach(c => lines.push(`- \`${c}\``)); lines.push(''); }
+        if (agents.length) { lines.push('### Spawned Agents'); uniq(agents, 3).forEach(a => lines.push(`- ${a}`)); lines.push(''); }
+      } catch (e) { console.error('[secretary] resume JSONL parse error:', e.message); }
     }
   }
-  const pending = memorySaveMap.get(session.name);
-  if (!pending || pending.size === 0) return;
-  for (const p of [...pending]) {
-    const resolved = p.replace(/^~/, process.env.USERPROFILE || os.homedir());
-    if (fs.existsSync(resolved)) {
-      pending.delete(p);
-      log_event('memory_saved', { session: session.name, file: p });
+
+  // 2. 화면 스냅샷 (JSONL에 없는 고유 정보)
+  try {
+    const snap = await deps.tmuxRun(`capture-pane -p -S -200 -t ${session.name}`);
+    if (snap) {
+      const tail50 = snap.split('\n').filter(l => l.trim()).slice(-50).join('\n');
+      lines.push('### Screen State Before Compression'); lines.push(tail50); lines.push('');
     }
+  } catch {}
+
+  // 3. .wf-active 상태
+  if (dir) {
+    const wfFile = path.join(dir, '.wf-active');
+    try {
+      if (fs.existsSync(wfFile)) {
+        lines.push('### Active Workflow'); lines.push(fs.readFileSync(wfFile, 'utf8').trim()); lines.push('');
+      }
+    } catch {}
+
+    // 4. plan.md 체크박스
+    for (const planName of ['plan.md', 'progress.md']) {
+      const planFile = path.join(dir, planName);
+      try {
+        if (!fs.existsSync(planFile)) continue;
+        const planText = fs.readFileSync(planFile, 'utf8');
+        const done = (planText.match(/^- \[x\]/gm) || []).length;
+        const todo = (planText.match(/^- \[ \]/gm) || []).length;
+        lines.push(`### ${planName} (${done}/${done + todo} done)`);
+        planText.split('\n').filter(l => /^- \[/.test(l)).slice(0, 25).forEach(l => lines.push(l));
+        lines.push('');
+      } catch {}
+    }
+
+    // 5. execution-log.md 마지막 30줄
+    const execLog = path.join(dir, '.harness', 'execution-log.md');
+    try {
+      if (fs.existsSync(execLog)) {
+        const logText = fs.readFileSync(execLog, 'utf8');
+        const logLines = logText.split('\n');
+        lines.push('### Execution Log (last 30 lines)');
+        if (logLines[0]) lines.push(logLines[0]); // WF 헤더
+        lines.push('...');
+        logLines.slice(-30).forEach(l => lines.push(l));
+        lines.push('');
+      }
+    } catch {}
+
+    // 6. git diff
+    try {
+      const diffStat = await gitRun(dir, 'diff --stat');
+      if (diffStat) { lines.push('### Uncommitted Changes'); lines.push(diffStat); lines.push(''); }
+    } catch {}
   }
+
+  // 7. 활성 psmux 세션 목록
+  try {
+    const sessions = await deps.tmuxRun('list-sessions');
+    if (sessions) {
+      lines.push('### Active psmux Sessions');
+      sessions.split('\n').forEach(l => { const n = l.split(':')[0]?.trim(); if (n) lines.push(`- ${n}`); });
+      lines.push('');
+    }
+  } catch {}
+
+  if (lines.length <= 2) return null; // 데이터 없으면 주입 안 함
+  return lines.join('\n');
 }
 
 // #13 — User presence (PowerShell Win32 idle time)
@@ -1067,7 +1200,6 @@ async function runCycle() {
       updateSnapshot(s.name, s.text);
       await checkStuck(s);
       await checkContextWarning(s);
-      await checkMemorySave(s);
     }
 
     // Cross-session
@@ -1108,7 +1240,7 @@ async function runCycle() {
       rotateAuditLogs();
       // Sweep dead session entries from all Maps
       const liveNames = new Set(sessions.map(s => s.name));
-      for (const m of [paneCacheMap, snapshotMap, circularMap, memorySaveMap, escalationMap, guardDetectedAt, lastCommitMap]) {
+      for (const m of [paneCacheMap, snapshotMap, circularMap, escalationMap, guardDetectedAt, lastCommitMap]) {
         for (const k of m.keys()) { if (!liveNames.has(k)) m.delete(k); }
       }
     }
@@ -1146,4 +1278,4 @@ function stopSecretary() {
   console.log('[secretary] stopped');
 }
 
-module.exports = { startSecretary, stopSecretary };
+module.exports = { startSecretary, stopSecretary, generateSessionResume };

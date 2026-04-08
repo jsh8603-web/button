@@ -25,7 +25,7 @@ const AGENT_SECRET = process.env.AGENT_SECRET;
 const PI_HOST = process.env.PI_HOST || '192.168.219.125';
 const PI_PORT = parseInt(process.env.PI_PORT || '7777', 10);
 const telegram = require('./telegram');
-const { startSecretary, stopSecretary } = require('./secretary');
+const { startSecretary, stopSecretary, generateSessionResume } = require('./secretary');
 
 // Windows path → MSYS path (e.g. D:\projects → /d/projects)
 const toMsys = (p) => p.replace(/\\/g, '/').replace(/^([A-Z]):/i, (_, d) => `/${d.toLowerCase()}`);
@@ -2171,6 +2171,19 @@ app.listen(PORT, async () => {
                 if (e) console.error(`[session-hb] /remote-control failed for ${psmuxName}:`, e.message);
                 else console.log(`[session-hb] /remote-control sent to ${psmuxName}`);
               });
+              // Inject session resume after relaunch (30s = wait for Claude to fully start)
+              setTimeout(async () => {
+                try {
+                  const resume = await generateSessionResume({ name: psmuxName, dir: dir || path.join(PROJECTS_DIR, projName) });
+                  if (resume) {
+                    const tmpPath = path.join(require('os').tmpdir(), `resume-${psmuxName}-${Date.now()}.txt`);
+                    require('fs').writeFileSync(tmpPath, resume, 'utf8');
+                    await tmuxRun(`send-keys -t ${psmuxName} "Read ${tmpPath}" Enter`);
+                    setTimeout(() => { try { require('fs').unlinkSync(tmpPath); } catch {} }, 5 * 60_000);
+                    console.log(`[session-hb] resume injected to ${psmuxName}`);
+                  }
+                } catch (e) { console.error(`[session-hb] resume inject failed:`, e.message); }
+              }, 30000);
             }, 15000);
           }
         } catch (e) {
@@ -2220,7 +2233,20 @@ app.listen(PORT, async () => {
                 if (e) console.error(`[session-hb] /remote-control failed for ${psmuxName}:`, e.message);
                 else console.log(`[session-hb] /remote-control sent to ${psmuxName}`);
               });
-            }, 15000); // wait for Claude to start
+              // Inject session resume after recreate
+              setTimeout(async () => {
+                try {
+                  const resume = await generateSessionResume({ name: psmuxName, dir: workDir });
+                  if (resume) {
+                    const tmpPath = path.join(require('os').tmpdir(), `resume-${psmuxName}-${Date.now()}.txt`);
+                    require('fs').writeFileSync(tmpPath, resume, 'utf8');
+                    await tmuxRun(`send-keys -t ${psmuxName} "Read ${tmpPath}" Enter`);
+                    setTimeout(() => { try { require('fs').unlinkSync(tmpPath); } catch {} }, 5 * 60_000);
+                    console.log(`[session-hb] resume injected to ${psmuxName}`);
+                  }
+                } catch (e) { console.error(`[session-hb] resume inject failed:`, e.message); }
+              }, 30000);
+            }, 15000);
           }
         });
       }
