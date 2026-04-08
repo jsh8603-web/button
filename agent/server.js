@@ -2158,10 +2158,16 @@ app.listen(PORT, async () => {
       liveSessions = new Set(parseSessionNames(stdout || ''));
     } catch { return; }
 
+    // Sessions excluded from heartbeat revival
+    const HB_EXCLUDE = new Set(['secretary', ...ALWAYS_PROTECTED]);
+    const HB_EXCLUDE_PREFIX = [AI_TASK_PREFIX, 'task-', 'worker', 'verifier', 'healer', 'strategic'];
+
     for (const line of registryLines) {
       const [psmuxName, model, dir] = line.split('|');
-      if (!psmuxName || !psmuxName.startsWith(SESSION_PREFIX)) continue;
-      const projName = psmuxName.slice(SESSION_PREFIX.length);
+      if (!psmuxName) continue;
+      // Skip secretary, WF, task, schedule sessions
+      if (HB_EXCLUDE.has(psmuxName) || HB_EXCLUDE_PREFIX.some(p => psmuxName.startsWith(p))) continue;
+      const projName = psmuxName.startsWith(SESSION_PREFIX) ? psmuxName.slice(SESSION_PREFIX.length) : psmuxName;
 
       // Skip if session is alive — check Claude process inside
       if (liveSessions.has(psmuxName)) {
@@ -2192,7 +2198,15 @@ app.listen(PORT, async () => {
           console.error(`[session-hb] relaunch failed for ${psmuxName}:`, e.message);
         }
       } else {
-        // SESSION_DEAD: psmux session gone → full recreate
+        // SESSION_DEAD: psmux session gone — only revive if protected
+        const protectedList = getProtectedSessions();
+        if (!protectedList.includes(projName)) {
+          // Not protected → user intentionally killed or never protected. Clean up registry.
+          console.log(`[session-hb] SESSION_DEAD: ${psmuxName} not protected, removing from registry`);
+          removeFromSecretaryRegistry(psmuxName);
+          sessionReviveCounts.delete(psmuxName);
+          continue;
+        }
         const count = (sessionReviveCounts.get(psmuxName) || 0) + 1;
         sessionReviveCounts.set(psmuxName, count);
         if (count > 3) continue;
