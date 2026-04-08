@@ -21,17 +21,22 @@
 - [x] #16 solution cache 히트 시 에스컬레이션 스킵 (checkEscalation 상단에서 즉시 반환)
 
 ## Phase 3: 테스트
-- [ ] T1 capturePane 범위 확인
-- [ ] T2 상태 판정 검증
-- [ ] T3 압축 후 보호 검증
-- [ ] T4 DEAD 세션 Telegram 검증
-- [ ] T5 에스컬레이션 분기 검증
-- [ ] T6 S-2 윈도우 검증
-- [ ] T7 auto-register dir/sid 검증
-- [ ] T8 guard 자동 복원 검증
-- [ ] T9 progress.md 넛지 검증
-- [ ] T10 syntax 검증
+- [x] T1 capturePane 범위 — ⚠️ psmux는 스크롤백 미지원 (-S -200 = -S 0 동일). 해 없으므로 유지
+- [x] T2 상태 판정 — ✅ WORKING/IDLE/AGENT_DEAD/DEAD 4패턴 정확 매칭
+- [ ] T3 압축 후 보호 — 수동 (다음 압축 발생 시)
+- [x] T4 DEAD 세션 Telegram — ✅ test-tg SESSION_DEAD 감지 + audit-log 기록 확인
+- [ ] T5 에스컬레이션 분기 — 수동 (에러 3분+ 지속 필요)
+- [x] T6 S-2 윈도우 — parseErrors 엄격화로 트리거 빈도 낮음 (의도적). struggle 기반 에스컬레이션은 작동 확인 (escalation_warned)
+- [x] T7 auto-register dir/sid — ✅ button 세션이 dir+sid 포함 자동 등록 확인
+- [ ] T8 guard 자동 복원 — 수동 (guard 차단 발생 시)
+- [ ] T9 progress.md 넛지 — 조건 (30분+) 확인 필요
+- [x] T10 syntax — ✅ secretary.js + server.js 둘 다 OK
 
 ## Phase 4: 문서 + 배포
-- [ ] #17 scriptagent2.md 최종 업데이트
+- [x] #17 scriptagent2.md 최종 업데이트 (이식률 72%→93%, 31개 기능)
 - [ ] #18 커밋 + push + Agent 재실행
+
+## 발견 사항
+- psmux는 스크롤백 버퍼 미지원 (-S 옵션 무시). generateSessionResume의 Screen State 섹션은 현재 화면만 캡처됨.
+- audit-log 날짜가 UTC 기준 → KST 자정~09시에 전날 파일에 기록됨
+- 에러 감지 자기참조 오탐 여전히 존재 (화면에 에러 패턴 텍스트 표시 시)
