@@ -35,7 +35,9 @@ const SNAPSHOT_SLOTS = 5;
 // Circular work ring buffer — key: sessionName → [{ins,del,files}] (max 5)
 const circularMap = new Map();
 
-// (memorySaveMap removed — #12 replaced by JSONL resume injection)
+// Compression protection — prevent DEAD false positive after auto-compact
+const compressedRecentlyMap = new Map(); // key: sessionName → timestamp
+const COMPRESS_PROTECT_MS = 5 * 60_000; // 5 min
 
 // User-presence last-check timestamp
 let lastPresenceCheck = 0;
@@ -88,7 +90,7 @@ async function capturePane(sessionName) {
   assertSafeSession(sessionName);
   const cached = paneCacheMap.get(sessionName);
   if (cached && Date.now() - cached.ts < PANE_CACHE_TTL) return cached.text;
-  const text = await deps.tmuxRun(`capture-pane -p -S 0 -t ${sessionName}`);
+  const text = await deps.tmuxRun(`capture-pane -p -S -200 -t ${sessionName}`);
   paneCacheMap.set(sessionName, { text, ts: Date.now() });
   return text;
 }
@@ -156,14 +158,20 @@ function loadDedupState() {
 // ─────────────────────────────────────────────────────────
 // Screen-scraping parsers
 // ─────────────────────────────────────────────────────────
-const WORKING_RE = [/Thinking\.\.\./, /Tool call/, /esc to interrupt/i, /[◓◑◒◐]/];
-const WAITING_RE = [/\bguard\b/i, /\bpermission\b/i, /Y\/n/i, /\[y\/N\]/i];
-const IDLE_RE    = [/❯\s*$/, /\$\s*$/, />\s*$/m];
+const WORKING_RE = [/Thinking\.\.\./, /Tool call/, /esc to interrupt/i, /[◓◑◒◐]/, /Ruminating|Spinning|Wibbling|Wandering|Grooving|Julienning/];
+const WAITING_RE = [/blocked by.*guard/i, /PreToolUse.*denied/i, /Do you want to proceed.*\?\s*$/im, /Do you trust.*\?\s*$/im, /Y\/n/i, /\[y\/N\]/i];
+// Claude Code indicators: ❯ prompt, bypass permissions, ⏵⏵
+const CLAUDE_ALIVE_RE = [/❯/, /bypass permissions/i, /⏵/, /esc to interrupt/i, /shift\+tab/i];
+const BARE_SHELL_RE = /^\s*\$\s*$/m;
 
 function parseStatus(text) {
   if (WORKING_RE.some(p => p.test(text))) return 'WORKING';
   if (WAITING_RE.some(p => p.test(text))) return 'WAITING';
-  if (IDLE_RE.some(p => p.test(text)))    return 'IDLE';
+  // Claude Code is alive but idle at prompt
+  if (CLAUDE_ALIVE_RE.some(p => p.test(text))) return 'IDLE';
+  // Bare shell prompt only — Claude exited, psmux session still alive
+  if (BARE_SHELL_RE.test(text)) return 'AGENT_DEAD';
+  // No recognizable output — session might be gone or starting up
   return 'DEAD';
 }
 
@@ -218,16 +226,28 @@ async function buildReport() {
   for (const reg of registered) {
     try {
       const text = await capturePane(reg.name);
+      let status = parseStatus(text);
+      // Compression protection: downgrade AGENT_DEAD/DEAD to IDLE within 5 min of compression
+      if ((status === 'AGENT_DEAD' || status === 'DEAD') && compressedRecentlyMap.has(reg.name)) {
+        if (Date.now() - compressedRecentlyMap.get(reg.name) < COMPRESS_PROTECT_MS) status = 'IDLE';
+        else compressedRecentlyMap.delete(reg.name);
+      }
       sessions.push({
         name   : reg.name,
         dir    : reg.dir,
-        status : parseStatus(text),
+        status,
         errors : parseErrors(text),
         waiting: parseWaiting(text),
         editing: parseEditing(text),
         text,
       });
-    } catch { /* session gone — skip */ }
+    } catch {
+      // capture-pane failed = psmux session gone = SESSION_DEAD
+      sessions.push({
+        name: reg.name, dir: reg.dir, status: 'SESSION_DEAD',
+        errors: [], waiting: false, editing: [], text: '',
+      });
+    }
   }
   return { sessions, ts: Date.now() };
 }
@@ -256,9 +276,13 @@ function isStuck(sessionName) {
 function checkGuardRestore() {
   if (!fs.existsSync(GUARD_RESTORE_FILE)) return;
   try {
-    const patch    = JSON.parse(fs.readFileSync(GUARD_RESTORE_FILE, 'utf8'));
+    const backup   = JSON.parse(fs.readFileSync(GUARD_RESTORE_FILE, 'utf8'));
     const settings = JSON.parse(fs.readFileSync(SETTINGS_PATH, 'utf8'));
-    Object.assign(settings, patch);
+    // Restore only permissions.deny (not full overwrite)
+    if (backup.permissions?.deny) {
+      settings.permissions = settings.permissions || {};
+      settings.permissions.deny = backup.permissions.deny;
+    }
     fs.writeFileSync(SETTINGS_PATH, JSON.stringify(settings, null, 2), 'utf8');
     fs.unlinkSync(GUARD_RESTORE_FILE);
     console.log('[secretary] .guard-restore applied and removed');
@@ -323,6 +347,8 @@ async function checkContextWarning(session) {
 
   // A. Post-compression: resume injection (핵심 기능 — scriptagent.md §1-2)
   if (COMPRESSED_RE.test(text)) {
+    // Mark as recently compressed — prevent AGENT_DEAD false positive for 5 min
+    compressedRecentlyMap.set(session.name, Date.now());
     if (!dedup(`compressed_${session.name}`, 5 * 60_000)) {
       const resume = await generateSessionResume(session);
       if (resume) {
@@ -498,6 +524,8 @@ const PS_IDLE_SCRIPT = [
   '[Sec.UI]::Idle',
 ].join(' ');
 
+let userAbsentFlag = false;
+
 async function checkUserPresence(sessions) {
   if (Date.now() - lastPresenceCheck < 60_000) return;
   lastPresenceCheck = Date.now();
@@ -505,9 +533,29 @@ async function checkUserPresence(sessions) {
     exec(`powershell -NoProfile -C "${PS_IDLE_SCRIPT}"`, { timeout: 6000 }, (err, stdout) => {
       if (err) return resolve();
       const idleMs = parseInt(stdout?.trim(), 10);
-      if (isNaN(idleMs) || idleMs < 10 * 60 * 1000) return resolve();
+      if (isNaN(idleMs)) return resolve();
+
+      // User returned detection: was absent, now active (idle < 60s)
+      if (idleMs < 60_000 && userAbsentFlag) {
+        userAbsentFlag = false;
+        for (const s of sessions) {
+          if (s.status === 'SESSION_DEAD' || s.status === 'AGENT_DEAD') continue;
+          if (!dedup(`user_returned_${s.name}`, 30 * 60_000)) {
+            sendMessage(s.name, '사용자 복귀함.').catch(() => {});
+          }
+        }
+        log_event('user_returned', {});
+        return resolve();
+      }
+
+      if (idleMs < 10 * 60 * 1000) return resolve();
+
+      // User absent: 10min+ idle
+      userAbsentFlag = true;
+      const WF_EXCLUDE = /^(worker|verifier|healer|strategic)$/;
       for (const s of sessions) {
         if (s.status !== 'WAITING') continue;
+        if (WF_EXCLUDE.test(s.name)) continue; // WF 세션 제외 — Supervisor가 관리
         if (!dedup(`presence_${s.name}`, 30 * 60_000)) {
           sendMessage(s.name, '사용자 10분+ 부재. 자율적으로 진행해.');
           log_event('user_absent', { session: s.name, idleMs });
@@ -696,36 +744,48 @@ async function onEnterState(sessionName, nextState, errKey) {
       sendMessage(sessionName, '에러 해결 후 promotion-log에 기록해.').catch(() => {});
       log_event('promo_nudge', { trigger: 'error', session: sessionName });
     }
+  } else if (nextState === 'analyzing') {
+    // Model-based branching: check if target session runs Opus or Sonnet
+    const reg = getRegisteredSessions().find(r => r.name === sessionName);
+    const model = (reg?.model || '').toLowerCase();
+    if (model.includes('opus')) {
+      // Opus session → self-verify (Opus can analyze its own errors)
+      await sendMessage(sessionName, `동일 에러 반복 중. 지금 접근 방식 멈추고 다시 분석해.\n에러: ${(errKey || '').slice(0, 300)}`);
+      log_event('escalation_self_verify', { session: sessionName, model: 'opus' });
+    } else {
+      // Sonnet session → spawn Opus analysis session
+      await sendMessage(sessionName, '동일 에러 반복. 분석 세션 소환 중... 잠깐 기다려.');
+      await spawnOpusAnalyst(sessionName, errKey, reg);
+      log_event('escalation_opus_spawned', { session: sessionName, model: 'sonnet' });
+    }
   } else if (nextState === 'escalated') {
+    // Opus/self-verify didn't resolve → Telegram as final fallback
     addCycleAlert('escalation_escalated', sessionName);
     deps.telegram.notify(
       `⚠️ *에러 지속*\n세션: \`${sessionName}\`\n${(errKey || '').slice(0, 200)}`,
       { parse_mode: 'Markdown' }
     );
     log_event('escalation_escalated', { session: sessionName });
-  } else if (nextState === 'analyzing') {
-    await sendMessage(sessionName, '동일 에러 반복. Opus 분석 요청 중...');
-    try {
-      const d = path.join(SECRETARY_DIR, '.opus-queue');
-      fs.mkdirSync(d, { recursive: true });
-      fs.writeFileSync(path.join(d, `${sessionName}-${Date.now()}.txt`),
-        `세션 ${sessionName} 반복 에러: ${errKey}`, 'utf8');
-    } catch {}
-    log_event('escalation_analyzing', { session: sessionName });
   }
 }
 
 // Core FSM transition; event = 'error'|'same_error'|'resolved'|'sent'|'timeout' (or null = auto-derive)
+// Normalize error text for comparison: numbers→N, paths→.../
+function normalizeError(err) {
+  return (err || '').replace(/\d+/g, 'N').replace(/\/[^\s\/]+\//g, '/.../').replace(/\\[^\s\\]+\\/g, '\\...\\');
+}
+
 async function transitionEscalation(session, event, errKey) {
   const sn  = session.name;
   const st  = escalationMap.get(sn) || { state: 'normal', lastError: '', stateTs: 0 };
+  const normKey = normalizeError(errKey);
 
   // Auto-derive event if not provided
   let evt = event;
   if (!evt) {
-    if (!errKey)                    evt = 'resolved';
-    else if (errKey === st.lastError) evt = 'same_error';
-    else                              evt = 'error';
+    if (!normKey)                                    evt = 'resolved';
+    else if (normKey === normalizeError(st.lastError)) evt = 'same_error';
+    else                                               evt = 'error';
   }
 
   // Cooldown timeout auto-transition
@@ -754,6 +814,31 @@ async function transitionEscalation(session, event, errKey) {
 // Public wrapper called in 60s cycle
 async function checkEscalation(session) {
   const errKey = (session.errors || []).length > 0 ? session.errors.join('|') : null;
+  // Rate limit skip — rate limit/overloaded errors don't escalate (wait resolves them)
+  if (errKey && /rate.limit|overloaded/i.test(errKey)) return;
+  // Solution cache hit → send directly, skip escalation entirely
+  if (errKey) {
+    const cachedSol = matchSolution(errKey);
+    if (cachedSol && !dedup(`cache_hit_${session.name}`, 10 * 60_000)) {
+      sendMessage(session.name, `이 에러 전에 해결한 적 있어. 이 방법 먼저 써봐:\n${cachedSol}`).catch(() => {});
+      log_event('solution_cache_hit', { session: session.name });
+      return;
+    }
+  }
+  // S-2 sliding window: track error cycles per session
+  const errCount = updateErrWindow(session.name, !!errKey);
+  // 5사이클 중 3+에러 축적 → 구조적 문제 → force escalation
+  if (errCount >= 3 && !dedup(`s2_window_${session.name}`, 10 * 60_000)) {
+    // Check solution cache first
+    const cachedSol = matchSolution(errKey || '');
+    if (cachedSol) {
+      await sendMessage(session.name, `이 에러 전에 해결한 적 있어. 이 방법 먼저 써봐:\n${cachedSol}`);
+      log_event('solution_cache_hit_s2', { session: session.name });
+      return;
+    }
+    await transitionEscalation(session, 'same_error', errKey); // force into analyzing
+    return;
+  }
   await transitionEscalation(session, null, errKey);
 }
 
@@ -832,20 +917,34 @@ function detectStruggle(sessionDir, sid) {
 }
 
 // Called in 60s cycle — struggle check for all active sessions
+const struggleCountMap = new Map(); // key: sessionName → consecutive struggle cycle count
+
 async function processStruggle(sessions) {
   const registered = getRegisteredSessions();
   for (const s of sessions) {
-    if (s.status === 'IDLE' || s.status === 'DEAD') continue;
+    if (s.status === 'IDLE' || s.status === 'DEAD' || s.status === 'AGENT_DEAD' || s.status === 'SESSION_DEAD') continue;
     const reg = registered.find(r => r.name === s.name);
     if (!reg?.sid) continue;
     const result = detectStruggle(s.dir, reg.sid);
-    if (!result) continue;
-    if (dedup(`struggle_${s.name}_${result.type}`, 10 * 60_000)) continue;
-    await sendMessage(s.name, `삽질 감지: ${result.type}. ${result.details}`);
-    log_event('struggle', { session: s.name, ...result });
-    addCycleAlert('struggle', s.name);
-    // Feed into FSM as an 'error' event so struggle escalates through the same chain
-    await transitionEscalation(s, 'error', `struggle:${result.type}`);
+    if (!result) { struggleCountMap.set(s.name, 0); continue; }
+
+    const count = (struggleCountMap.get(s.name) || 0) + 1;
+    struggleCountMap.set(s.name, count);
+
+    if (count === 1) {
+      // 1차: 넛지 (자기 정리 유도)
+      if (!dedup(`struggle_${s.name}_${result.type}`, 10 * 60_000)) {
+        await sendMessage(s.name, `삽질 감지: ${result.type}. ${result.details}\n\n지금 접근 방식 멈추고 정리해:\n1. 마지막 에러 메시지가 정확히 뭐야?\n2. 시도한 것들이 왜 안 됐어?\n3. 근본 원인이 다른 데 있을 수 있어?`);
+        log_event('struggle_nudge', { session: s.name, count: 1, ...result });
+      }
+    } else if (count >= 2) {
+      // 2차: 모델 기반 에스컬레이션 (같은 체인 연결)
+      if (!dedup(`struggle_escalate_${s.name}`, 30 * 60_000)) {
+        addCycleAlert('struggle', s.name);
+        await transitionEscalation(s, 'error', `struggle:${result.type}`);
+        log_event('struggle_escalated', { session: s.name, count, ...result });
+      }
+    }
   }
 }
 
@@ -863,7 +962,26 @@ async function checkGuardDeadlock(session) {
   const text      = session.text || '';
   const isBlocked = GUARD_BLOCK_RE.some(p => p.test(text));
 
-  if (!isBlocked) { guardDetectedAt.delete(session.name); return; }
+  if (!isBlocked) {
+    // Guard no longer blocked → session resumed. Restore settings if backup exists.
+    if (guardDetectedAt.has(session.name) && fs.existsSync(GUARD_RESTORE_FILE)) {
+      try {
+        const backup = JSON.parse(fs.readFileSync(GUARD_RESTORE_FILE, 'utf8'));
+        const current = JSON.parse(fs.readFileSync(SETTINGS_PATH, 'utf8'));
+        // Restore only permissions.deny from backup (not full overwrite)
+        if (backup.permissions?.deny) {
+          current.permissions = current.permissions || {};
+          current.permissions.deny = backup.permissions.deny;
+          fs.writeFileSync(SETTINGS_PATH, JSON.stringify(current, null, 2), 'utf8');
+        }
+        fs.unlinkSync(GUARD_RESTORE_FILE);
+        console.log('[secretary] guard auto-restored after session resumed');
+        log_event('guard_auto_restored', { session: session.name });
+      } catch (e) { console.error('[secretary] guard restore error:', e.message); }
+    }
+    guardDetectedAt.delete(session.name);
+    return;
+  }
 
   const first = guardDetectedAt.get(session.name);
   if (!first) { guardDetectedAt.set(session.name, Date.now()); return; }
@@ -878,9 +996,9 @@ async function checkGuardDeadlock(session) {
 
   try {
     const settings = JSON.parse(fs.readFileSync(SETTINGS_PATH, 'utf8'));
-    // Backup original before modifying — skip if restore already exists (prevent overwriting original)
-    if (!fs.existsSync(GUARD_RESTORE_FILE)) {
-      fs.writeFileSync(GUARD_RESTORE_FILE, JSON.stringify(settings, null, 2), 'utf8');
+    // Backup only permissions.deny before modifying (not full settings — prevents overwrite risk)
+    if (!fs.existsSync(GUARD_RESTORE_FILE) && Array.isArray(settings.permissions?.deny)) {
+      fs.writeFileSync(GUARD_RESTORE_FILE, JSON.stringify({ permissions: { deny: settings.permissions.deny } }, null, 2), 'utf8');
     }
 
     let patched = false;
@@ -1061,8 +1179,43 @@ async function autoRegisterSessions() {
     if (WF_SESSION_RE.test(name))  continue;
     if (SKIP_REG_RE.test(name))    continue;
     if (registered.has(name))      continue;
-    try { fs.appendFileSync(deps.SECRETARY_REGISTRY, `${name}|unknown|unknown\n`, 'utf8'); added++; } catch {}
-    log_event('auto_register', { session: name });
+
+    // Get CWD from psmux session
+    let dir = 'unknown';
+    try {
+      const cwd = await deps.tmuxRun(`display-message -p "#{pane_current_path}" -t ${name}`);
+      if (cwd?.trim()) dir = cwd.trim();
+    } catch {}
+
+    // Find SID: most recent JSONL in ~/.claude/projects/ modified in last 120 min
+    let sid = '';
+    const homeDir = process.env.USERPROFILE || os.homedir();
+    const projDir = path.join(homeDir, '.claude', 'projects');
+    const registeredSids = new Set(getRegisteredSessions().map(r => r.sid).filter(Boolean));
+    try {
+      const UUID_RE = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/;
+      const cutoff = Date.now() - 120 * 60_000;
+      for (const entry of fs.readdirSync(projDir)) {
+        const subdir = path.join(projDir, entry);
+        try {
+          for (const f of fs.readdirSync(subdir)) {
+            if (!f.endsWith('.jsonl')) continue;
+            const candidate = f.slice(0, -6);
+            if (!UUID_RE.test(candidate)) continue;
+            if (registeredSids.has(candidate)) continue;
+            const stat = fs.statSync(path.join(subdir, f));
+            if (stat.mtimeMs > cutoff) { sid = candidate; break; }
+          }
+        } catch {}
+        if (sid) break;
+      }
+    } catch {}
+
+    // Model: strategic=opus, default=sonnet
+    const model = name === 'strategic' ? 'opus' : 'sonnet';
+    const ts = new Date().toISOString();
+    try { fs.appendFileSync(deps.SECRETARY_REGISTRY, `${name}|${model}|${dir}|${ts}|${sid}\n`, 'utf8'); added++; } catch {}
+    log_event('auto_register', { session: name, dir, sid: sid ? sid.slice(0, 8) : 'none' });
   }
   if (added) console.log(`[secretary] auto-registered ${added} sessions`);
 }
@@ -1118,6 +1271,31 @@ async function checkPromotionNudge(sessions) {
       log_event('promo_nudge', { trigger: 'docs_edit', today });
     }
   } catch {}
+}
+
+// ─────────────────────────────────────────────────────────
+// Phase 6: progress.md 생성 넛지 (#15 복원)
+// ─────────────────────────────────────────────────────────
+async function checkProgressNudge(sessions) {
+  const today = new Date().toISOString().slice(0, 10);
+  const registered = getRegisteredSessions();
+  for (const s of sessions) {
+    if (s.status === 'SESSION_DEAD' || s.status === 'AGENT_DEAD') continue;
+    const reg = registered.find(r => r.name === s.name);
+    if (!reg?.dir || reg.dir === 'unknown') continue;
+    const planExists = fs.existsSync(path.join(reg.dir, 'plan.md'));
+    const progressExists = fs.existsSync(path.join(reg.dir, 'progress.md'));
+    if (!planExists || progressExists) continue;
+    // 세션 30분+ (레지스트리 타임스탬프 기반, 없으면 스킵)
+    if (!reg.ts) continue;
+    try {
+      const created = new Date(reg.ts).getTime();
+      if (Date.now() - created < 30 * 60_000) continue;
+    } catch { continue; }
+    if (dedup(`progress_nudge_${s.name}_${today}`, 86_400_000)) continue;
+    await sendMessage(s.name, 'plan.md가 있는데 progress.md가 없어. 진행 추적용으로 만들어.');
+    log_event('progress_nudge', { session: s.name });
+  }
 }
 
 // ─────────────────────────────────────────────────────────
@@ -1195,8 +1373,14 @@ async function runCycle() {
     const report   = await buildReport();
     const sessions = report.sessions;
 
-    // Per-session: snapshot + stuck + context + memory
+    // Per-session: dead detection + snapshot + stuck + context
     for (const s of sessions) {
+      // DEAD/SESSION_DEAD → Telegram alert (dedup per session)
+      if ((s.status === 'SESSION_DEAD' || s.status === 'AGENT_DEAD') && !dedup(`dead_notify_${s.name}`, 30 * 60_000)) {
+        addCycleAlert(`${s.status.toLowerCase()}`, s.name);
+        log_event('session_dead', { session: s.name, status: s.status });
+      }
+      if (s.status === 'SESSION_DEAD') continue; // 사라진 세션은 다른 처리 불필요
       updateSnapshot(s.name, s.text);
       await checkStuck(s);
       await checkContextWarning(s);
@@ -1220,6 +1404,7 @@ async function runCycle() {
       await autoRegisterSessions();
       await checkWfCompletion(sessions);
       await checkPromotionNudge(sessions);
+      await checkProgressNudge(sessions);
       // Phase 6: Telegram aggregated alert (end of 60s cycle)
       await flushTelegramAgg(cycleCount);
       log_event('cycle_60s', { cycleCount, sessions: sessions.length });
@@ -1250,6 +1435,81 @@ async function runCycle() {
   }
 
   loopTimer = setTimeout(runCycle, 15_000);
+}
+
+// ─────────────────────────────────────────────────────────
+// Opus analyst session spawn (for Sonnet session error analysis)
+// ─────────────────────────────────────────────────────────
+const SPAWN_SCRIPT = path.join(__dirname, '.secretary', '.scripts', 'spawn-session.sh');
+const ANALYST_SESSION = 'opus-analyst';
+const ANALYST_ROLE_FILE = path.join(__dirname, '.harness', `${ANALYST_SESSION}-role.md`);
+
+async function spawnOpusAnalyst(targetSession, errKey, reg) {
+  // Write analysis task role file
+  const sid = reg?.sid || '';
+  const dir = reg?.dir || '';
+  const roleContent = [
+    '## Opus 분석 태스크',
+    '',
+    `타겟 세션: ${targetSession}`,
+    `에러: ${(errKey || '').slice(0, 500)}`,
+    `프로젝트 디렉토리: ${dir}`,
+    sid ? `JSONL SID: ${sid}` : '(JSONL 없음)',
+    '',
+    '### 실행 순서',
+    '1. 타겟 세션의 JSONL을 Read해서 최근 작업 맥락 파악 (뭘 하다가 에러났는지)',
+    sid ? `   경로: ~/.claude/projects/ 에서 ${sid}.jsonl 검색` : '   (JSONL 없으면 git log --oneline -10 으로 대체)',
+    `2. 프로젝트 디렉토리(${dir})에서 관련 소스 파일 Read → 에러 원인 특정`,
+    '3. 근본 원인 + 구체적 수정 방향을 정리해서 타겟 세션에 전달:',
+    `   Bash: psmux send-keys -t ${targetSession} "Read {결과파일경로}" Enter`,
+    '4. 전달 완료 후 /exit 로 종료',
+    '',
+    '### 결과 파일',
+    `Write 도구로 /tmp/opus-analysis-${targetSession}.txt 에 분석 결과 저장 후 Read 지시`,
+    '',
+    '### 제약',
+    '- 타겟 세션의 코드를 직접 수정하지 마. 분석+방향 제시만.',
+    '- 5분 이내 완료해.',
+  ].join('\n');
+
+  try {
+    fs.mkdirSync(path.dirname(ANALYST_ROLE_FILE), { recursive: true });
+    fs.writeFileSync(ANALYST_ROLE_FILE, roleContent, 'utf8');
+  } catch (e) {
+    console.error('[secretary] opus-analyst role write error:', e.message);
+    return;
+  }
+
+  // Spawn via spawn-session.sh (handles session creation, Claude launch, handshake, role injection)
+  const spawnCmd = `bash "${SPAWN_SCRIPT.replace(/\\/g, '/')}" ${ANALYST_SESSION}`;
+  exec(spawnCmd, { timeout: 120_000 }, (err) => {
+    if (err) {
+      console.error('[secretary] opus-analyst spawn error:', err.message);
+      // Spawn failed → Telegram fallback
+      deps.telegram.notify(`⚠️ Opus 분석 세션 스폰 실패: ${targetSession}\n${(errKey || '').slice(0, 200)}`, { parse_mode: 'Markdown' });
+    } else {
+      console.log(`[secretary] opus-analyst spawned for ${targetSession}`);
+      // Auto-kill after 6 minutes (safety net)
+      setTimeout(() => {
+        exec(`"${deps.PSMUX_BIN}" kill-session -t ${ANALYST_SESSION}`, () => {
+          console.log('[secretary] opus-analyst auto-killed (timeout)');
+        });
+      }, 6 * 60_000);
+    }
+  });
+}
+
+// ─────────────────────────────────────────────────────────
+// S-2 sliding window: 5-cycle error accumulation detection
+// ─────────────────────────────────────────────────────────
+const errWindowMap = new Map(); // key: sessionName → number[] (1=error, 0=clean, max 5)
+
+function updateErrWindow(sessionName, hasError) {
+  const win = errWindowMap.get(sessionName) || [];
+  win.push(hasError ? 1 : 0);
+  if (win.length > 5) win.shift();
+  errWindowMap.set(sessionName, win);
+  return win.reduce((a, b) => a + b, 0); // count of error cycles
 }
 
 // ─────────────────────────────────────────────────────────
