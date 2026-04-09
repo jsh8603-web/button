@@ -54,19 +54,19 @@ Imagen 4는 유료 계정 전용 (결제 수단 등록 필수). 무료 키 불�
 
 | 프로젝트 | 환경변수 | 계정 | 키 |
 |----------|---------|------|-----|
-| **Babyplace** | `GEMINI_API_KEY` | 와이프 무료 | `AIzaSyB_BNzE3KuPDF80vf5xGNuzazRq_26TvHg` |
-| | `GEMINI_FALLBACK_KEY` | 본인 무료 | `AIzaSyDZIy5ddIUkls9C5tUTc9gkLyFnprlnTFE` |
-| **VaultVoice** | `GEMINI_API_KEY` | 본인 무료 | `AIzaSyBeYVHqxzVEdr0jw-CaPmr1f2HX4fNKKf0` |
-| | `GEMINI_FALLBACK_KEY` | 와이프 무료 | `AIzaSyDZdzaE86QM7OcPPDO_Y8eeMeCUDw6NQRA` |
-| | `GEMINI_PRO_KEY` | 와이프 프로모션 | `AIzaSyAMv0PStxr9pECS4wrCkq2i9IHr4uDWATg` |
-| **Gemini CLI** | `GEMINI_API_KEY` | 본인 무료 | `AIzaSyCO8YhexKHpl0pjZY_x9vZ7DSyS8krDWGc` |
-| | `GEMINI_FALLBACK_KEY` | 와이프 무료 | `AIzaSyBlMxqNdmMiNx8lEKJVG8DzoKyWHf-N6s4` |
-| **리서치** | `GEMINI_RESEARCH_KEY` | 와이프 프로모션 | `AIzaSyClnOOC4TRZaaEvHbnfnDRZYIZJJrUXstg` |
-| | `GEMINI_RESEARCH_FREE_KEY` | 본인 무료 | `AIzaSyB3FFMimv4dURSddXM2leA01aAyBAWBAGk` |
-| **Slides-Grab** | `GEMINI_API_KEY` | 본인 무료 | `AIzaSyD5RI9yywIXUKArYLYNImzVI64jTRZmIaw` |
-| | `SLIDES_GEMINI_FREE_KEY` | 와이프 무료 | `AIzaSyBLdPul7EHGplHSxeR4bhJtHVQvJg-xJ4Y` |
-| | `SLIDES_GEMINI_PRO_KEY` | 와이프 프로모션 | `AIzaSyCyf4-hVH21EGIfSAd8bOQJH3LlgFI2if4` |
-| **GCP Gmail** | `GEMINI_API_KEY` | 본인 무료 | `AIzaSyBwbI3ckS0eGGfAjyp1kgmjtA5Rb-L4L3I` |
+| **Babyplace** | `GEMINI_API_KEY` | 와이프 무료 | (재발급 후 .env에 직접 설정) |
+| | `GEMINI_FALLBACK_KEY` | 본인 무료 | (재발급 후 .env에 직접 설정) |
+| **VaultVoice** | `GEMINI_API_KEY` | 본인 무료 | (재발급 후 .env에 직접 설정) |
+| | `GEMINI_FALLBACK_KEY` | 와이프 무료 | (재발급 후 .env에 직접 설정) |
+| | `GEMINI_PRO_KEY` | 와이프 프로모션 | (재발급 후 .env에 직접 설정) |
+| **Gemini CLI** | `GEMINI_API_KEY` | 본인 무료 | (재발급 후 .env에 직접 설정) |
+| | `GEMINI_FALLBACK_KEY` | 와이프 무료 | (재발급 후 .env에 직접 설정) |
+| **리서치** | `GEMINI_RESEARCH_KEY` | 와이프 프로모션 | (재발급 후 .env에 직접 설정) |
+| | `GEMINI_RESEARCH_FREE_KEY` | 본인 무료 | (재발급 후 .env에 직접 설정) |
+| **Slides-Grab** | `GEMINI_API_KEY` | 본인 무료 | (재발급 후 .env에 직접 설정) |
+| | `SLIDES_GEMINI_FREE_KEY` | 와이프 무료 | (재발급 후 .env에 직접 설정) |
+| | `SLIDES_GEMINI_PRO_KEY` | 와이프 프로모션 | (재발급 후 .env에 직접 설정) |
+| **GCP Gmail** | `GEMINI_API_KEY` | 본인 무료 | (재발급 후 .env에 직접 설정) |
 
 ## 6. 모델 변경 요약
 
